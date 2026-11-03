@@ -1,0 +1,14 @@
+[package]
+name = "vidr-remaster"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Remaster video on the GPU: AI restoration, upscaling, scaling, and encoding in one pass"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/vidr"
+readme = "../../README.md"
+keywords = ["video", "upscaling", "super-resolution", "restoration"]
+categories = ["multimedia::video", "command-line-utilities"]
+
+[dependencies]
+vidr = { path = "../vidr", version = "0.1.0" }

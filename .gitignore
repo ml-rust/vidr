@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+/target-*/
+
+# Local cargo overrides
+.cargo/*
+!.cargo/config.toml.example
+
+# Agent session state
+.claude/
+
+# Reference materials, not committed.
+research/
+
+# Model weights load from model directories at run time.
+*.pth
+*.onnx
+*.engine
+*.safetensors
+*.gguf
+
+# Media inputs, outputs and run reports
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.y4m
+*.yuv
+results/

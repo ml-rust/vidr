@@ -1,0 +1,12 @@
+# Local build overrides. Copy to `.cargo/config.toml`, which is gitignored.
+#
+# vidr depends on sibling crates by path. Without this patch cargo resolves
+# them from crates.io and the build fails on APIs the published versions lack.
+[patch.crates-io]
+numr = { path = "../numr" }
+boostr = { path = "../boostr" }
+
+# Model and media fixtures live outside the repo. Tests that need a real
+# model skip loudly when this is unset.
+[env]
+BOOSTR_MODELS_DIR = "/path/to/models"
