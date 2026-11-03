@@ -10,4 +10,11 @@ readme = "../../README.md"
 keywords = ["video", "codec", "gpu", "nvenc", "vulkan"]
 categories = ["multimedia::video", "multimedia::encoding"]
 
+[features]
+default = []
+# Bitstream filters and config records for each codec. No dependencies.
+h264 = []
+hevc = []
+av1 = []
+
 [dependencies]

@@ -46,7 +46,7 @@ decode (hardware or software) → filters and models on the GPU → encode → m
 
 ## Status
 
-In development. No release exists yet. The frame timing model and output checks work today. Nothing in [Scope](#scope) works yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table.
+In development. No release exists yet. The frame timing model, output checks, and the H.264, HEVC, and AV1 bitstream filters work today. Nothing in [Scope](#scope) works yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table.
 
 ## Crates
 

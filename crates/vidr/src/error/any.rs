@@ -3,6 +3,8 @@
 use std::error::Error as StdError;
 use std::fmt;
 
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+use super::BitstreamError;
 use super::{EditListError, GeometryError, TimeError, TimingError};
 use crate::check::CheckError;
 
@@ -19,6 +21,9 @@ pub enum Error {
     Geometry(GeometryError),
     /// Output checks.
     Check(CheckError),
+    /// Bitstream filters and codec config records.
+    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+    Bitstream(BitstreamError),
 }
 
 impl fmt::Display for Error {
@@ -29,6 +34,8 @@ impl fmt::Display for Error {
             Self::EditList(error) => fmt::Display::fmt(error, f),
             Self::Geometry(error) => fmt::Display::fmt(error, f),
             Self::Check(error) => fmt::Display::fmt(error, f),
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            Self::Bitstream(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -41,6 +48,8 @@ impl StdError for Error {
             Self::EditList(error) => Some(error),
             Self::Geometry(error) => Some(error),
             Self::Check(error) => Some(error),
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            Self::Bitstream(error) => Some(error),
         }
     }
 }
@@ -72,6 +81,13 @@ impl From<GeometryError> for Error {
 impl From<CheckError> for Error {
     fn from(error: CheckError) -> Self {
         Self::Check(error)
+    }
+}
+
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+impl From<BitstreamError> for Error {
+    fn from(error: BitstreamError) -> Self {
+        Self::Bitstream(error)
     }
 }
 

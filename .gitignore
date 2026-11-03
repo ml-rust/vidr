@@ -27,3 +27,6 @@ research/
 *.y4m
 *.yuv
 results/
+
+# Generated bitstream fixtures (crates/vidr/tests/fixtures/gen_bitstream.py)
+crates/vidr/tests/fixtures/bitstream/

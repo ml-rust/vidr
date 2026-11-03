@@ -34,6 +34,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | --- | --- |
 | Workspace, CI, release workflows | Implemented |
 | Frame timing model and output checks | Implemented |
+| Bitstream filters (`h264`, `hevc`, `av1`): length-prefixed and Annex-B NAL units, OBU framing, `avcC` / `hvcC` / `av1C` parse and write, MP4 samples to NVDEC input, NVENC output to MP4 samples | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.
