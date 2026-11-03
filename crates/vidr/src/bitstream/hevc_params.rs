@@ -77,7 +77,7 @@ fn invalid(
 }
 
 /// Checks the 2-byte NAL unit header and returns the RBSP after it.
-fn payload(
+pub(super) fn payload(
     nal: &[u8],
     kind: HevcNalType,
     structure: &'static str,

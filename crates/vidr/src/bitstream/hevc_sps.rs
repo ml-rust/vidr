@@ -2,8 +2,11 @@
 //! `nuh_layer_id` 0, read up to the end of `vui_parameters()`.
 
 use super::bits::BitReader;
+use super::hevc_params;
 use super::hevc_ptl::{self, GeneralPtl};
 use super::hevc_vui;
+use super::nal::HevcNalType;
+use super::vui::VuiSignal;
 use crate::error::BitstreamError;
 
 pub(crate) const STRUCTURE: &str = "HEVC SPS";
@@ -19,6 +22,8 @@ pub(crate) struct SpsFields {
     pub(crate) bit_depth_chroma_minus8: u32,
     /// `None` without `bitstream_restriction_flag`.
     pub(crate) min_spatial_segmentation_idc: Option<u32>,
+    /// The VUI colour fields. Empty without `vui_parameters_present_flag`.
+    pub(crate) signal: VuiSignal,
 }
 
 fn invalid(field: &'static str, value: u64, allowed: &'static str) -> BitstreamError {
@@ -126,10 +131,11 @@ pub(crate) fn parse(rbsp: &[u8]) -> Result<SpsFields, BitstreamError> {
         }
     }
     reader.skip(2, "strong_intra_smoothing_enabled_flag")?;
-    let min_spatial_segmentation_idc = if reader.bit("vui_parameters_present_flag")? {
-        hevc_vui::parse(&mut reader, max_sub_layers_minus1)?
+    let (min_spatial_segmentation_idc, signal) = if reader.bit("vui_parameters_present_flag")? {
+        let vui = hevc_vui::parse(&mut reader, max_sub_layers_minus1)?;
+        (vui.min_spatial_segmentation_idc, vui.signal)
     } else {
-        None
+        (None, VuiSignal::default())
     };
     Ok(SpsFields {
         max_sub_layers_minus1,
@@ -139,7 +145,22 @@ pub(crate) fn parse(rbsp: &[u8]) -> Result<SpsFields, BitstreamError> {
         bit_depth_luma_minus8,
         bit_depth_chroma_minus8,
         min_spatial_segmentation_idc,
+        signal,
     })
+}
+
+/// Reads the VUI colour fields of an SPS NAL unit, 2-byte header included.
+///
+/// An SPS without `vui_parameters_present_flag` gives an empty
+/// [`VuiSignal`]. The whole SPS up to the end of the VUI must parse.
+///
+/// # Errors
+///
+/// [`BitstreamError`] for a NAL unit that is not an SPS of `nuh_layer_id` 0,
+/// an SPS that ends early, or a field out of range.
+pub fn hevc_sps_vui(nal: &[u8]) -> Result<VuiSignal, BitstreamError> {
+    let rbsp = hevc_params::payload(nal, HevcNalType::SPS, STRUCTURE)?;
+    Ok(parse(&rbsp)?.signal)
 }
 
 /// Reads `scaling_list_data()` (7.3.4).
@@ -208,6 +229,7 @@ fn skip_short_term_ref_pic_sets(reader: &mut BitReader<'_>) -> Result<(), Bitstr
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::vui::{ChromaSampleLoc, pack_bits};
     use super::*;
     use crate::bitstream::rbsp::unescape;
 
@@ -232,6 +254,115 @@ pub(crate) mod tests {
         assert_eq!(fields.chroma_format_idc, 1);
         assert_eq!(fields.bit_depth_luma_minus8, 0);
         assert_eq!(fields.min_spatial_segmentation_idc, None);
+    }
+
+    /// A 1x1 Main profile SPS NAL unit whose bits after
+    /// `vui_parameters_present_flag` are `vui`.
+    fn sps_with(vui: &str) -> Vec<u8> {
+        let zeros = "0".repeat(80);
+        let ptl = ["00000001", zeros.as_str(), "00011110"].concat();
+        let bits = [
+            // vps id, max_sub_layers_minus1, temporal_id_nesting.
+            "0000",
+            "000",
+            "1",
+            ptl.as_str(),
+            // sps id, chroma_format_idc 1, width, height, conformance window.
+            "1",
+            "010",
+            "1",
+            "1",
+            "0",
+            // bit depths, poc lsb, sub_layer_ordering_info_present_flag and
+            // its three fields, six coding block fields.
+            "1",
+            "1",
+            "1",
+            "1",
+            "111",
+            "111111",
+            // scaling list, amp, sao, pcm, one empty short-term set, no
+            // long-term pictures, temporal mvp, strong intra smoothing.
+            "0",
+            "0",
+            "0",
+            "0",
+            "1",
+            "0",
+            "0",
+            "0",
+            vui,
+        ]
+        .concat();
+        let mut nal = vec![0x42, 0x01];
+        nal.extend(pack_bits(&bits));
+        nal
+    }
+
+    /// The VUI tail after the chroma location: three flags, display window,
+    /// timing, and bitstream restriction.
+    const VUI_TAIL: &str = "000000";
+
+    #[test]
+    fn each_vui_flag_state_gives_its_signal() {
+        let loc = |top_field, bottom_field| {
+            Some(ChromaSampleLoc {
+                top_field,
+                bottom_field,
+            })
+        };
+        // No VUI.
+        assert_eq!(hevc_sps_vui(&sps_with("0")), Ok(VuiSignal::default()));
+        // VUI with every presence flag 0.
+        let none = ["1", "0", "0", "0", "0", VUI_TAIL].concat();
+        assert_eq!(hevc_sps_vui(&sps_with(&none)), Ok(VuiSignal::default()));
+        // Chroma location only: top `010` (1), bottom `011` (2).
+        let chroma = ["1", "0", "0", "0", "1", "010", "011", VUI_TAIL].concat();
+        assert_eq!(
+            hevc_sps_vui(&sps_with(&chroma)).map(|v| v.chroma_sample_loc),
+            Ok(loc(1, 2))
+        );
+        // Signal type and chroma location type 0: top `1`, bottom `1`.
+        let both = [
+            "1", "0", "0", "1", "101", "0", "1", "00000001", "00000001", "00000001", "1", "1", "1",
+            VUI_TAIL,
+        ]
+        .concat();
+        let signal = hevc_sps_vui(&sps_with(&both)).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(signal.chroma_sample_loc, loc(0, 0));
+        assert_eq!(
+            signal
+                .video_signal_type
+                .map(|t| (t.full_range, t.colour.is_some())),
+            Some((false, true))
+        );
+    }
+
+    #[test]
+    fn truncated_vui_is_the_bitstream_error() {
+        // Chroma location flag set, bottom field missing.
+        let nal = sps_with("10001010");
+        assert!(matches!(
+            hevc_sps_vui(&nal),
+            Err(BitstreamError::Truncated { .. })
+        ));
+        for end in 0..nal.len() {
+            // It must never panic.
+            let _ = hevc_sps_vui(&nal[..end]);
+        }
+    }
+
+    #[test]
+    fn x265_sps_parses_to_a_signal() {
+        assert!(hevc_sps_vui(&X265_SPS).is_ok());
+    }
+
+    #[test]
+    fn wrong_nal_type_is_an_error() {
+        let mut pps = X265_SPS;
+        pps[0] = 0x44;
+        assert!(hevc_sps_vui(&pps).is_err());
+        assert!(hevc_sps_vui(&[]).is_err());
     }
 
     #[test]

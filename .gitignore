@@ -30,3 +30,6 @@ results/
 
 # Generated bitstream fixtures (crates/vidr/tests/fixtures/gen_bitstream.py)
 crates/vidr/tests/fixtures/bitstream/
+
+# Generated NVDEC fixtures (crates/vidr/tests/fixtures/gen_nvdec.py)
+crates/vidr/tests/fixtures/nvdec/

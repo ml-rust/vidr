@@ -23,8 +23,8 @@ fn directory() -> PathBuf {
 }
 
 /// Splits the `NAME.samples` framing: a 4-byte big-endian size before each
-/// sample.
-fn unframe(bytes: &[u8]) -> Vec<Vec<u8>> {
+/// sample. `tests/nvdec/` reads the same framing.
+pub(crate) fn unframe(bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut samples = Vec::new();
     let mut rest = bytes;
     while rest.len() >= 4 {

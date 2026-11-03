@@ -6,7 +6,7 @@ use super::nal::H264NalType;
 use super::rbsp::unescape;
 use crate::error::BitstreamError;
 
-const STRUCTURE: &str = "H.264 SPS";
+pub(super) const STRUCTURE: &str = "H.264 SPS";
 
 /// Profiles whose SPS carries `chroma_format_idc` and the bit depths.
 const CHROMA_PROFILES: [u8; 13] = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135];
@@ -29,6 +29,18 @@ pub(crate) struct SpsSummary {
 /// Profiles without chroma fields take the defaults ITU-T H.264 infers:
 /// 4:2:0 and 8 bits.
 pub(crate) fn parse(nal: &[u8]) -> Result<SpsSummary, BitstreamError> {
+    let payload = payload(nal)?;
+    read_leading(&mut BitReader::new(&payload, STRUCTURE))
+}
+
+/// True when an SPS of this profile carries `chroma_format_idc` and the
+/// bit depths.
+pub(super) fn has_chroma_fields(profile_idc: u8) -> bool {
+    CHROMA_PROFILES.contains(&profile_idc)
+}
+
+/// Checks the NAL unit header and returns the RBSP after it.
+pub(super) fn payload(nal: &[u8]) -> Result<Vec<u8>, BitstreamError> {
     let header = nal.first().copied().ok_or(BitstreamError::Truncated {
         structure: STRUCTURE,
         field: "nal_unit_type",
@@ -43,8 +55,12 @@ pub(crate) fn parse(nal: &[u8]) -> Result<SpsSummary, BitstreamError> {
             allowed: "7 (SPS)",
         });
     }
-    let payload = unescape(&nal[1..]);
-    let mut reader = BitReader::new(&payload, STRUCTURE);
+    Ok(unescape(&nal[1..]))
+}
+
+/// Reads the fields up to and including the bit depths, and leaves `reader`
+/// after them.
+pub(super) fn read_leading(reader: &mut BitReader<'_>) -> Result<SpsSummary, BitstreamError> {
     let profile_idc = reader.u8(8, "profile_idc")?;
     let constraint_flags = reader.u8(8, "constraint_set_flags")?;
     let level_idc = reader.u8(8, "level_idc")?;
@@ -58,7 +74,7 @@ pub(crate) fn parse(nal: &[u8]) -> Result<SpsSummary, BitstreamError> {
         bit_depth_luma_minus8: 0,
         bit_depth_chroma_minus8: 0,
     };
-    if CHROMA_PROFILES.contains(&profile_idc) {
+    if has_chroma_fields(profile_idc) {
         summary.chroma_format_idc = bounded(
             reader.ue("chroma_format_idc")?,
             3,

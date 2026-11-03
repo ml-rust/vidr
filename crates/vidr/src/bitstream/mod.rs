@@ -39,6 +39,8 @@ mod to_annexb_hevc;
 mod avcc;
 #[cfg(feature = "h264")]
 mod h264_sps;
+#[cfg(feature = "h264")]
+mod h264_vui;
 
 #[cfg(feature = "hevc")]
 mod hevc_params;
@@ -53,6 +55,9 @@ mod hvcc;
 #[cfg(feature = "hevc")]
 mod hvcc_build;
 
+#[cfg(any(feature = "h264", feature = "hevc"))]
+mod vui;
+
 #[cfg(feature = "av1")]
 pub mod av1;
 
@@ -62,6 +67,10 @@ pub use annexb::StartCode;
 pub use avcc::{AvcConfig, AvcHighProfile, avcc_has_extension};
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use from_annexb::{FromAnnexB, NalCodec, NalConfig};
+#[cfg(feature = "h264")]
+pub use h264_vui::h264_sps_vui;
+#[cfg(feature = "hevc")]
+pub use hevc_sps::hevc_sps_vui;
 #[cfg(feature = "hevc")]
 pub use hvcc::{HevcConfig, HvccArray};
 #[cfg(any(feature = "h264", feature = "hevc"))]
@@ -74,3 +83,5 @@ pub use nal::HevcNalType;
 pub use nal::ParameterSetKind;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use to_annexb::ToAnnexB;
+#[cfg(any(feature = "h264", feature = "hevc"))]
+pub use vui::{ChromaSampleLoc, ColourDescription, VideoSignalType, VuiSignal};

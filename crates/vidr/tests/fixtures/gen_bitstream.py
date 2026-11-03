@@ -18,6 +18,7 @@ For each stream NAME the script writes:
   AV1 it is the output of ffmpeg's `obu` muxer, which inserts temporal
   delimiters.
 - `NAME.config`: the `avcC`, `hvcC` or `av1C` box payload from `NAME.mp4`.
+  `gen_nvdec.py` also reads `vpcC` through `extract`.
 - `NAME.samples`: every sample of the video track, in decode order, each as
   a 4-byte big-endian size and then the sample bytes.
 
@@ -111,9 +112,9 @@ def config_record(data, stbl):
     entry = next(boxes(data, stsd[0] + 8, stsd[1]))
     # SampleEntry (8) and VisualSampleEntry (70) fields precede the children.
     for name, body, stop in boxes(data, entry[1] + 78, entry[2]):
-        if name in ("avcC", "hvcC", "av1C"):
+        if name in ("avcC", "hvcC", "av1C", "vpcC"):
             return data[body:stop]
-    sys.exit(f"sample entry {entry[0]!r} has no avcC, hvcC or av1C box")
+    sys.exit(f"sample entry {entry[0]!r} has no avcC, hvcC, av1C or vpcC box")
 
 
 def samples(data, stbl):

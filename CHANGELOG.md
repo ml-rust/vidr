@@ -15,4 +15,8 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `FromAnnexB` turns NVENC Annex-B access units into samples, and builds `avcC` or `hvcC` from the first access unit.
   - `Av1ToDecoder` and `Av1FromEncoder` convert AV1 samples and temporal units, and build `av1C`.
   - `AvcConfig`, `HevcConfig`, and `Av1Config` parse and write the config records. The `annexb`, `length_prefixed`, and `av1::obu` modules split and join NAL units and OBUs.
+- `vidr`: NVDEC hardware decode behind the `nvdec` feature, and the backend-neutral `Decoder` trait and `DecodedFrame` behind `decode`.
+  - `NvdecDecoder` decodes H.264, HEVC, AV1, and VP9, 4:2:0 at 8 or 10 bits, on numr's CUDA context and stream. `libnvcuvid.so.1` loads at run time.
+  - `DecodedFrame` holds dense NV12 or P010 planes as numr tensors, the pts, the display size, and the colour facts. The planes go straight to `ColorOps::yuv_to_rgb`.
+  - `ColorFacts::chroma_location` comes from `av1C` for AV1 and from the SPS VUI for H.264 and HEVC, through `h264_sps_vui` and `hevc_sps_vui`. numr models the horizontal siting only, so the vertical offset of H.273 types 2 to 5 is kept in `ChromaLocation` and not applied.
 - `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.

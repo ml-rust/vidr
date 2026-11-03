@@ -16,5 +16,32 @@ default = []
 h264 = []
 hevc = []
 av1 = []
+# Backend-neutral decode API: the `Decoder` trait and `DecodedFrame`, over
+# numr tensors. Builds on any numr backend.
+decode = ["dep:numr"]
+# NVDEC hardware decode on numr's CUDA context and stream. Loads
+# `libnvcuvid.so.1` at run time, so the build links no NVIDIA library. numr's
+# CUDA backend needs nvcc at build time.
+nvdec = [
+  "decode",
+  "h264",
+  "hevc",
+  "av1",
+  "numr/cuda",
+  "dep:cudarc",
+  "dep:libloading",
+]
+# Every CUDA path.
+cuda = ["nvdec"]
 
 [dependencies]
+numr = { version = "0.15", optional = true }
+# Driver API only, the same version and features numr enables, so one copy
+# links. vidr calls `cuMemcpy2DAsync` and stream events on numr's stream.
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
+  "std",
+  "driver",
+  "fallback-dynamic-loading",
+  "cuda-version-from-build-system",
+] }
+libloading = { version = "0.9", optional = true }

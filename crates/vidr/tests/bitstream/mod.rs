@@ -5,7 +5,7 @@
 mod av1;
 #[cfg(feature = "h264")]
 mod avcc;
-mod fixtures;
+pub(crate) mod fixtures;
 #[cfg(feature = "h264")]
 mod h264;
 #[cfg(feature = "hevc")]

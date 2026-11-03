@@ -69,7 +69,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Skips `count` bits.
-    #[cfg(any(feature = "hevc", feature = "av1"))]
+    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
     pub(crate) fn skip(&mut self, count: u64, field: &'static str) -> Result<(), BitstreamError> {
         if count > self.bits_left() {
             return Err(self.truncated(field));
@@ -101,7 +101,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Reads a signed Exp-Golomb code, `se(v)` in H.264 and HEVC.
-    #[cfg(feature = "hevc")]
+    #[cfg(any(feature = "h264", feature = "hevc"))]
     pub(crate) fn se(&mut self, field: &'static str) -> Result<i64, BitstreamError> {
         let code = i64::from(self.ue(field)?);
         Ok(if code % 2 == 1 {

@@ -1,32 +1,27 @@
 //! HEVC `vui_parameters()` (ITU-T H.265 E.2.1) and `hrd_parameters()`
-//! (E.2.2), read up to `min_spatial_segmentation_idc`.
+//! (E.2.2), read up to `min_spatial_segmentation_idc`. The colour fields
+//! come from [`vui::read_signal`].
 
 use super::bits::BitReader;
 use super::hevc_sps::STRUCTURE;
+use super::vui::{self, VuiSignal};
 use crate::error::BitstreamError;
 
-/// Reads `vui_parameters()` and returns `min_spatial_segmentation_idc`, or
-/// `None` when `bitstream_restriction_flag` is 0.
+/// The fields of `vui_parameters()` that vidr keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Vui {
+    /// The colour fields.
+    pub(crate) signal: VuiSignal,
+    /// `None` without `bitstream_restriction_flag`.
+    pub(crate) min_spatial_segmentation_idc: Option<u32>,
+}
+
+/// Reads `vui_parameters()`.
 pub(crate) fn parse(
     reader: &mut BitReader<'_>,
     max_sub_layers_minus1: u8,
-) -> Result<Option<u32>, BitstreamError> {
-    if reader.bit("aspect_ratio_info_present_flag")? && reader.u8(8, "aspect_ratio_idc")? == 255 {
-        reader.skip(32, "sar_width")?;
-    }
-    if reader.bit("overscan_info_present_flag")? {
-        reader.skip(1, "overscan_appropriate_flag")?;
-    }
-    if reader.bit("video_signal_type_present_flag")? {
-        reader.skip(4, "video_format")?;
-        if reader.bit("colour_description_present_flag")? {
-            reader.skip(24, "colour_primaries")?;
-        }
-    }
-    if reader.bit("chroma_loc_info_present_flag")? {
-        reader.ue("chroma_sample_loc_type_top_field")?;
-        reader.ue("chroma_sample_loc_type_bottom_field")?;
-    }
+) -> Result<Vui, BitstreamError> {
+    let signal = vui::read_signal(reader, STRUCTURE)?;
     reader.skip(3, "frame_field_info_present_flag")?;
     if reader.bit("default_display_window_flag")? {
         for field in [
@@ -47,11 +42,16 @@ pub(crate) fn parse(
             skip_hrd_parameters(reader, max_sub_layers_minus1)?;
         }
     }
-    if !reader.bit("bitstream_restriction_flag")? {
-        return Ok(None);
-    }
-    reader.skip(3, "restricted_ref_pic_lists_flag")?;
-    Ok(Some(reader.ue("min_spatial_segmentation_idc")?))
+    let min_spatial_segmentation_idc = if reader.bit("bitstream_restriction_flag")? {
+        reader.skip(3, "restricted_ref_pic_lists_flag")?;
+        Some(reader.ue("min_spatial_segmentation_idc")?)
+    } else {
+        None
+    };
+    Ok(Vui {
+        signal,
+        min_spatial_segmentation_idc,
+    })
 }
 
 /// Reads `hrd_parameters(1, max_sub_layers_minus1)`.
@@ -123,13 +123,20 @@ fn skip_sub_layer_hrd(
 
 #[cfg(test)]
 mod tests {
+    use super::super::vui::{ChromaSampleLoc, pack_bits};
     use super::*;
 
     #[test]
     fn empty_vui_has_no_restriction() {
         // Eleven zero flags.
         let mut reader = BitReader::new(&[0, 0], "test");
-        assert_eq!(parse(&mut reader, 0), Ok(None));
+        assert_eq!(
+            parse(&mut reader, 0),
+            Ok(Vui {
+                signal: VuiSignal::default(),
+                min_spatial_segmentation_idc: None,
+            })
+        );
     }
 
     #[test]
@@ -151,14 +158,29 @@ mod tests {
             + "110"
             + "1000"
             + "00100";
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (i, bit) in bits.bytes().enumerate() {
-            if bit == b'1' {
-                bytes[i / 8] |= 0x80 >> (i % 8);
-            }
-        }
+        let bytes = pack_bits(&bits);
         let mut reader = BitReader::new(&bytes, "test");
-        assert_eq!(parse(&mut reader, 0), Ok(Some(3)));
+        assert_eq!(
+            parse(&mut reader, 0).map(|vui| vui.min_spatial_segmentation_idc),
+            Ok(Some(3))
+        );
+    }
+
+    #[test]
+    fn chroma_location_precedes_the_rest() {
+        // aspect 0, overscan 0, signal 0, chroma loc 1, top `010` (1),
+        // bottom `1` (0), 3 flags 000, window 0, timing 0, restriction 0.
+        let bytes = pack_bits(concat!("000", "1", "010", "1", "000", "0", "0", "0"));
+        let mut reader = BitReader::new(&bytes, "test");
+        let vui = parse(&mut reader, 0).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            vui.signal.chroma_sample_loc,
+            Some(ChromaSampleLoc {
+                top_field: 1,
+                bottom_field: 0,
+            })
+        );
+        assert_eq!(vui.min_spatial_segmentation_idc, None);
     }
 
     #[test]

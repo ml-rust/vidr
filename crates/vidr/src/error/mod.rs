@@ -5,6 +5,8 @@
 mod any;
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 mod bitstream;
+#[cfg(feature = "decode")]
+mod decode;
 mod geometry;
 mod support;
 mod time;
@@ -13,6 +15,8 @@ mod timing;
 pub use any::Error;
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 pub use bitstream::BitstreamError;
+#[cfg(feature = "decode")]
+pub use decode::DecodeError;
 pub use geometry::GeometryError;
 pub use time::{Operation, TimeError};
 pub use timing::{EditListError, TimingError};
