@@ -7,10 +7,10 @@ The PoC model set (Real-ESRGAN, PureVision) is the first use case, NOT the scope
 
 - `numr`: kernels. Conv, resize, colour conversion, pixel shuffle, activations.
 - `boostr`: model networks, tensor-only, one feature gate per architecture.
-- `crates/vidr`: video codecs, hardware decode and encode, frame timing, colour, filter graph.
-- `crates/vidr-remaster`: CLI, model selection, resolution, provenance, output checks.
+- `crates/vidr`: video codecs, hardware decode and encode, frame timing, output checks, colour, filter graph.
+- `crates/vidr-remaster`: CLI, model selection, resolution, provenance. It calls the vidr output checks.
 - voxr: audio codecs and audio processing. NEVER add audio decoding to vidr.
-- Containers carry audio and video, so vidr and voxr share them. NEVER write a container parser that duplicates one the other crate already has.
+- containr: MP4/MOV and MKV/WebM demux, mux and edit lists, shared with voxr. NEVER parse or write a container in this repo.
 - NEVER put a kernel or a model network in this repo. Add it upstream, then depend on it.
 
 ## Invariants
@@ -33,6 +33,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Capability | Status |
 | --- | --- |
 | Workspace, CI, release workflows | Implemented |
+| Frame timing model and output checks | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.
