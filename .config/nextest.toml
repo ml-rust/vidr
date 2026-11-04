@@ -6,3 +6,7 @@ nvenc = { max-threads = 4 }
 [[profile.default.overrides]]
 filter = 'binary(api) & (test(nvenc::) | test(encode_loop))'
 test-group = 'nvenc'
+
+[[profile.default.overrides]]
+filter = 'package(vidr-remaster) & binary(e2e)'
+test-group = 'nvenc'
