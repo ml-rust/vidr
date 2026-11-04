@@ -37,6 +37,16 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `frame::from_rgb` converts even-size float RGB to `OutputPlanes`, and `EncodeFrame::from(&planes)` borrows them for an encoder. An odd size returns `FrameError::OddRgbSize`.
   - `Error::Frame` holds the new `FrameError`. `DecodedFrame::from_planes` builds a frame from planes outside a decoder. `PixelFormat::sample_dtype` names a format's numr dtype.
   - The feature enables `numr/f16`, which F16 RGB needs on the CPU backend.
+- `vidr`: colour policy in `color`, behind `decode`.
+  - `check_sdr` refuses transfer 16 or 18, matrix 9 or 10, and primaries 9, and names the code. Transfers 14 and 15 alone pass.
+  - `color_plan` runs `check_sdr`, then returns one `YuvSpec` for decode and encode, and the output tags. An unspecified matrix converts as BT.601 and stays untagged. A matrix outside BT.709, the BT.601 variants, FCC, SMPTE 240M, and unspecified returns `ColorError::UnsupportedMatrix`. The chroma location passes through.
+  - `merge_container`, behind `mp4` or `mkv`, fills unspecified bitstream fields from the container. A specified bitstream value wins, which matches ffprobe's frame fields and differs from its stream fields. `full_range` takes full from either side, because the flag has no unspecified state.
+- `vidr`: media input over containr in `media`, behind the `mp4` and `mkv` features. Neither needs a GPU.
+  - `Input::open` picks the container from the file bytes, never the extension. Unknown bytes return `MediaError::UnknownFormat`, and fragmented MP4 returns `MediaError::Fragmented` with containr's message.
+  - `video_track` returns the first video track in file order, whichever track holds the default flag.
+  - `edit_timeline` converts the raw edit list with the movie timescale. `rotation` reads the display matrix or `ProjectionPoseRoll`, and refuses a mirror, another angle, yaw, pitch, or a roll on a spherical projection. `sample_aspect_ratio` and `colour` return what the container states.
+  - `decode_config` returns the codec and config record `NvdecDecoder::new` takes. It refuses a Matroska `ContentEncoding`, more than one MP4 sample description, and a missing config record.
+- `vidr`: `SampleAspectRatio::from_fraction`, which reduces wide parts. `Error::Color` and `Error::Media` hold the new `ColorError` and `MediaError`.
 - `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.
 - `vidr`: the `vp9` feature, which `nvdec` enables. `vp9_color` reads `color_space` and `color_range` from one VP9 frame header, and `vp9_packet_color` reads every frame of a chunk, superframes included. `Vp9Color` holds the values and the bit depth.
 

@@ -38,6 +38,8 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | NVDEC hardware decode (`nvdec`): H.264, HEVC, AV1, VP9, 4:2:0 at 8 or 10 bits, into numr CUDA tensors on numr's stream | Implemented |
 | NVENC hardware encode (`nvenc`): H.264, HEVC, AV1, NV12 and P010, from numr CUDA tensors on numr's stream, to MP4 samples and config records. AV1 runs on GPUs that list it, and no test covers it on the development GPU | Implemented |
 | Frame conversion (`frame`): NV12 and P010 to F32 or F16 RGB at any display size, even-size RGB back to planes, without leaving the device | Implemented |
+| Colour policy (`decode`, `merge_container` behind `mp4` or `mkv`): container fill of bitstream colour, SDR check, conversion plan with output tags | Implemented |
+| Media input (`mp4`, `mkv`): open by file bytes through containr, first video track, edit timeline, rotation, container sample aspect ratio, colour tags, decoder config | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.

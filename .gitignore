@@ -33,3 +33,6 @@ crates/vidr/tests/fixtures/bitstream/
 
 # Generated NVDEC fixtures (crates/vidr/tests/fixtures/gen_nvdec.py)
 crates/vidr/tests/fixtures/nvdec/
+
+# Generated media input fixtures (crates/vidr/tests/fixtures/gen_media.py)
+crates/vidr/tests/fixtures/media/

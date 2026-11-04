@@ -53,11 +53,18 @@ nvenc = [
 # Conversion between NV12 or P010 planes and float RGB, on any numr backend with
 # colour kernels. `numr/f16` gives the CPU backend F16 RGB.
 frame = ["decode", "encode", "numr/f16"]
+# MP4 and QuickTime MOV input through containr, the decoder's codec names
+# included. Needs no GPU.
+mp4 = ["decode", "dep:containr", "containr/mp4"]
+# Matroska and WebM input through containr, the decoder's codec names included.
+# Needs no GPU.
+mkv = ["decode", "dep:containr", "containr/mkv"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
+containr = { version = "0.1", optional = true }
 # Driver API only, the same version and features numr enables, so one copy
 # links. vidr calls `cuMemcpy2DAsync` and stream events on numr's stream, and
 # `cuMemAlloc` for NVENC input surfaces.

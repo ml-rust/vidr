@@ -5,6 +5,7 @@
 [patch.crates-io]
 numr = { path = "../numr" }
 boostr = { path = "../boostr" }
+containr = { path = "../containr" }
 
 # Model and media fixtures live outside the repo. Tests that need a real
 # model skip loudly when this is unset.

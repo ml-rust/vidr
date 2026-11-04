@@ -6,11 +6,15 @@ use std::fmt;
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 use super::BitstreamError;
 #[cfg(feature = "decode")]
+use super::ColorError;
+#[cfg(feature = "decode")]
 use super::DecodeError;
 #[cfg(feature = "encode")]
 use super::EncodeError;
 #[cfg(feature = "frame")]
 use super::FrameError;
+#[cfg(any(feature = "mp4", feature = "mkv"))]
+use super::MediaError;
 use super::{EditListError, GeometryError, TimeError, TimingError};
 use crate::check::CheckError;
 
@@ -39,6 +43,12 @@ pub enum Error {
     /// Frame conversion.
     #[cfg(feature = "frame")]
     Frame(FrameError),
+    /// Colour policy.
+    #[cfg(feature = "decode")]
+    Color(ColorError),
+    /// Media input.
+    #[cfg(any(feature = "mp4", feature = "mkv"))]
+    Media(MediaError),
 }
 
 impl fmt::Display for Error {
@@ -57,6 +67,10 @@ impl fmt::Display for Error {
             Self::Encode(error) => fmt::Display::fmt(error, f),
             #[cfg(feature = "frame")]
             Self::Frame(error) => fmt::Display::fmt(error, f),
+            #[cfg(feature = "decode")]
+            Self::Color(error) => fmt::Display::fmt(error, f),
+            #[cfg(any(feature = "mp4", feature = "mkv"))]
+            Self::Media(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -77,6 +91,10 @@ impl StdError for Error {
             Self::Encode(error) => Some(error),
             #[cfg(feature = "frame")]
             Self::Frame(error) => Some(error),
+            #[cfg(feature = "decode")]
+            Self::Color(error) => Some(error),
+            #[cfg(any(feature = "mp4", feature = "mkv"))]
+            Self::Media(error) => Some(error),
         }
     }
 }
@@ -136,6 +154,20 @@ impl From<EncodeError> for Error {
 impl From<FrameError> for Error {
     fn from(error: FrameError) -> Self {
         Self::Frame(error)
+    }
+}
+
+#[cfg(feature = "decode")]
+impl From<ColorError> for Error {
+    fn from(error: ColorError) -> Self {
+        Self::Color(error)
+    }
+}
+
+#[cfg(any(feature = "mp4", feature = "mkv"))]
+impl From<MediaError> for Error {
+    fn from(error: MediaError) -> Self {
+        Self::Media(error)
     }
 }
 

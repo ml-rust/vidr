@@ -186,6 +186,18 @@ impl SampleAspectRatio {
         }
     }
 
+    /// Creates the ratio `num:den` from wide parts, in lowest terms.
+    ///
+    /// Returns `None` for a zero part, which leaves the ratio unspecified, and
+    /// for a numerator above the signed 64-bit range.
+    pub fn from_fraction(num: u64, den: u64) -> Option<Self> {
+        if num == 0 {
+            return None;
+        }
+        let ratio = Rational::new(i64::try_from(num).ok()?, den).ok()?;
+        Some(Self(ratio))
+    }
+
     /// The ratio as a rational.
     pub const fn ratio(self) -> Rational {
         self.0
@@ -319,6 +331,17 @@ mod tests {
         assert_eq!(SampleAspectRatio::new(0, 1), SampleAspectRatio::SQUARE);
         assert_eq!(SampleAspectRatio::new(8, 0), SampleAspectRatio::SQUARE);
         assert_eq!(SampleAspectRatio::new(16, 18).ratio(), r(8, 9));
+    }
+
+    #[test]
+    fn from_fraction_reduces_wide_parts_and_refuses_unspecified_ones() {
+        assert_eq!(
+            SampleAspectRatio::from_fraction(16 << 32, 18 << 32),
+            Some(SampleAspectRatio::new(8, 9))
+        );
+        assert_eq!(SampleAspectRatio::from_fraction(0, 9), None);
+        assert_eq!(SampleAspectRatio::from_fraction(8, 0), None);
+        assert_eq!(SampleAspectRatio::from_fraction(u64::MAX, 1), None);
     }
 
     #[test]
