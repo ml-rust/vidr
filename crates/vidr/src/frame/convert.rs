@@ -4,7 +4,7 @@ use std::fmt;
 
 use numr::dtype::DType;
 use numr::ops::{ColorOps, ConvLayout, PadMode, ShapeOps, YuvPlanes, YuvSpec};
-use numr::runtime::Runtime;
+use numr::runtime::{Device, Runtime};
 use numr::tensor::Tensor;
 
 use crate::decode::frame::chroma_shape;
@@ -86,6 +86,92 @@ where
         return Ok(rgb);
     }
     crop(&rgb, layout, height, width)
+}
+
+/// Converts a decoded frame like [`to_rgb`], and reuses `buffer` when it can.
+///
+/// An even frame writes into `buffer`, which [`reuse_tensor`] allocates or keeps.
+/// So a stream of one size allocates its RGB once. The result shares storage
+/// with `buffer`, and the next call overwrites it. An odd frame takes the
+/// [`to_rgb`] path, which allocates, and leaves `buffer` unchanged.
+///
+/// # Errors
+///
+/// The errors of [`to_rgb`]. [`FrameError::OutOfMemory`] when the allocation of
+/// `buffer` fails.
+pub fn to_rgb_reusing<R, C>(
+    client: &C,
+    frame: &DecodedFrame<R>,
+    spec: &YuvSpec,
+    dtype: DType,
+    layout: ConvLayout,
+    buffer: &mut Option<Tensor<R>>,
+) -> Result<Tensor<R>, FrameError>
+where
+    R: Runtime<DType = DType>,
+    C: ColorOps<R> + ShapeOps<R>,
+{
+    let [height, width] = check_planes(frame)?;
+    if !height.is_multiple_of(2) || !width.is_multiple_of(2) {
+        return to_rgb(client, frame, spec, dtype, layout);
+    }
+    let shape = match layout {
+        ConvLayout::Nchw => [1, 3, height, width],
+        ConvLayout::Nhwc => [1, height, width, 3],
+    };
+    let rgb = reuse_tensor(buffer, &shape, dtype, frame.y().device()).map_err(|error| {
+        numr_error(
+            "Tensor::empty",
+            format!("RGB of shape {shape:?} in {dtype:?}"),
+            &error,
+        )
+    })?;
+    let planes = yuv_planes(frame.format(), frame.y(), frame.uv());
+    client
+        .yuv_to_rgb_into(&rgb, planes, spec, layout)
+        .map_err(|error| {
+            numr_error(
+                "ColorOps::yuv_to_rgb_into",
+                format!(
+                    "{} luma of shape {:?}, {spec:?}, {dtype:?}, {layout:?}",
+                    frame.format(),
+                    frame.y().shape()
+                ),
+                &error,
+            )
+        })?;
+    Ok(rgb)
+}
+
+/// Returns the tensor in `slot` when its shape, dtype and device match.
+/// Otherwise it frees the old tensor, allocates a new one, and keeps it in `slot`.
+///
+/// The result shares storage with `slot`, so a kernel that writes the result
+/// overwrites what an earlier call wrote.
+///
+/// # Errors
+///
+/// numr's error when the allocation fails.
+pub fn reuse_tensor<R>(
+    slot: &mut Option<Tensor<R>>,
+    shape: &[usize],
+    dtype: DType,
+    device: &R::Device,
+) -> numr::error::Result<Tensor<R>>
+where
+    R: Runtime<DType = DType>,
+{
+    if let Some(tensor) = slot.as_ref()
+        && tensor.shape() == shape
+        && tensor.dtype() == dtype
+        && tensor.device().is_same(device)
+    {
+        return Ok(tensor.clone());
+    }
+    *slot = None;
+    let tensor = Tensor::<R>::empty(shape, dtype, device)?;
+    *slot = Some(tensor.clone());
+    Ok(tensor)
 }
 
 /// Y and UV planes that [`from_rgb`] writes, on the device of its RGB input.
@@ -264,9 +350,38 @@ fn crop<R: Runtime>(
 }
 
 fn numr_error(operation: &'static str, input: String, error: &numr::error::Error) -> FrameError {
-    FrameError::Numr {
-        operation,
-        input,
-        reason: error.to_string(),
+    let reason = error.to_string();
+    if error.is_out_of_memory() {
+        FrameError::OutOfMemory {
+            operation,
+            input,
+            reason,
+        }
+    } else {
+        FrameError::Numr {
+            operation,
+            input,
+            reason,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_allocation_failure_is_out_of_memory() {
+        let error = numr::error::Error::OutOfMemory { size: 8 };
+        let error = numr_error("Tensor::empty", "a plane".to_string(), &error);
+        assert!(matches!(error, FrameError::OutOfMemory { .. }), "{error}");
+        assert!(error.to_string().contains("smaller frame"), "{error}");
+    }
+
+    #[test]
+    fn another_numr_error_stays_numr() {
+        let error = numr::error::Error::NotContiguous;
+        let error = numr_error("Tensor::empty", "a plane".to_string(), &error);
+        assert!(matches!(error, FrameError::Numr { .. }), "{error}");
     }
 }

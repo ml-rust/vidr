@@ -7,4 +7,4 @@
 
 mod convert;
 
-pub use convert::{OutputPlanes, from_rgb, to_rgb};
+pub use convert::{OutputPlanes, from_rgb, reuse_tensor, to_rgb, to_rgb_reusing};

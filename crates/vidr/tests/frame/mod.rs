@@ -10,6 +10,7 @@ mod encode_loop;
 mod gpu;
 mod odd;
 mod refusals;
+mod reuse;
 mod roundtrip;
 mod support;
 mod swscale;

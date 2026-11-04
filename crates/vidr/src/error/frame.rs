@@ -33,6 +33,15 @@ pub enum FrameError {
         /// Height in pixels.
         height: usize,
     },
+    /// A numr call cannot allocate its memory.
+    OutOfMemory {
+        /// The numr function.
+        operation: &'static str,
+        /// The inputs of the call.
+        input: String,
+        /// numr's message.
+        reason: String,
+    },
     /// A numr call refuses its input or fails.
     Numr {
         /// The numr function.
@@ -72,6 +81,15 @@ impl fmt::Display for FrameError {
                 f,
                 "RGB of size {width}x{height} cannot become 4:2:0 planes, because `from_rgb` \
                  needs an even width and height. Crop or pad the RGB to an even size."
+            ),
+            Self::OutOfMemory {
+                operation,
+                input,
+                reason,
+            } => write!(
+                f,
+                "{operation} runs out of memory for {input}: {reason}. Free device memory, or \
+                 use a smaller frame."
             ),
             Self::Numr {
                 operation,
