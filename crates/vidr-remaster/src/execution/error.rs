@@ -123,7 +123,8 @@ impl fmt::Display for ExecutionError {
             ),
             Self::HevcCpuEncode => f.write_str(
                 "HEVC has no CPU encoder here, by decision. Pass --codec av1 with the cpu-av1 \
-                 feature, or --encoder nvenc on a cuda build.",
+                 feature, --encoder nvenc on a cuda build, or --encoder vulkan on a vulkan-video \
+                 build.",
             ),
             Self::CiscoLibraryMissing => f.write_str(
                 "This build holds OpenH264 through Cisco's binary only, and no path names it. \

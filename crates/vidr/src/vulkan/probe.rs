@@ -11,8 +11,10 @@ use std::task::{Context, Poll, Waker};
 use ash::vk;
 use wgpu::hal::api::Vulkan;
 
-use super::gap::{self, PhysicalDeviceVideoDecodeVp9Features};
-use crate::error::DecodeError;
+use super::gap::{
+    self, PhysicalDeviceVideoDecodeVp9Features, PhysicalDeviceVideoEncodeAv1Features,
+};
+use crate::error::{DecodeError, EncodeError};
 
 /// The family wgpu-hal opens its queue on.
 pub(super) const GENERAL_FAMILY: u32 = 0;
@@ -39,6 +41,20 @@ pub(super) const CODEC_EXTENSIONS: [(&CStr, vk::VideoCodecOperationFlagsKHR); 3]
     ),
 ];
 
+/// Device extensions for one encode codec. A device can lack them, and that codec is then refused
+/// by name.
+pub(super) const ENCODE_EXTENSIONS: [(&CStr, vk::VideoCodecOperationFlagsKHR); 3] = [
+    (
+        ash::khr::video_encode_h264::NAME,
+        vk::VideoCodecOperationFlagsKHR::ENCODE_H264,
+    ),
+    (
+        ash::khr::video_encode_h265::NAME,
+        vk::VideoCodecOperationFlagsKHR::ENCODE_H265,
+    ),
+    (gap::VIDEO_ENCODE_AV1_NAME, gap::ENCODE_AV1),
+];
+
 /// One queue family as the driver lists it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FamilyFacts {
@@ -60,6 +76,19 @@ pub(super) struct DeviceFacts {
     pub(super) timeline_semaphore: bool,
     /// The `videoDecodeVP9` feature.
     pub(super) video_decode_vp9: bool,
+    /// The `videoEncodeAV1` feature.
+    pub(super) video_encode_av1: bool,
+}
+
+/// Where a device's encode work runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EncodePlacement {
+    /// The family of the encode queue.
+    pub(super) family: u32,
+    /// The queue index inside that family.
+    pub(super) queue_index: u32,
+    /// The codecs that family encodes and whose extensions the device lists.
+    pub(super) ops: vk::VideoCodecOperationFlagsKHR,
 }
 
 /// Where a device's video work runs.
@@ -73,6 +102,25 @@ pub(super) struct Placement {
     pub(super) status_queries: bool,
     /// The codecs that family decodes and whose extensions the device lists.
     pub(super) decode_ops: vk::VideoCodecOperationFlagsKHR,
+    /// The encode queue, on a device that has one.
+    pub(super) encode: Option<EncodePlacement>,
+}
+
+impl Placement {
+    /// The queues each family opens beyond what wgpu-hal asks for, as `(family, count)`. wgpu's own
+    /// queue counts in family 0.
+    pub(super) fn queue_counts(&self) -> Vec<(u32, u32)> {
+        let mut counts = vec![(GENERAL_FAMILY, 1_u32)];
+        let mut add = |family: u32| match counts.iter_mut().find(|(known, _)| *known == family) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((family, 1)),
+        };
+        add(self.video_family);
+        if let Some(encode) = &self.encode {
+            add(encode.family);
+        }
+        counts
+    }
 }
 
 /// Places H.264 decode on `facts`, or states what the device lacks.
@@ -134,7 +182,43 @@ pub(super) fn place(facts: &DeviceFacts) -> Result<Placement, String> {
         video_queue_index: u32::from(shares_general),
         status_queries: family.status_queries,
         decode_ops: usable_ops(facts, family.video_ops),
+        encode: place_encode(facts, video_family),
     })
+}
+
+/// Whether the device lists the extension `name`.
+fn lists_extension(facts: &DeviceFacts, name: &CStr) -> bool {
+    let name = name.to_string_lossy();
+    facts.extensions.iter().any(|listed| *listed == *name)
+}
+
+/// The first encode family with a free queue and a usable codec, or `None`. The queue index
+/// comes after wgpu's queue and the decode queue when they share the family.
+fn place_encode(facts: &DeviceFacts, video_family: u32) -> Option<EncodePlacement> {
+    if !lists_extension(facts, ash::khr::video_encode_queue::NAME) {
+        return None;
+    }
+    facts
+        .families
+        .iter()
+        .enumerate()
+        .filter(|(_, family)| family.flags.contains(vk::QueueFlags::VIDEO_ENCODE_KHR))
+        .find_map(|(index, family)| {
+            let index = index as u32;
+            let mut ops = vk::VideoCodecOperationFlagsKHR::empty();
+            for (name, op) in ENCODE_EXTENSIONS {
+                let enabled = op != gap::ENCODE_AV1 || facts.video_encode_av1;
+                if enabled && lists_extension(facts, name) && family.video_ops.contains(op) {
+                    ops |= op;
+                }
+            }
+            let taken = u32::from(index == GENERAL_FAMILY) + u32::from(index == video_family);
+            (!ops.is_empty() && family.count > taken).then_some(EncodePlacement {
+                family: index,
+                queue_index: taken,
+                ops,
+            })
+        })
 }
 
 /// The codecs of `family_ops` that the device can turn on: H.264, which [`place`] requires,
@@ -195,12 +279,24 @@ pub(super) fn read_facts(
         video_decode_vp9: vk::FALSE,
     };
     // A driver without the extension does not know this structure, so it stays out.
-    let lists_vp9 = listed
-        .iter()
-        .filter_map(|extension| extension.extension_name_as_c_str().ok())
-        .any(|name| name == gap::VIDEO_DECODE_VP9_NAME);
-    if lists_vp9 {
+    let mut av1_encode = PhysicalDeviceVideoEncodeAv1Features {
+        s_type: gap::TYPE_AV1_ENCODE_FEATURES,
+        p_next: std::ptr::null_mut(),
+        video_encode_av1: vk::FALSE,
+    };
+    let lists = |wanted: &CStr| {
+        listed
+            .iter()
+            .filter_map(|extension| extension.extension_name_as_c_str().ok())
+            .any(|name| name == wanted)
+    };
+    if lists(gap::VIDEO_DECODE_VP9_NAME) {
         timeline.p_next = std::ptr::from_mut(&mut vp9).cast();
+    }
+    if lists(gap::VIDEO_ENCODE_AV1_NAME) {
+        // The structure goes first, and whatever the chain holds follows it.
+        av1_encode.p_next = timeline.p_next;
+        timeline.p_next = std::ptr::from_mut(&mut av1_encode).cast();
     }
     let mut features = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut synchronization2)
@@ -217,6 +313,7 @@ pub(super) fn read_facts(
         synchronization2: synchronization2.synchronization2 == vk::TRUE,
         timeline_semaphore: timeline.timeline_semaphore == vk::TRUE,
         video_decode_vp9: vp9.video_decode_vp9 == vk::TRUE,
+        video_encode_av1: av1_encode.video_encode_av1 == vk::TRUE,
     })
 }
 
@@ -286,6 +383,41 @@ pub fn vulkan_video_available() -> Result<(), DecodeError> {
     })
 }
 
+/// Checks that a device on this machine encodes on Vulkan Video, for some codec. It opens no
+/// device, so numr can still open its own. A codec the device lacks gets its refusal at open.
+///
+/// # Errors
+///
+/// [`EncodeError::VulkanUnavailable`] states what each device lacks.
+pub fn vulkan_encode_available() -> Result<(), EncodeError> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::VULKAN;
+    descriptor.flags = wgpu::InstanceFlags::empty();
+    let instance = wgpu::Instance::new(descriptor);
+    let adapters = block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let mut reasons = Vec::new();
+    for adapter in &adapters {
+        // SAFETY: the guard's handles stay live through this loop body, and vidr
+        // destroys none of them.
+        let Some(hal) = (unsafe { adapter.as_hal::<Vulkan>() }) else {
+            continue;
+        };
+        let raw = hal.shared_instance().raw_instance();
+        let facts = read_facts(raw, hal.raw_physical_device());
+        match facts.and_then(|facts| place(&facts).map(|placed| (facts, placed))) {
+            Ok((_, placed)) if placed.encode.is_some() => return Ok(()),
+            Ok((facts, _)) => reasons.push(format!(
+                "{} has no encode queue with a codec vidr names",
+                facts.name
+            )),
+            Err(reason) => reasons.push(reason),
+        }
+    }
+    Err(EncodeError::VulkanUnavailable {
+        reason: no_device_reason(&reasons),
+    })
+}
+
 /// Why no device fits, from what each device lacks.
 pub(super) fn no_device_reason(reasons: &[String]) -> String {
     if reasons.is_empty() {
@@ -330,6 +462,7 @@ mod tests {
             synchronization2: true,
             timeline_semaphore: true,
             video_decode_vp9: false,
+            video_encode_av1: false,
         }
     }
 
@@ -348,6 +481,7 @@ mod tests {
                 video_queue_index: 0,
                 status_queries: true,
                 decode_ops: vk::VideoCodecOperationFlagsKHR::DECODE_H264,
+                encode: None,
             })
         );
     }
@@ -412,6 +546,98 @@ mod tests {
         let mut narrow = facts.clone();
         narrow.families[1].video_ops = vk::VideoCodecOperationFlagsKHR::DECODE_H264;
         assert_eq!(ops(&narrow), vk::VideoCodecOperationFlagsKHR::DECODE_H264);
+    }
+
+    fn encode_family(ops: vk::VideoCodecOperationFlagsKHR) -> FamilyFacts {
+        FamilyFacts {
+            flags: vk::QueueFlags::TRANSFER | vk::QueueFlags::VIDEO_ENCODE_KHR,
+            count: 1,
+            video_ops: ops,
+            status_queries: true,
+        }
+    }
+
+    fn with_encode_extensions(mut facts: DeviceFacts) -> DeviceFacts {
+        for name in [
+            "VK_KHR_video_encode_queue",
+            "VK_KHR_video_encode_h264",
+            "VK_KHR_video_encode_h265",
+            "VK_KHR_video_encode_av1",
+        ] {
+            facts.extensions.push(name.to_owned());
+        }
+        facts
+    }
+
+    #[test]
+    fn encode_needs_its_extension_family_and_av1_feature() {
+        let all = vk::VideoCodecOperationFlagsKHR::ENCODE_H264
+            | vk::VideoCodecOperationFlagsKHR::ENCODE_H265
+            | gap::ENCODE_AV1;
+        let families = vec![general(), decode_family(), encode_family(all)];
+        let plain = device(families.clone());
+        assert_eq!(place(&plain).expect("placed").encode, None);
+
+        let mut facts = with_encode_extensions(device(families));
+        let encode = place(&facts).expect("placed").encode.expect("a queue");
+        assert_eq!((encode.family, encode.queue_index), (2, 0));
+        assert_eq!(
+            encode.ops,
+            vk::VideoCodecOperationFlagsKHR::ENCODE_H264
+                | vk::VideoCodecOperationFlagsKHR::ENCODE_H265,
+            "AV1 waits for its feature"
+        );
+        facts.video_encode_av1 = true;
+        let encode = place(&facts).expect("placed").encode.expect("a queue");
+        assert_eq!(encode.ops, all);
+
+        let no_family = with_encode_extensions(device(vec![general(), decode_family()]));
+        assert_eq!(place(&no_family).expect("placed").encode, None);
+    }
+
+    #[test]
+    fn a_shared_family_needs_a_free_queue_for_encode() {
+        let h264 = vk::VideoCodecOperationFlagsKHR::ENCODE_H264;
+        let shared = FamilyFacts {
+            flags: decode_family().flags | vk::QueueFlags::VIDEO_ENCODE_KHR,
+            count: 2,
+            video_ops: vk::VideoCodecOperationFlagsKHR::DECODE_H264 | h264,
+            status_queries: true,
+        };
+        let facts = with_encode_extensions(device(vec![general(), shared]));
+        let placed = place(&facts).expect("placed");
+        let encode = placed.encode.expect("a queue");
+        assert_eq!((encode.family, encode.queue_index), (1, 1));
+        assert_eq!(placed.queue_counts(), [(0, 1), (1, 2)]);
+
+        let single = FamilyFacts { count: 1, ..shared };
+        let facts = with_encode_extensions(device(vec![general(), single]));
+        assert_eq!(place(&facts).expect("placed").encode, None);
+    }
+
+    #[test]
+    fn queue_counts_add_each_queue_to_its_family() {
+        let h264 = vk::VideoCodecOperationFlagsKHR::ENCODE_H264;
+        let facts = with_encode_extensions(device(vec![
+            general(),
+            decode_family(),
+            encode_family(h264),
+        ]));
+        let placed = place(&facts).expect("placed");
+        assert_eq!(placed.queue_counts(), [(0, 1), (1, 1), (2, 1)]);
+
+        let all = FamilyFacts {
+            flags: general().flags
+                | vk::QueueFlags::VIDEO_DECODE_KHR
+                | vk::QueueFlags::VIDEO_ENCODE_KHR,
+            video_ops: vk::VideoCodecOperationFlagsKHR::DECODE_H264 | h264,
+            ..general()
+        };
+        let facts = with_encode_extensions(device(vec![all]));
+        let placed = place(&facts).expect("placed");
+        assert_eq!(placed.video_queue_index, 1);
+        assert_eq!(placed.encode.expect("a queue").queue_index, 2);
+        assert_eq!(placed.queue_counts(), [(0, 3)]);
     }
 
     #[test]

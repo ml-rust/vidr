@@ -1,12 +1,14 @@
-//! Vulkan Video decode on the local GPU against a software reference decode.
+//! Vulkan Video decode and encode on the local GPU, against a software reference decode.
 //!
-//! Every test skips with a notice when no device runs Vulkan Video decode, or when its
-//! fixture is missing. An HEVC, VP9, or AV1 test also skips when the device lacks the codec. Each
+//! Every test skips with a notice when no device runs Vulkan Video, when the device lacks encode
+//! for an encode test, or when its fixture is missing. An HEVC, VP9, or AV1 test also skips when the device lacks the codec. Each
 //! test turns on `VK_LAYER_KHRONOS_validation` when the loader lists it, and any validation
 //! error fails the test.
 
 mod av1;
 mod decode;
+mod encode;
+mod encode_support;
 mod hevc;
 mod refusals;
 pub(crate) mod support;

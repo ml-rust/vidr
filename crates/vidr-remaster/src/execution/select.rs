@@ -3,7 +3,7 @@
 //! | Runtime | Decoders | Encoders |
 //! | --- | --- | --- |
 //! | CUDA | NVDEC, CPU | NVENC, CPU |
-//! | WebGPU | Vulkan Video for H.264, HEVC, VP9, and AV1, CPU | CPU |
+//! | WebGPU | Vulkan Video for H.264, HEVC, VP9, and AV1, CPU | Vulkan Video for H.264, HEVC, and AV1, CPU |
 //! | CPU | CPU | CPU |
 //!
 //! `auto` prefers the hardware path, then the CPU. A library check says only that
@@ -173,19 +173,29 @@ impl Selector {
         })
     }
 
-    /// Whether `--decoder vulkan` holds.
-    fn wants_vulkan(&self) -> bool {
-        self.request.decoder == DecoderChoice::Vulkan
+    /// The flag that names Vulkan Video, when one does.
+    fn vulkan_flag(&self) -> Option<&'static str> {
+        if self.request.decoder == DecoderChoice::Vulkan {
+            Some("--decoder vulkan")
+        } else if self.request.encoder == EncoderChoice::Vulkan {
+            Some("--encoder vulkan")
+        } else {
+            None
+        }
     }
 
-    /// Refuses `--decoder vulkan` on a runtime with no path for it.
+    /// Refuses a Vulkan Video flag on a runtime with no path for it.
     fn refuse_vulkan_on(&self, runtime: &str) -> Result<(), ExecutionError> {
-        if self.wants_vulkan() {
+        if let Some(flag) = self.vulkan_flag() {
             return Err(ExecutionError::Pair {
                 first: runtime.to_owned(),
-                second: "--decoder vulkan".to_owned(),
+                second: flag.to_owned(),
                 reason: VULKAN_RUNTIME,
-                working: "--runtime wgpu with that flag, or --decoder cpu",
+                working: if self.request.decoder == DecoderChoice::Vulkan {
+                    "--runtime wgpu with that flag, or --decoder cpu"
+                } else {
+                    "--runtime wgpu with that flag, or --encoder cpu"
+                },
             });
         }
         Ok(())
@@ -282,20 +292,17 @@ impl Selector {
     }
 
     fn auto_runtime(&self) -> Result<(RuntimeKind, String), ExecutionError> {
-        if self.wants_vulkan() {
+        if let Some(vulkan) = self.vulkan_flag() {
             if let Some(flag) = self.hardware_flag() {
                 return Err(ExecutionError::Pair {
-                    first: "--decoder vulkan".to_owned(),
+                    first: vulkan.to_owned(),
                     second: flag.to_owned(),
                     reason: VULKAN_RUNTIME,
-                    working: "--decoder vulkan --encoder cpu",
+                    working: "--decoder vulkan --encoder vulkan, or --decoder cpu --encoder cpu",
                 });
             }
-            self.require_wgpu("--decoder vulkan")?;
-            return Ok((
-                RuntimeKind::Wgpu,
-                "auto: --decoder vulkan runs on WebGPU.".to_owned(),
-            ));
+            self.require_wgpu(vulkan)?;
+            return Ok((RuntimeKind::Wgpu, format!("auto: {vulkan} runs on WebGPU.")));
         }
         if let Some(flag) = self.hardware_flag() {
             self.require_cuda(flag)?;
@@ -345,7 +352,7 @@ impl Selector {
         }
     }
 
-    /// NVENC when `runtime` holds it, or why not.
+    /// The hardware encoder that `runtime` holds, or why none fits.
     fn hardware_encoder(&self, runtime: RuntimeKind) -> Result<EncoderBackend, String> {
         match runtime {
             RuntimeKind::Cuda => self
@@ -354,9 +361,12 @@ impl Selector {
                 .clone()
                 .map(|()| EncoderBackend::Nvenc)
                 .map_err(|reason| format!("NVENC is out: {reason}")),
-            RuntimeKind::Wgpu => {
-                Err("the WebGPU runtime has no hardware encoder in this release".to_owned())
-            }
+            RuntimeKind::Wgpu => self
+                .machine
+                .vulkan_encode
+                .clone()
+                .map(|()| EncoderBackend::Vulkan)
+                .map_err(|reason| format!("Vulkan Video encode is out: {reason}")),
             RuntimeKind::Cpu => Err("the CPU runtime has no hardware encoder".to_owned()),
         }
     }
@@ -504,12 +514,38 @@ impl Selector {
                     reason,
                     next: "Install the NVIDIA driver, or pass --encoder cpu.",
                 }),
+            EncoderChoice::Vulkan => {
+                if !self.compiled.vulkan_video {
+                    return Err(ExecutionError::NotBuilt {
+                        what: "--encoder vulkan".to_owned(),
+                        feature: "vulkan-video",
+                    });
+                }
+                self.machine
+                    .vulkan_encode
+                    .clone()
+                    .map(|()| (EncoderBackend::Vulkan, "--encoder vulkan".to_owned()))
+                    .map_err(|reason| ExecutionError::Unavailable {
+                        what: "--encoder vulkan".to_owned(),
+                        reason,
+                        next: "Install a driver with VK_KHR_video_encode_queue, or pass --encoder \
+                               cpu.",
+                    })
+            }
             EncoderChoice::Cpu => {
                 let backend = self.cpu_encoder()?;
                 Ok((backend, format!("--encoder cpu: {}", cpu_reason(backend))))
             }
             EncoderChoice::Auto => match self.hardware_encoder(runtime) {
-                Ok(backend) => Ok((backend, "auto: NVENC is present.".to_owned())),
+                Ok(backend) => Ok((
+                    backend,
+                    match backend {
+                        EncoderBackend::Vulkan => {
+                            "auto: Vulkan Video encode is present.".to_owned()
+                        }
+                        _ => "auto: NVENC is present.".to_owned(),
+                    },
+                )),
                 Err(hardware) => match self.cpu_encoder() {
                     Ok(backend) => Ok((
                         backend,
@@ -526,7 +562,7 @@ impl Selector {
     }
 
     /// Whether `decoder` reads what `encoder` writes at the request's codec.
-    /// NVENC writes H.264 High, which OpenH264 refuses.
+    /// NVENC and Vulkan Video write H.264 High, which OpenH264 refuses.
     fn reads_output(&self, decoder: DecoderBackend, encoder: EncoderBackend) -> bool {
         match decoder {
             DecoderBackend::Nvdec | DecoderBackend::Vulkan => true,
@@ -581,8 +617,8 @@ impl Selector {
                     }
                     Codec::Hevc => "Rebuild with --features cpu-hevc, or use NVDEC.",
                     Codec::H264 => {
-                        "NVENC writes High, and OpenH264 reads Baseline only. Use NVDEC, or pass \
-                         --encoder cpu."
+                        "NVENC and Vulkan Video write High, and OpenH264 reads Baseline only. Use \
+                         NVDEC or Vulkan Video decode, or pass --encoder cpu."
                     }
                 },
             }),
@@ -635,7 +671,7 @@ impl Selector {
         }
     }
 
-    /// The CPU encoder that replaces NVENC after its refusal for `reason`, or `None`
+    /// The CPU encoder that replaces a hardware encoder after its refusal for `reason`, or `None`
     /// when `--encoder auto` does not hold or no CPU encoder takes the frames.
     /// OpenH264 takes no 10-bit frames.
     pub fn cpu_encoder_after(
@@ -653,7 +689,8 @@ impl Selector {
         Some((
             backend,
             format!(
-                "auto: NVENC refused the output: {reason} {backend} encodes {} on the CPU.",
+                "auto: the hardware encoder refused the output: {reason} {backend} encodes {} on \
+                 the CPU.",
                 self.request.codec
             ),
         ))
@@ -679,6 +716,7 @@ mod tests {
             nvenc: out(),
             wgpu: out(),
             vulkan: out(),
+            vulkan_encode: out(),
         }
     }
 
@@ -730,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn nvenc_falls_through_only_for_auto_and_for_frames_the_encoder_takes() {
+    fn a_hardware_encoder_falls_through_only_for_auto_and_for_frames_the_encoder_takes() {
         let av1_output = ExecutionRequest {
             codec: Codec::Av1,
             ..ExecutionRequest::default()

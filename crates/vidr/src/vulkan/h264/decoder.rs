@@ -92,6 +92,19 @@ fn references_error(pts: i64, reason: String) -> DecodeError {
     }
 }
 
+/// The smallest side of a session, in luma samples.
+const SESSION_FLOOR: u32 = 1024;
+
+/// The size of a session for pictures of `coded`. NVIDIA's driver refuses some small sessions
+/// with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`, such as 64x64, though it lists them. A session
+/// takes any smaller picture, so each side opens at this floor or more.
+fn session_size(coded: (u32, u32), driver_max: (u32, u32)) -> (u32, u32) {
+    (
+        coded.0.max(SESSION_FLOOR.min(driver_max.0)),
+        coded.1.max(SESSION_FLOOR.min(driver_max.1)),
+    )
+}
+
 /// Empties the output queue before an IDR picture or a new sequence, as C.4.4 states.
 fn empty_output(
     output: &mut OutputQueue<DecodedFrame<WgpuRuntime>>,
@@ -348,7 +361,7 @@ impl H264Decoder {
             &EngineSpec {
                 caps,
                 mode,
-                coded: facts.coded,
+                coded: session_size(facts.coded, caps.max_coded),
                 slots: facts.slots(),
                 active_references: facts.max_references,
                 readable_slots: false,
@@ -627,6 +640,13 @@ mod tests {
                 ..facts
             })
         );
+    }
+
+    #[test]
+    fn a_session_opens_at_the_floor_and_stays_inside_the_driver() {
+        assert_eq!(session_size((64, 48), (4096, 4096)), (1024, 1024));
+        assert_eq!(session_size((1920, 1080), (4096, 4096)), (1920, 1080));
+        assert_eq!(session_size((64, 48), (512, 4096)), (512, 1024));
     }
 
     #[test]

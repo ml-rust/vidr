@@ -227,9 +227,28 @@ pub(super) struct HostBuffer {
 unsafe impl Send for HostBuffer {}
 
 impl HostBuffer {
+    /// A buffer the host writes.
     pub(super) fn new(
         device: &Arc<VulkanDevice>,
         info: &vk::BufferCreateInfo<'_>,
+        what: &str,
+    ) -> Result<Self, DecodeError> {
+        Self::with_memory(device, info, vk::MemoryPropertyFlags::HOST_COHERENT, what)
+    }
+
+    /// A buffer the host reads. It prefers cached memory, so a read stays fast.
+    pub(super) fn for_reading(
+        device: &Arc<VulkanDevice>,
+        info: &vk::BufferCreateInfo<'_>,
+        what: &str,
+    ) -> Result<Self, DecodeError> {
+        Self::with_memory(device, info, vk::MemoryPropertyFlags::HOST_CACHED, what)
+    }
+
+    fn with_memory(
+        device: &Arc<VulkanDevice>,
+        info: &vk::BufferCreateInfo<'_>,
+        preferred: vk::MemoryPropertyFlags,
         what: &str,
     ) -> Result<Self, DecodeError> {
         // SAFETY: `info` and its chain are valid for the call.
@@ -242,7 +261,7 @@ impl HostBuffer {
             device,
             requirements,
             vk::MemoryPropertyFlags::HOST_VISIBLE,
-            vk::MemoryPropertyFlags::HOST_COHERENT,
+            preferred,
             what,
         )?;
         // SAFETY: the memory comes from the buffer's requirements and is unbound.
@@ -289,6 +308,32 @@ impl HostBuffer {
                 format!("{total} bitstream bytes"),
             )
         })
+    }
+
+    /// Copies `length` bytes from `offset`. A read of non-coherent memory starts with an
+    /// invalidate. The caller checks the range against `size`.
+    pub(super) fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, DecodeError> {
+        if !self.memory.coherent {
+            let range = vk::MappedMemoryRange::default()
+                .memory(self.memory.raw)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            // SAFETY: the range lies in the mapped memory.
+            unsafe { self.device.raw.invalidate_mapped_memory_ranges(&[range]) }.map_err(
+                |result| {
+                    vk_error(
+                        "vkInvalidateMappedMemoryRanges",
+                        result,
+                        format!("{length} bitstream bytes"),
+                    )
+                },
+            )?;
+        }
+        // SAFETY: the caller keeps `offset` and `length` inside the buffer, the map covers it, and
+        // the engine waits for each encode, so no submit writes these bytes during the copy.
+        let source =
+            unsafe { std::slice::from_raw_parts(self.mapped.add(offset as usize), length) };
+        Ok(source.to_vec())
     }
 }
 

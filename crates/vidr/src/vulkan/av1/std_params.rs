@@ -92,14 +92,14 @@ pub(super) fn std_sequence(header: &SequenceHeader) -> StdVideoAV1SequenceHeader
 }
 
 /// `StdVideoAV1SequenceHeader` with what it points to, in stable heap storage.
-pub(super) struct StdSequence {
+pub(in crate::vulkan) struct StdSequence {
     _color: Retained<StdVideoAV1ColorConfig>,
     _timing: Retained<StdVideoAV1TimingInfo>,
     header: Retained<StdVideoAV1SequenceHeader>,
 }
 
 impl StdSequence {
-    pub(super) fn new(sequence: &SequenceHeader) -> Self {
+    pub(in crate::vulkan) fn new(sequence: &SequenceHeader) -> Self {
         let color = Retained::new(std_color(sequence));
         let timing = Retained::new(std_timing(sequence));
         let mut header = std_sequence(sequence);
@@ -115,7 +115,7 @@ impl StdSequence {
     }
 
     /// The header, valid while `self` lives, across moves too.
-    pub(super) fn as_ptr(&self) -> *const StdVideoAV1SequenceHeader {
+    pub(in crate::vulkan) fn as_ptr(&self) -> *const StdVideoAV1SequenceHeader {
         self.header.as_ptr()
     }
 }

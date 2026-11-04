@@ -8,6 +8,7 @@
 //! | NVENC | `nvenc` | `nvenc::NvencEncoder` |
 //! | OpenH264, H.264 on the CPU | `openh264`, `openh264-cisco` | `openh264::Openh264Encoder` |
 //! | rav1r, AV1 on the CPU | `cpu-av1` | `rav1r::Rav1rEncoder` |
+//! | Vulkan Video | `vulkan-video` | `crate::vulkan::VulkanEncoder` |
 //!
 //! Frames go in as [`EncodeFrame`]: Y and UV planes in NV12 or P010, dense or
 //! with a row pitch, as samples or packed words. Packets come out as
@@ -21,11 +22,12 @@ mod config;
         feature = "nvenc",
         feature = "openh264",
         feature = "openh264-cisco",
-        feature = "cpu-av1"
+        feature = "cpu-av1",
+        feature = "vulkan-video"
     )),
     allow(dead_code)
 )]
-mod dts;
+pub(crate) mod dts;
 mod frame;
 mod traits;
 
@@ -35,6 +37,8 @@ pub mod nvenc;
 pub mod openh264;
 #[cfg(feature = "cpu-av1")]
 pub mod rav1r;
+#[cfg(any(feature = "nvenc", feature = "vulkan-video"))]
+pub(crate) mod sample_filter;
 
 pub use crate::decode::{ChromaLocation, ColorFacts, PixelFormat, PlaneForm};
 pub use codec::{EncodeCodec, Preset, RateControl, Tuning};

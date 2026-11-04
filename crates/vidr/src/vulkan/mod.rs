@@ -1,4 +1,4 @@
-//! Hardware decode on Vulkan Video, on numr's WebGPU device.
+//! Hardware decode and encode on Vulkan Video, on numr's WebGPU device.
 //!
 //! | Module | Holds |
 //! | --- | --- |
@@ -8,11 +8,11 @@
 //! | `objects` | One owner per Vulkan object, each freed on drop |
 //! | `caps` | Capabilities as plain values, and what they allow |
 //! | `session` | Profiles, queries, the video session, its memory, and its parameters |
-//! | `retained` | Stable heap storage for what session parameters point to |
+//! | `retained` | Stable heap storage for what session parameters and encode chains point to |
 //! | `pictures` | DPB images in the form the capabilities require |
 //! | `engine` | One submit per picture: bitstream, images, status |
 //! | `request_checks` | The checks of one decode request, before any driver call |
-//! | `recording` | The commands of one decode: barriers, the coding scope, and the release |
+//! | `recording` | The commands of one decode, and the submit that decode and encode share |
 //! | `barriers` | Image barriers of a decode and a plane copy, as plain values |
 //! | `copy` | Image planes into numr buffers, on the device |
 //! | `h264` | H.264 parameter sets, picture order, DPB, and output order |
@@ -21,6 +21,7 @@
 //! | `vp9` | VP9 frame headers, the reference pool, and frames shown again |
 //! | `av1` | AV1 sequence and frame headers, the reference pool, tiles, and film grain |
 //! | `decoder` | [`VulkanDecoder`] behind the `Decoder` trait |
+//! | `encode` | [`VulkanEncoder`] behind the `Encoder` trait, on the same core |
 //! | `gap` | Structures that `ash` 0.38 lacks |
 //! | `zeroed` | All-zero values of plain C structures |
 //!
@@ -32,6 +33,7 @@ mod caps;
 mod copy;
 mod decoder;
 mod device;
+mod encode;
 mod engine;
 mod error;
 mod gap;
@@ -52,4 +54,5 @@ mod zeroed;
 pub use caps::DpbPreference;
 pub use decoder::VulkanDecoder;
 pub use device::{VulkanDevice, VulkanOptions};
-pub use probe::vulkan_video_available;
+pub use encode::VulkanEncoder;
+pub use probe::{vulkan_encode_available, vulkan_video_available};

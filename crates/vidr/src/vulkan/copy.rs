@@ -127,7 +127,7 @@ fn allocate(
     })
 }
 
-fn raw_buffer(buffer: &wgpu::Buffer) -> Result<vk::Buffer, DecodeError> {
+pub(super) fn raw_buffer(buffer: &wgpu::Buffer) -> Result<vk::Buffer, DecodeError> {
     // SAFETY: vidr destroys nothing behind the guard, and `buffer` outlives the copy.
     let hal = unsafe { buffer.as_hal::<Vulkan>() };
     hal.map(|hal| {
@@ -371,7 +371,7 @@ unsafe fn record_after_copy(
     unsafe { device.sync2.cmd_pipeline_barrier2(cmd, &info) };
 }
 
-fn whole_buffer(
+pub(super) fn whole_buffer(
     buffer: vk::Buffer,
     src_stage: vk::PipelineStageFlags2,
     src_access: vk::AccessFlags2,

@@ -9,12 +9,12 @@ use super::ffi::{
     nvenc,
 };
 use super::lock::{discard_output, read_output};
-use super::output::SampleFilter;
 use super::params;
 use super::session::Session;
 use super::surface::{Slot, unmap};
 use super::surface_layout::{PlanePitches, SurfaceLayout};
 use crate::encode::dts::DtsClock;
+use crate::encode::sample_filter::SampleFilter;
 use crate::encode::{EncodeCodec, EncodeConfig, EncodeFrame, EncodedPacket, Encoder};
 use crate::error::EncodeError;
 use crate::route::FrameRoute;

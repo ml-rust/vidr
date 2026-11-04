@@ -92,7 +92,7 @@ struct Cli {
     /// Select the encoder (default: auto, hardware then CPU).
     #[arg(
         long,
-        value_name = "auto|nvenc|cpu",
+        value_name = "auto|nvenc|vulkan|cpu",
         default_value_t = EncoderChoice::default(),
         hide_default_value = true
     )]

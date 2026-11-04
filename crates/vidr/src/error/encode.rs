@@ -209,6 +209,86 @@ pub enum EncodeError {
         /// The loader's message.
         reason: String,
     },
+    /// A Vulkan call returns an error.
+    Vulkan {
+        /// The function called.
+        call: &'static str,
+        /// The `VkResult` code.
+        code: i32,
+        /// The code's name.
+        name: String,
+        /// The inputs of the call.
+        input: String,
+    },
+    /// No device on this machine runs Vulkan Video encode.
+    VulkanUnavailable {
+        /// What each device lacks.
+        reason: String,
+    },
+    /// The Vulkan driver refuses what this config needs, or vidr has no path for it.
+    VulkanRefused {
+        /// The codec.
+        codec: EncodeCodec,
+        /// What the driver or vidr refuses.
+        what: String,
+        /// What the driver lists.
+        reason: String,
+    },
+    /// An encode feedback query states a status other than complete.
+    VulkanEncodeStatus {
+        /// The `VkQueryResultStatusKHR` value.
+        status: i32,
+        /// The status's name.
+        name: &'static str,
+        /// The frame's pts.
+        pts: i64,
+    },
+    /// A picture does not fit the bitstream buffer.
+    VulkanBitstreamOverrun {
+        /// The frame's pts.
+        pts: i64,
+        /// The buffer's range in bytes.
+        capacity: u64,
+    },
+    /// An encode feedback query states a byte range outside the bitstream buffer.
+    VulkanFeedbackRange {
+        /// The frame's pts.
+        pts: i64,
+        /// The stated offset in bytes.
+        offset: u32,
+        /// The stated size in bytes.
+        written: u32,
+        /// The buffer's range in bytes.
+        capacity: u64,
+    },
+    /// A wait on the GPU does not end in time.
+    VulkanWaitTimeout {
+        /// How long the wait ran, in seconds.
+        seconds: u64,
+        /// What the wait covers.
+        input: String,
+    },
+    /// No memory type of the device holds what a Vulkan object needs.
+    VulkanNoMemoryType {
+        /// The object.
+        what: String,
+        /// The memory property flags it needs.
+        required: String,
+        /// The memory types the object allows, as a bit mask.
+        type_bits: u32,
+    },
+    /// The Vulkan core returns a failure with no encode name of its own.
+    VulkanCore {
+        /// The core's message.
+        reason: String,
+    },
+    /// The Vulkan device is lost, so nothing on it runs again.
+    VulkanDeviceLost {
+        /// The function that reports the loss.
+        call: &'static str,
+        /// What the call covers.
+        input: String,
+    },
     /// A frame's planes fail the copy to host memory.
     #[cfg(feature = "frame")]
     Frame(FrameError),
@@ -389,6 +469,73 @@ impl fmt::Display for EncodeError {
                 f,
                 "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
                  unmodified Cisco release that the `openh264` crate's hash list names."
+            ),
+            Self::Vulkan {
+                call,
+                code,
+                name,
+                input,
+            } => write!(
+                f,
+                "{call} returns VkResult {code} ({name}) for {input}. Check the encoder config \
+                 against the driver's capabilities, then retry."
+            ),
+            Self::VulkanUnavailable { reason } => write!(
+                f,
+                "Vulkan Video encode is unavailable: {reason}. Install a driver with \
+                 VK_KHR_video_encode_queue, or pick another encoder."
+            ),
+            Self::VulkanRefused {
+                codec,
+                what,
+                reason,
+            } => write!(
+                f,
+                "Vulkan Video does not encode {codec} with {what}: {reason}. Change the config, \
+                 or pick another encoder."
+            ),
+            Self::VulkanEncodeStatus { status, name, pts } => write!(
+                f,
+                "the encode of the frame at pts {pts} ends with status {status} ({name}). Check \
+                 the driver, then retry."
+            ),
+            Self::VulkanBitstreamOverrun { pts, capacity } => write!(
+                f,
+                "the frame at pts {pts} does not fit the {capacity}-byte bitstream buffer. Raise \
+                 the config's quantiser or lower its bitrate, then retry."
+            ),
+            Self::VulkanFeedbackRange {
+                pts,
+                offset,
+                written,
+                capacity,
+            } => write!(
+                f,
+                "the driver states {written} bytes at offset {offset} for the frame at pts {pts}, \
+                 outside the {capacity}-byte buffer. Report the driver version as a vidr bug."
+            ),
+            Self::VulkanWaitTimeout { seconds, input } => write!(
+                f,
+                "a wait on the GPU for {input} does not end in {seconds} s. Check that the GPU is \
+                 not stalled or busy, then retry."
+            ),
+            Self::VulkanNoMemoryType {
+                what,
+                required,
+                type_bits,
+            } => write!(
+                f,
+                "no Vulkan memory type holds {required} for {what}, in type bits {type_bits:#x}. \
+                 Check the driver, then retry."
+            ),
+            Self::VulkanCore { reason } => write!(
+                f,
+                "the Vulkan core stops the encode: {reason}. Report this as a vidr bug."
+            ),
+            Self::VulkanDeviceLost { call, input } => write!(
+                f,
+                "{call} reports a lost Vulkan device for {input}. Nothing on this device runs \
+                 again. Open a new device and a new encoder."
             ),
             #[cfg(feature = "frame")]
             Self::Frame(error) => fmt::Display::fmt(error, f),

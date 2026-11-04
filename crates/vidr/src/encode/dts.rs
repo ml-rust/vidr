@@ -16,7 +16,7 @@ use crate::error::EncodeError;
 
 /// The dts of each packet of one stream.
 #[derive(Clone, Debug)]
-pub(super) struct DtsClock {
+pub(crate) struct DtsClock {
     /// The reorder delay in frames: the config's `b_frames`.
     delay: u32,
     /// The first frame's `(pts, duration)`.
@@ -28,7 +28,7 @@ pub(super) struct DtsClock {
 }
 
 impl DtsClock {
-    pub(super) const fn new(delay: u32) -> Self {
+    pub(crate) const fn new(delay: u32) -> Self {
         Self {
             delay,
             first: None,
@@ -38,13 +38,13 @@ impl DtsClock {
     }
 
     /// Records a frame sent to the encoder.
-    pub(super) fn push(&mut self, pts: i64, duration: i64) {
+    pub(crate) fn push(&mut self, pts: i64, duration: i64) {
         self.first.get_or_insert((pts, duration));
         self.inputs.push_back(pts);
     }
 
     /// The dts of the next packet in decode order, whose pts is `pts`.
-    pub(super) fn next(&mut self, pts: i64) -> Result<i64, EncodeError> {
+    pub(crate) fn next(&mut self, pts: i64) -> Result<i64, EncodeError> {
         let dts = if self.emitted < u64::from(self.delay) {
             let (first_pts, first_duration) =
                 self.first.ok_or(EncodeError::UnexpectedOutput { pts })?;

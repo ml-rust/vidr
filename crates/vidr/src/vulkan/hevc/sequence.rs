@@ -29,7 +29,7 @@ pub(super) struct SequenceFacts {
 }
 
 /// The `StdVideoH265LevelIdc` of `general_level_idc`, which is 30 times the level.
-pub(super) const fn std_level(level_idc: u8) -> Option<u32> {
+pub(in crate::vulkan) const fn std_level(level_idc: u8) -> Option<u32> {
     Some(match level_idc {
         30 => 0,
         60 => 1,

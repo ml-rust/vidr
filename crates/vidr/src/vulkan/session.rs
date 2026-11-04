@@ -308,19 +308,22 @@ fn choose_format(
     }
 }
 
-/// The format of `profile`'s samples at `usage`, or the refusal.
-pub(super) fn query_format(
+/// The call that lists video formats.
+pub(super) const FORMAT_CALL: &str = "vkGetPhysicalDeviceVideoFormatPropertiesKHR";
+
+/// The entry for `wanted` at `usage` that the driver lists for a profile, decode or encode. The
+/// outer error is the call's result. The inner error states why no entry fits.
+pub(super) fn listed_format(
     device: &VulkanDevice,
-    profile: &VideoProfile,
+    info: vk::VideoProfileInfoKHR<'_>,
     usage: vk::ImageUsageFlags,
-) -> Result<ImageFormat, DecodeError> {
-    let info = profile.info();
+    wanted: vk::Format,
+) -> Result<Result<ImageFormat, String>, vk::Result> {
     let infos = [info];
     let mut list = vk::VideoProfileListInfoKHR::default().profiles(&infos);
     let query = vk::PhysicalDeviceVideoFormatInfoKHR::default()
         .image_usage(usage)
         .push_next(&mut list);
-    let call = "vkGetPhysicalDeviceVideoFormatPropertiesKHR";
     let query_fn = device
         .video_instance_fns
         .fp()
@@ -328,11 +331,15 @@ pub(super) fn query_format(
     let mut count = 0_u32;
     // SAFETY: `query` and its chain live through the call, and `count` is writable.
     let result = unsafe { query_fn(device.physical, &query, &mut count, ptr::null_mut()) };
-    check_profile(result, profile, call)?;
+    if result != vk::Result::SUCCESS {
+        return Err(result);
+    }
     let mut entries = vec![vk::VideoFormatPropertiesKHR::default(); count as usize];
     // SAFETY: `entries` holds `count` initialised elements.
     let result = unsafe { query_fn(device.physical, &query, &mut count, entries.as_mut_ptr()) };
-    check_profile(result, profile, call)?;
+    if result != vk::Result::SUCCESS {
+        return Err(result);
+    }
     entries.truncate(count as usize);
     let listed: Vec<_> = entries
         .iter()
@@ -344,13 +351,32 @@ pub(super) fn query_format(
             mapping: entry.component_mapping,
         })
         .collect();
+    Ok(choose_format(&listed, usage, wanted))
+}
+
+/// The format of `profile`'s samples at `usage`, or the refusal.
+pub(super) fn query_format(
+    device: &VulkanDevice,
+    profile: &VideoProfile,
+    usage: vk::ImageUsageFlags,
+) -> Result<ImageFormat, DecodeError> {
     let wanted = image_format(profile.pixel_format());
-    choose_format(&listed, usage, wanted).map_err(|reason| DecodeError::VulkanRefused {
+    let chosen = match listed_format(device, profile.info(), usage, wanted) {
+        Ok(chosen) => chosen,
+        Err(result) => {
+            check_profile(result, profile, FORMAT_CALL)?;
+            return Err(vk_error(FORMAT_CALL, result, "the stream's profile"));
+        }
+    };
+    chosen.map_err(|reason| DecodeError::VulkanRefused {
         codec: profile.codec(),
         what: format!("{wanted:?} images with usage {usage:?}"),
         reason,
     })
 }
+
+/// The call that creates a video session.
+pub(super) const SESSION_CALL: &str = "vkCreateVideoSessionKHR";
 
 /// What a video session opens with.
 pub(super) struct SessionSpec<'a> {
@@ -360,6 +386,18 @@ pub(super) struct SessionSpec<'a> {
     pub(super) coded: (u32, u32),
     pub(super) slots: u32,
     pub(super) active_references: u32,
+}
+
+/// What any video session opens with, decode or encode.
+pub(super) struct RawSessionSpec<'a> {
+    pub(super) family: u32,
+    pub(super) profile: vk::VideoProfileInfoKHR<'a>,
+    pub(super) picture_format: vk::Format,
+    pub(super) reference_format: vk::Format,
+    pub(super) coded: (u32, u32),
+    pub(super) slots: u32,
+    pub(super) active_references: u32,
+    pub(super) std_version: &'a vk::ExtensionProperties,
 }
 
 /// A video session and the memory bound to it.
@@ -374,20 +412,39 @@ impl VideoSession {
         device: &Arc<VulkanDevice>,
         spec: &SessionSpec<'_>,
     ) -> Result<Self, DecodeError> {
-        let profile = spec.profile.info();
+        let raw = RawSessionSpec {
+            family: device.video_family,
+            profile: spec.profile.info(),
+            picture_format: spec.format,
+            reference_format: spec.format,
+            coded: spec.coded,
+            slots: spec.slots,
+            active_references: spec.active_references,
+            std_version: &spec.caps.std_version,
+        };
+        Self::open(device, &raw, |result| {
+            check_profile(result, spec.profile, SESSION_CALL)
+        })
+    }
+
+    /// Opens a session and binds its memory. `check` turns the create call's result into an error.
+    pub(super) fn open<E: From<DecodeError>>(
+        device: &Arc<VulkanDevice>,
+        spec: &RawSessionSpec<'_>,
+        check: impl FnOnce(vk::Result) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let info = vk::VideoSessionCreateInfoKHR::default()
-            .queue_family_index(device.video_family)
-            .video_profile(&profile)
-            .picture_format(spec.format)
+            .queue_family_index(spec.family)
+            .video_profile(&spec.profile)
+            .picture_format(spec.picture_format)
             .max_coded_extent(vk::Extent2D {
                 width: spec.coded.0,
                 height: spec.coded.1,
             })
-            .reference_picture_format(spec.format)
+            .reference_picture_format(spec.reference_format)
             .max_dpb_slots(spec.slots)
             .max_active_reference_pictures(spec.active_references)
-            .std_header_version(&spec.caps.std_version);
-        let call = "vkCreateVideoSessionKHR";
+            .std_header_version(spec.std_version);
         let mut raw = vk::VideoSessionKHR::null();
         // SAFETY: `info` and each pointer in it live through the call.
         let result = unsafe {
@@ -398,7 +455,7 @@ impl VideoSession {
                 &mut raw,
             )
         };
-        check_profile(result, spec.profile, call)?;
+        check(result)?;
         let mut session = Self {
             device: Arc::clone(device),
             raw,

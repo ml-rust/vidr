@@ -44,14 +44,14 @@ use super::session::{SessionParameters, SessionSpec, VideoProfile, VideoSession,
 use crate::error::DecodeError;
 
 /// How long a host wait lasts before it reports an error.
-const WAIT_NS: u64 = WAIT.as_nanos() as u64;
+pub(super) const WAIT_NS: u64 = WAIT.as_nanos() as u64;
 /// The smallest bitstream buffer.
 const MIN_BITSTREAM_BYTES: u64 = 1 << 20;
 /// `VK_QUERY_RESULT_STATUS_COMPLETE_KHR`.
-const STATUS_COMPLETE: i32 = 1;
+pub(super) const STATUS_COMPLETE: i32 = 1;
 
 /// The name of a `VkQueryResultStatusKHR` value.
-const fn status_name(status: i32) -> &'static str {
+pub(super) const fn status_name(status: i32) -> &'static str {
     match status {
         -1 => "ERROR",
         0 => "NOT_READY",
@@ -262,31 +262,14 @@ impl DecodeEngine {
 
     /// Ends the command buffer, submits it, and waits for it.
     fn submit_and_wait(&mut self, what: &str) -> Result<u64, DecodeError> {
-        let cmd = self.objects.pool.buffer;
-        // SAFETY: the buffer is recording, and each scope in it is closed.
-        unsafe { self.device.raw.end_command_buffer(cmd) }
-            .map_err(|result| vk_error("vkEndCommandBuffer", result, what))?;
-        let value = self.objects.timeline.last + 1;
-        let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-        let signals = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(self.objects.timeline.raw)
-            .value(value)
-            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-        let submit = vk::SubmitInfo2::default()
-            .command_buffer_infos(&commands)
-            .signal_semaphore_infos(&signals);
-        {
+        let recorder = Recorder {
+            device: &self.device,
+            cmd: self.objects.pool.buffer,
+        };
+        let value = {
             let queue = self.device.video_queue();
-            // SAFETY: the guard holds the queue's external synchronisation. The buffer
-            // was recorded for this family, and each array lives through the call.
-            unsafe {
-                self.device
-                    .sync2
-                    .queue_submit2(*queue, &[submit], vk::Fence::null())
-            }
-            .map_err(|result| vk_error("vkQueueSubmit2", result, what))?;
-        }
-        self.objects.timeline.last = value;
+            recorder.end_and_submit(*queue, &mut self.objects.timeline, what)?
+        };
         self.objects.timeline.wait(value, WAIT_NS)?;
         Ok(value)
     }
@@ -452,24 +435,28 @@ const fn safe_to_destroy(video_done: bool, copies_done: bool) -> bool {
     video_done && copies_done
 }
 
+/// Waits for `timeline`'s last value, then for wgpu's queue, which holds any copy that a timed-out
+/// call left behind. Each wait stops after [`WAIT`]. The result states whether an engine can free
+/// its objects.
+pub(super) fn queues_finished(device: &VulkanDevice, timeline: &Timeline) -> bool {
+    let video_done = timeline.wait(timeline.last, WAIT_NS).is_ok();
+    // A stalled video queue also stalls each copy that waits on it. So the second wait
+    // runs only after the first passes.
+    let copies_done = video_done
+        && device
+            .wait_general_queue(None, "the end of a session")
+            .is_ok();
+    safe_to_destroy(video_done, copies_done)
+}
+
 impl Drop for DecodeEngine {
-    /// Waits for this engine's last decode, then for wgpu's queue, which holds any copy
-    /// that a timed-out `copy_planes` left behind. Each wait stops after [`WAIT`].
+    /// Waits for both queues. See [`queues_finished`].
     ///
     /// When a wait times out or the device is lost, the objects stay allocated for the
     /// life of the process. A GPU can still use them, and a destroy in flight is undefined
     /// behaviour. The caller already holds the error of the stall, so `drop` reports nothing.
     fn drop(&mut self) {
-        let timeline = &self.objects.timeline;
-        let video_done = timeline.wait(timeline.last, WAIT_NS).is_ok();
-        // A stalled video queue also stalls each copy that waits on it. So the second wait
-        // runs only after the first passes.
-        let copies_done = video_done
-            && self
-                .device
-                .wait_general_queue(None, "the end of a session")
-                .is_ok();
-        if safe_to_destroy(video_done, copies_done) {
+        if queues_finished(&self.device, &self.objects.timeline) {
             // SAFETY: both queues finished with the objects, `drop` runs once, and nothing
             // reads `objects` after this line.
             unsafe { ManuallyDrop::drop(&mut self.objects) };

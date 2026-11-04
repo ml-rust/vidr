@@ -139,7 +139,7 @@ where
     R: Runtime<DType = DType>,
 {
     match backend {
-        EncoderBackend::Nvenc => Err(wrong_runtime::<R>(backend.name())),
+        EncoderBackend::Nvenc | EncoderBackend::Vulkan => Err(wrong_runtime::<R>(backend.name())),
         #[cfg(feature = "cpu-av1")]
         EncoderBackend::Rav1r => {
             let encoder = vidr::encode::rav1r::Rav1rEncoder::<R>::new(config);

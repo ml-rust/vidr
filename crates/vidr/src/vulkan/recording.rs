@@ -1,5 +1,6 @@
 //! The commands of one decode, in their one order: barriers, the coding scope, and the release.
-//! Each function borrows the objects it records against.
+//! Each function borrows the objects it records against. Encode shares the begin and submit of
+//! `Recorder`, and `resource`.
 
 use ash::vk;
 
@@ -8,7 +9,7 @@ use super::caps::DpbMode;
 use super::device::VulkanDevice;
 use super::engine::DecodeRequest;
 use super::error::vk_error;
-use super::objects::StatusQuery;
+use super::objects::{StatusQuery, Timeline};
 use super::pictures::{PictureImage, PictureStore};
 use super::request_checks::{absent_slot, bound_parameters};
 use crate::error::DecodeError;
@@ -30,7 +31,10 @@ pub(super) const fn decode_layout(mode: DpbMode) -> vk::ImageLayout {
     }
 }
 
-fn resource(view: vk::ImageView, coded: (u32, u32)) -> vk::VideoPictureResourceInfoKHR<'static> {
+pub(super) fn resource(
+    view: vk::ImageView,
+    coded: (u32, u32),
+) -> vk::VideoPictureResourceInfoKHR<'static> {
     vk::VideoPictureResourceInfoKHR::default()
         .coded_extent(vk::Extent2D {
             width: coded.0,
@@ -123,6 +127,38 @@ impl Recorder<'_> {
         // SAFETY: the reset above leaves the buffer ready to record.
         unsafe { self.device.raw.begin_command_buffer(self.cmd, &info) }
             .map_err(|result| vk_error("vkBeginCommandBuffer", result, what))
+    }
+
+    /// Ends the buffer and submits it on `queue`, with a signal of the next value of `timeline`.
+    /// The caller holds the queue's guard through this call.
+    pub(super) fn end_and_submit(
+        self,
+        queue: vk::Queue,
+        timeline: &mut Timeline,
+        what: &str,
+    ) -> Result<u64, DecodeError> {
+        // SAFETY: the buffer is recording, and each scope in it is closed.
+        unsafe { self.device.raw.end_command_buffer(self.cmd) }
+            .map_err(|result| vk_error("vkEndCommandBuffer", result, what))?;
+        let value = timeline.last + 1;
+        let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(self.cmd)];
+        let signals = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(timeline.raw)
+            .value(value)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+        let submit = vk::SubmitInfo2::default()
+            .command_buffer_infos(&commands)
+            .signal_semaphore_infos(&signals);
+        // SAFETY: the caller's guard holds the queue's external synchronisation. The buffer was
+        // recorded for this queue's family, and each array lives through the call.
+        unsafe {
+            self.device
+                .sync2
+                .queue_submit2(queue, &[submit], vk::Fence::null())
+        }
+        .map_err(|result| vk_error("vkQueueSubmit2", result, what))?;
+        timeline.last = value;
+        Ok(value)
     }
 
     /// Records the coding scope: the first picture's reset, the query, and the decode.

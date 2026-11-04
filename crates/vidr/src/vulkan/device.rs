@@ -1,7 +1,8 @@
 //! [`VulkanDevice`]: one Vulkan device that numr's WebGPU backend and the video
 //! queue share.
 //!
-//! wgpu-hal opens the device with the video extensions and the decode queue added.
+//! wgpu-hal opens the device with the video extensions, the decode queue, and the encode queue
+//! when the device has one.
 //! wgpu wraps it, and `WgpuClient::install` makes it numr's device 0. So a tensor's
 //! buffer and a decoded image live on one `VkDevice`, and a plane copy stays on it.
 
@@ -16,18 +17,18 @@ use wgpu::hal::api::Vulkan;
 use wgpu::hal::vulkan as hal_vulkan;
 
 use super::copy::WAIT;
-use super::gap::{self, PhysicalDeviceVideoDecodeVp9Features};
-use super::probe::{self, DeviceFacts, Placement};
+use super::gap::{
+    self, PhysicalDeviceVideoDecodeVp9Features, PhysicalDeviceVideoEncodeAv1Features,
+};
+use super::probe::{self, DeviceFacts, EncodePlacement, Placement};
 use super::validation::{self, ValidationCapture};
 use crate::error::DecodeError;
 
 /// The numr device index of the first device. A device opened after a loss takes the next one,
 /// because numr holds each index for the life of the process.
 const NUMR_INDEX: usize = 0;
-/// One queue, at full priority.
-static ONE_QUEUE: [f32; 1] = [1.0];
-/// wgpu's queue and the decode queue, in one family.
-static TWO_QUEUES: [f32; 2] = [1.0, 1.0];
+/// Full priority for each queue of a family: wgpu's, decode, and encode at most.
+static QUEUE_PRIORITIES: [f32; 3] = [1.0, 1.0, 1.0];
 
 static SHARED: Mutex<Option<Arc<VulkanDevice>>> = Mutex::new(None);
 
@@ -39,7 +40,8 @@ pub struct VulkanOptions {
     pub validation: bool,
 }
 
-/// The Vulkan device behind numr's WebGPU device 0, with a video decode queue.
+/// The Vulkan device behind numr's WebGPU device 0, with a video decode queue, and an encode queue
+/// when the device has one.
 pub struct VulkanDevice {
     pub(super) instance: ash::Instance,
     pub(super) raw: ash::Device,
@@ -54,8 +56,13 @@ pub struct VulkanDevice {
     pub(super) video_instance_fns: ash::khr::video_queue::Instance,
     pub(super) video_fns: ash::khr::video_queue::Device,
     pub(super) decode_fns: ash::khr::video_decode_queue::Device,
+    /// Callable only when `encode` is `Some`.
+    pub(super) encode_fns: ash::khr::video_encode_queue::Device,
     pub(super) sync2: ash::khr::synchronization2::Device,
+    /// The encode queue's place, on a device that has one.
+    pub(super) encode: Option<EncodePlacement>,
     video_queue: Mutex<vk::Queue>,
+    encode_queue: Option<Mutex<vk::Queue>>,
     client: WgpuClient,
     numr_device: WgpuDevice,
     numr_index: usize,
@@ -138,6 +145,10 @@ impl VulkanDevice {
         // SAFETY: the device was created with this family and queue index.
         let video_queue =
             unsafe { raw.get_device_queue(placement.video_family, placement.video_queue_index) };
+        let encode_queue = placement.encode.map(|encode| {
+            // SAFETY: the device was created with this family and queue index.
+            Mutex::new(unsafe { raw.get_device_queue(encode.family, encode.queue_index) })
+        });
         let client = WgpuClient::install(index, &adapter, wgpu_device.clone(), wgpu_queue.clone())
             .map_err(|error| {
                 unavailable(format!(
@@ -148,8 +159,11 @@ impl VulkanDevice {
         Ok(Self {
             video_fns: ash::khr::video_queue::Device::new(&instance, &raw),
             decode_fns: ash::khr::video_decode_queue::Device::new(&instance, &raw),
+            encode_fns: ash::khr::video_encode_queue::Device::new(&instance, &raw),
             sync2: ash::khr::synchronization2::Device::new(&instance, &raw),
             video_instance_fns,
+            encode: placement.encode,
+            encode_queue,
             instance,
             raw,
             physical,
@@ -249,6 +263,14 @@ impl VulkanDevice {
         self.video_family != self.general_family
     }
 
+    /// The encode queue, or `None` on a device without one. The guard is its external
+    /// synchronisation.
+    pub(super) fn encode_queue(&self) -> Option<MutexGuard<'_, vk::Queue>> {
+        self.encode_queue
+            .as_ref()
+            .map(|queue| queue.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
     /// The decode queue. The guard is its external synchronisation.
     pub(super) fn video_queue(&self) -> MutexGuard<'_, vk::Queue> {
         self.video_queue
@@ -313,16 +335,28 @@ fn open_hal_device(
         p_next: std::ptr::null_mut(),
         video_decode_vp9: vk::TRUE,
     };
+    let mut av1_encode = PhysicalDeviceVideoEncodeAv1Features {
+        s_type: gap::TYPE_AV1_ENCODE_FEATURES,
+        p_next: std::ptr::null_mut(),
+        video_encode_av1: vk::TRUE,
+    };
     let mut synchronization2 =
         vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
+    // `push_next` walks this chain, so each feature reaches the device create info.
     if placement.decode_ops.contains(gap::DECODE_VP9) {
-        // `push_next` walks this chain, so the feature reaches the device create info.
         synchronization2.p_next = std::ptr::from_mut(&mut vp9).cast();
+    }
+    if placement
+        .encode
+        .is_some_and(|encode| encode.ops.contains(gap::ENCODE_AV1))
+    {
+        av1_encode.p_next = synchronization2.p_next;
+        synchronization2.p_next = std::ptr::from_mut(&mut av1_encode).cast();
     }
     let callback = device_callback(*placement, &mut synchronization2);
     // SAFETY: the guard's adapter stays live through the call. The callback only adds
-    // extensions and features `place` checked, and adds or widens one queue create info.
-    // `vp9` outlives the call, so the chain through `synchronization2` stays valid.
+    // extensions and features `place` checked, and adds or widens queue create infos.
+    // `vp9` and `av1_encode` outlive the call, so the chain through `synchronization2` stays valid.
     unsafe {
         let hal = adapter
             .as_hal::<Vulkan>()
@@ -337,9 +371,9 @@ fn open_hal_device(
     .map_err(|error| unavailable(format!("vkCreateDevice fails: {error}")))
 }
 
-/// What the device adds to wgpu-hal's: the video extensions, the queue, and
+/// What the device adds to wgpu-hal's: the video extensions, the queues, and
 /// `synchronization2`, which the video extensions need. The chain of `synchronization2` holds
-/// the VP9 feature when the device opens with VP9.
+/// the VP9 decode and AV1 encode features when the device opens with them.
 fn device_callback<'this>(
     placement: Placement,
     synchronization2: &'this mut vk::PhysicalDeviceSynchronization2Features<'this>,
@@ -353,22 +387,28 @@ fn device_callback<'this>(
                 add_extension(args.extensions, name);
             }
         }
-        let priorities: &'static [f32] = if placement.video_family == probe::GENERAL_FAMILY {
-            &TWO_QUEUES
-        } else {
-            &ONE_QUEUE
-        };
-        match args
-            .queue_create_infos
-            .iter_mut()
-            .find(|info| info.queue_family_index == placement.video_family)
-        {
-            Some(info) => *info = info.queue_priorities(priorities),
-            None => args.queue_create_infos.push(
-                vk::DeviceQueueCreateInfo::default()
-                    .queue_family_index(placement.video_family)
-                    .queue_priorities(priorities),
-            ),
+        if let Some(encode) = placement.encode {
+            add_extension(args.extensions, ash::khr::video_encode_queue::NAME);
+            for (name, op) in probe::ENCODE_EXTENSIONS {
+                if encode.ops.contains(op) {
+                    add_extension(args.extensions, name);
+                }
+            }
+        }
+        for (family, count) in placement.queue_counts() {
+            let priorities: &'static [f32] = &QUEUE_PRIORITIES[..count as usize];
+            match args
+                .queue_create_infos
+                .iter_mut()
+                .find(|info| info.queue_family_index == family)
+            {
+                Some(info) => *info = info.queue_priorities(priorities),
+                None => args.queue_create_infos.push(
+                    vk::DeviceQueueCreateInfo::default()
+                        .queue_family_index(family)
+                        .queue_priorities(priorities),
+                ),
+            }
         }
         let info = std::mem::take(args.create_info);
         *args.create_info = info.push_next(synchronization2);

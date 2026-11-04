@@ -91,13 +91,16 @@ fn machines(compiled: &Compiled) -> Vec<Machine> {
             for nvenc in probes(compiled.cuda) {
                 for wgpu in probes(compiled.wgpu) {
                     for vulkan in probes(compiled.vulkan_video) {
-                        all.push(Machine {
-                            cuda: answer(cuda, "cuda"),
-                            nvdec: answer(nvdec, "nvdec"),
-                            nvenc: answer(nvenc, "nvenc"),
-                            wgpu: answer(wgpu, "wgpu"),
-                            vulkan: answer(vulkan, "vulkan"),
-                        });
+                        for vulkan_encode in probes(compiled.vulkan_video) {
+                            all.push(Machine {
+                                cuda: answer(cuda, "cuda"),
+                                nvdec: answer(nvdec, "nvdec"),
+                                nvenc: answer(nvenc, "nvenc"),
+                                wgpu: answer(wgpu, "wgpu"),
+                                vulkan: answer(vulkan, "vulkan"),
+                                vulkan_encode: answer(vulkan_encode, "vulkan encode"),
+                            });
+                        }
                     }
                 }
             }
@@ -113,7 +116,8 @@ fn expected_runtime(
 ) -> Option<RuntimeKind> {
     let hardware =
         request.decoder == DecoderChoice::Nvdec || request.encoder == EncoderChoice::Nvenc;
-    let vulkan = request.decoder == DecoderChoice::Vulkan;
+    let vulkan =
+        request.decoder == DecoderChoice::Vulkan || request.encoder == EncoderChoice::Vulkan;
     let cuda = compiled.cuda && machine.cuda.is_ok();
     let wgpu = compiled.wgpu && machine.wgpu.is_ok();
     match request.runtime {
@@ -227,8 +231,15 @@ fn expected(
     };
     let encoder = match request.encoder {
         EncoderChoice::Nvenc => machine.nvenc.is_ok().then_some(EncoderBackend::Nvenc)?,
+        EncoderChoice::Vulkan => machine
+            .vulkan_encode
+            .is_ok()
+            .then_some(EncoderBackend::Vulkan)?,
         EncoderChoice::Cpu => expected_cpu_encoder(request.codec, compiled, library)?,
         EncoderChoice::Auto if hardware && machine.nvenc.is_ok() => EncoderBackend::Nvenc,
+        EncoderChoice::Auto if runtime == RuntimeKind::Wgpu && machine.vulkan_encode.is_ok() => {
+            EncoderBackend::Vulkan
+        }
         EncoderChoice::Auto => expected_cpu_encoder(request.codec, compiled, library)?,
     };
     let check = expected_check(request, runtime, decoder, encoder, compiled, machine)?;
@@ -244,6 +255,7 @@ fn assert_allowed(execution: &Execution, name: &impl Fn() -> String) {
     }
     if execution.runtime != RuntimeKind::Wgpu {
         assert_ne!(execution.decoder, DecoderBackend::Vulkan, "{}", name());
+        assert_ne!(execution.encoder, EncoderBackend::Vulkan, "{}", name());
         assert_ne!(
             execution.check_decoder,
             DecoderBackend::Vulkan,
@@ -329,6 +341,7 @@ fn no_gpu() -> Machine {
         nvenc: down("libnvidia-encode.so.1"),
         wgpu: down("a WebGPU adapter"),
         vulkan: down("an H.264 Vulkan Video queue"),
+        vulkan_encode: down("a Vulkan Video encode queue"),
     }
 }
 
@@ -339,6 +352,7 @@ fn all_up() -> Machine {
         nvenc: up(),
         wgpu: up(),
         vulkan: up(),
+        vulkan_encode: up(),
     }
 }
 
@@ -444,9 +458,10 @@ fn auto_on_webgpu_picks_vulkan_for_each_source_and_checks_with_it() {
     )
     .expect("execution");
     assert_eq!(chosen.decoder, DecoderBackend::Vulkan);
-    assert_eq!(chosen.encoder, EncoderBackend::Rav1r);
+    assert_eq!(chosen.encoder, EncoderBackend::Vulkan);
     assert_eq!(chosen.check_decoder, DecoderBackend::Vulkan);
     assert!(chosen.reasons.decoder.contains("Vulkan Video"));
+    assert!(chosen.reasons.encoder.contains("Vulkan Video"));
 
     for codec in [SourceCodec::Hevc, SourceCodec::Vp9, SourceCodec::Av1] {
         let chosen = execution_for(
@@ -472,7 +487,7 @@ fn vulkan_reads_back_h264_output_and_auto_falls_to_the_cpu_without_it() {
     .expect("execution");
     assert_eq!(chosen.decoder, DecoderBackend::Vulkan);
     assert_eq!(chosen.check_decoder, DecoderBackend::Vulkan);
-    assert!(matches!(chosen.encoder, EncoderBackend::Openh264(_)));
+    assert_eq!(chosen.encoder, EncoderBackend::Vulkan);
 
     let machine = Machine {
         vulkan: down("an H.264 Vulkan Video queue"),
@@ -552,6 +567,121 @@ fn vulkan_with_cuda_or_cpu_is_refused_and_names_both_sides() {
     let text = refused(&asked, &h264(None), &everything(), &all_up());
     assert!(text.contains("--decoder vulkan"), "{text}");
     assert!(text.contains("--encoder nvenc"), "{text}");
+}
+
+#[test]
+fn auto_on_webgpu_falls_to_the_cpu_encoder_with_the_probe_in_the_reason() {
+    let machine = Machine {
+        vulkan_encode: down("a Vulkan Video encode queue"),
+        ..all_up()
+    };
+    let chosen = execution_for(
+        &webgpu_request(DecoderChoice::Auto, Codec::Av1),
+        &h264(Some(HIGH)),
+        &webgpu_build(),
+        &machine,
+    )
+    .expect("execution");
+    assert_eq!(chosen.decoder, DecoderBackend::Vulkan);
+    assert_eq!(chosen.encoder, EncoderBackend::Rav1r);
+    assert!(
+        chosen
+            .reasons
+            .encoder
+            .contains("Vulkan Video encode is out")
+    );
+    assert!(chosen.reasons.encoder.contains("encode queue"));
+
+    let hevc = execution_for(
+        &webgpu_request(DecoderChoice::Auto, Codec::Hevc),
+        &h264(Some(HIGH)),
+        &webgpu_build(),
+        &machine,
+    );
+    let text = hevc.expect_err("no HEVC CPU encoder").to_string();
+    assert!(text.contains("encode queue"), "{text}");
+    assert!(text.contains("--encoder vulkan"), "{text}");
+}
+
+#[test]
+fn an_explicit_vulkan_encoder_names_each_refusal() {
+    let asked = ExecutionRequest {
+        encoder: EncoderChoice::Vulkan,
+        ..webgpu_request(DecoderChoice::Vulkan, Codec::Hevc)
+    };
+    let chosen = execution_for(&asked, &h264(None), &webgpu_build(), &all_up()).expect("execution");
+    assert_eq!(chosen.runtime, RuntimeKind::Wgpu);
+    assert_eq!(chosen.decoder, DecoderBackend::Vulkan);
+    assert_eq!(chosen.encoder, EncoderBackend::Vulkan);
+    assert_eq!(chosen.reasons.encoder, "--encoder vulkan");
+
+    let unbuilt = Compiled {
+        vulkan_video: false,
+        ..webgpu_build()
+    };
+    let cpu_decoder = ExecutionRequest {
+        decoder: DecoderChoice::Cpu,
+        ..asked
+    };
+    let text = refused(
+        &cpu_decoder,
+        &source(SourceCodec::Hevc),
+        &unbuilt,
+        &all_up(),
+    );
+    assert!(text.contains("--features vulkan-video"), "{text}");
+
+    let machine = Machine {
+        vulkan_encode: down("a Vulkan Video encode queue"),
+        ..all_up()
+    };
+    let text = refused(&asked, &h264(None), &webgpu_build(), &machine);
+    assert!(text.contains("--encoder vulkan"), "{text}");
+    assert!(text.contains("encode queue"), "{text}");
+    assert!(text.contains("--encoder cpu"), "{text}");
+}
+
+#[test]
+fn a_vulkan_encoder_with_cuda_cpu_or_nvdec_is_refused_and_names_both_sides() {
+    for (runtime, name) in [
+        (RuntimeChoice::Cuda, "--runtime cuda"),
+        (RuntimeChoice::Cpu, "--runtime cpu"),
+    ] {
+        let asked = ExecutionRequest {
+            runtime,
+            decoder: DecoderChoice::Cpu,
+            encoder: EncoderChoice::Vulkan,
+            ..request(Codec::Hevc)
+        };
+        let text = refused(&asked, &source(SourceCodec::Hevc), &everything(), &all_up());
+        assert!(text.contains(name), "{text}");
+        assert!(text.contains("--encoder vulkan"), "{text}");
+        assert!(text.contains("--runtime wgpu"), "{text}");
+    }
+    let asked = ExecutionRequest {
+        decoder: DecoderChoice::Nvdec,
+        encoder: EncoderChoice::Vulkan,
+        ..request(Codec::Hevc)
+    };
+    let text = refused(&asked, &h264(None), &everything(), &all_up());
+    assert!(text.contains("--encoder vulkan"), "{text}");
+    assert!(text.contains("--decoder nvdec"), "{text}");
+}
+
+#[test]
+fn an_auto_runtime_takes_webgpu_for_a_vulkan_encoder() {
+    let asked = ExecutionRequest {
+        decoder: DecoderChoice::Cpu,
+        encoder: EncoderChoice::Vulkan,
+        ..request(Codec::H264)
+    };
+    let chosen =
+        execution_for(&asked, &source(SourceCodec::Hevc), &everything(), &all_up()).expect("run");
+    assert_eq!(chosen.runtime, RuntimeKind::Wgpu);
+    assert_eq!(chosen.encoder, EncoderBackend::Vulkan);
+    assert!(chosen.reasons.runtime.contains("--encoder vulkan"));
+    assert_eq!(chosen.check_decoder, DecoderBackend::Vulkan);
+    assert!(chosen.reasons.check_decoder.contains("hevc"));
 }
 
 #[test]

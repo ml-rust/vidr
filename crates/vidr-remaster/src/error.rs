@@ -93,7 +93,7 @@ pub enum RemasterError {
     /// The encoder refuses its config or fails.
     #[cfg(any(feature = "mp4", feature = "mkv"))]
     Encode(EncodeError),
-    /// NVENC has no 10-bit H.264, and the source is 10-bit.
+    /// The hardware encoder has no 10-bit H.264, and the source is 10-bit.
     #[cfg(any(feature = "mp4", feature = "mkv"))]
     H264TenBit,
     /// OpenH264 encodes 8 bits only, and the source is 10-bit.
@@ -170,8 +170,8 @@ impl fmt::Display for RemasterError {
             Self::Encode(error) => fmt::Display::fmt(error, f),
             #[cfg(any(feature = "mp4", feature = "mkv"))]
             Self::H264TenBit => f.write_str(
-                "NVENC does not encode H.264 at 10 bits, and this video is 10-bit. Pass \
-                 --codec hevc.",
+                "This hardware encoder does not encode H.264 at 10 bits, and this video is \
+                 10-bit. Pass --codec hevc.",
             ),
             #[cfg(any(feature = "mp4", feature = "mkv"))]
             Self::Openh264TenBit => f.write_str(

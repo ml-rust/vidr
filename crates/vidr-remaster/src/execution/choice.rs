@@ -110,10 +110,12 @@ choice! {
 
 choice! {
     /// `--encoder`.
-    EncoderChoice, "--encoder", "auto, nvenc, or cpu",
+    EncoderChoice, "--encoder", "auto, nvenc, vulkan, or cpu",
     {
         /// NVENC, on the CUDA runtime.
         Nvenc => "nvenc",
+        /// Vulkan Video, on the WebGPU runtime.
+        Vulkan => "vulkan",
         /// The CPU encoder of the output's codec.
         Cpu => "cpu",
     }
@@ -217,6 +219,8 @@ impl fmt::Display for DecoderBackend {
 pub enum EncoderBackend {
     /// NVENC. Frames stay in device memory.
     Nvenc,
+    /// Vulkan Video, H.264, HEVC, or AV1. Frames stay in device memory.
+    Vulkan,
     /// `Rav1rEncoder`, AV1.
     Rav1r,
     /// `Openh264Encoder`, H.264 Constrained Baseline.
@@ -228,6 +232,7 @@ impl EncoderBackend {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Nvenc => "nvenc",
+            Self::Vulkan => "vulkan",
             Self::Rav1r => "rav1r",
             Self::Openh264(Openh264Build::Source) => "openh264",
             Self::Openh264(Openh264Build::Cisco) => "openh264-cisco",
@@ -237,7 +242,7 @@ impl EncoderBackend {
     /// The route the backend declares on `runtime`.
     pub const fn route_on(self, runtime: RuntimeKind) -> FrameRoute {
         match (self, runtime) {
-            (Self::Nvenc, _) => FrameRoute::Device,
+            (Self::Nvenc | Self::Vulkan, _) => FrameRoute::Device,
             (_, RuntimeKind::Cpu) => FrameRoute::HostOnly,
             (_, RuntimeKind::Cuda | RuntimeKind::Wgpu) => FrameRoute::HostDownload,
         }
@@ -288,6 +293,10 @@ mod tests {
         );
         assert_eq!(
             EncoderBackend::Nvenc.route_on(RuntimeKind::Cuda),
+            FrameRoute::Device
+        );
+        assert_eq!(
+            EncoderBackend::Vulkan.route_on(RuntimeKind::Wgpu),
             FrameRoute::Device
         );
         assert_eq!(

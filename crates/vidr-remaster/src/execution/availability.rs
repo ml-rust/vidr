@@ -12,7 +12,7 @@ pub struct Compiled {
     pub cuda: bool,
     /// `wgpu`: the WebGPU runtime.
     pub wgpu: bool,
-    /// `vulkan-video`: H.264 decode on Vulkan Video, on the WebGPU runtime.
+    /// `vulkan-video`: decode and encode on Vulkan Video, on the WebGPU runtime.
     pub vulkan_video: bool,
     /// `dav1d`: AV1 decode.
     pub dav1d: bool,
@@ -58,6 +58,8 @@ pub struct Machine {
     pub wgpu: Probe,
     /// A device with an H.264 Vulkan Video decode queue.
     pub vulkan: Probe,
+    /// A device with a Vulkan Video encode queue and a codec vidr names.
+    pub vulkan_encode: Probe,
 }
 
 impl Machine {
@@ -72,6 +74,7 @@ impl Machine {
                 nvenc: skipped(),
                 wgpu: skipped(),
                 vulkan: skipped(),
+                vulkan_encode: skipped(),
             };
         }
         let cuda = probe_cuda();
@@ -81,6 +84,7 @@ impl Machine {
             cuda,
             wgpu: probe_wgpu(),
             vulkan: probe_vulkan(),
+            vulkan_encode: probe_vulkan_encode(),
         }
     }
 }
@@ -146,6 +150,17 @@ fn probe_vulkan() -> Probe {
     Err("the vulkan-video feature is off".to_owned())
 }
 
+/// This opens no device, so numr can still open its own.
+#[cfg(feature = "vulkan-video")]
+fn probe_vulkan_encode() -> Probe {
+    vidr::vulkan::vulkan_encode_available().map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "vulkan-video"))]
+fn probe_vulkan_encode() -> Probe {
+    Err("the vulkan-video feature is off".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +188,12 @@ mod tests {
                     .as_ref()
                     .is_err_and(|text| text.contains("vulkan-video"))
             );
+            assert!(
+                machine
+                    .vulkan_encode
+                    .as_ref()
+                    .is_err_and(|text| text.contains("vulkan-video"))
+            );
         }
     }
 
@@ -181,5 +202,6 @@ mod tests {
         let machine = Machine::probe(RuntimeChoice::Cpu);
         assert!(machine.cuda.is_err() && machine.nvdec.is_err());
         assert!(machine.nvenc.is_err() && machine.wgpu.is_err() && machine.vulkan.is_err());
+        assert!(machine.vulkan_encode.is_err());
     }
 }

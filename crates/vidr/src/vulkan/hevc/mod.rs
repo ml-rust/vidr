@@ -17,9 +17,9 @@
 
 mod decoder;
 mod picture;
-mod sequence;
+pub(super) mod sequence;
 mod slots;
-mod std_common;
+pub(super) mod std_common;
 mod std_params;
 #[cfg(test)]
 mod std_params_tests;

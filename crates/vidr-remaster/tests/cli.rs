@@ -173,7 +173,7 @@ fn unknown_values_are_refused_and_name_the_choices() {
         (["--codec", "vp9"], "hevc, h264, or av1"),
         (["--runtime", "metal"], "auto, cuda, wgpu, or cpu"),
         (["--decoder", "dxva"], "auto, nvdec, vulkan, or cpu"),
-        (["--encoder", "vulkan"], "auto, nvenc, or cpu"),
+        (["--encoder", "vaapi"], "auto, nvenc, vulkan, or cpu"),
         (["--resolution", "999"], "auto, original, 2x"),
     ];
     for (flag, choices) in cases {

@@ -3,7 +3,8 @@
 //! NVIDIA's driver reads through the pointers of a Std structure after
 //! `vkCreateVideoSessionParametersKHR` returns. So each pointee keeps one address for the life
 //! of the parameters. `Arc::as_ptr` gives that address, and a move of the owner leaves it alone.
-//! The values never change after construction, so a list never reallocates.
+//! The values never change after construction, so a list never reallocates. The encoder's profile
+//! and rate control chains use the same storage, so a move of their owner leaves each chain valid.
 
 use std::sync::Arc;
 
@@ -51,8 +52,8 @@ impl<T: Copy> RetainedList<T> {
 
 // SAFETY: `T` is `Copy`, so it holds no owned resource. A retained value never changes after
 // construction, and Rust code here never reads through a pointer inside it. The driver reads
-// through those pointers only inside calls this decoder makes, and a decoder runs on one thread
-// at a time.
+// through those pointers only inside calls its owner makes, and an owner runs on one thread at a
+// time.
 unsafe impl<T: Copy> Send for Retained<T> {}
 // SAFETY: as above, a shared reference gives no way to change the value.
 unsafe impl<T: Copy> Sync for Retained<T> {}

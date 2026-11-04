@@ -20,7 +20,7 @@ const PROGRESSIVE_SOURCE_BIT: u32 = 47;
 
 /// The profile tier level the parser reads. `constraint_flags` holds 48 bits, with
 /// `general_progressive_source_flag` on top.
-pub(super) fn std_profile_tier_level(
+pub(in crate::vulkan) fn std_profile_tier_level(
     profile_idc: u8,
     tier_flag: bool,
     level_idc: u8,
@@ -45,7 +45,7 @@ pub(super) fn std_profile_tier_level(
 }
 
 /// The per-sub-layer buffering of a VPS or an SPS.
-pub(super) fn std_dec_pic_buf_mgr(
+pub(in crate::vulkan) fn std_dec_pic_buf_mgr(
     latency_plus1: &[u32; 7],
     buffering_minus1: &[u32; 7],
     reorder: &[u32; 7],

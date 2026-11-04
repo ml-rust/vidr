@@ -11,7 +11,8 @@
 //! A run needs a container feature, `mp4` or `mkv`, a decoder, and an encoder.
 //! `cuda` holds NVDEC and NVENC. `dav1d`, `cpu-vp9`, `cpu-hevc`, `openh264`,
 //! `openh264-cisco`, and `cpu-av1` hold the CPU codecs, which take one copy per frame
-//! through host memory. `wgpu` adds numr's WebGPU runtime. `transform` adds the
+//! through host memory. `wgpu` adds numr's WebGPU runtime, and `vulkan-video` adds its hardware
+//! decoder and encoder. `transform` adds the
 //! resize-only frame transform, and every codec feature implies it. `model-srvgg`
 //! and `model-rrdb` add the restoration models.
 

@@ -12,7 +12,7 @@
 
 mod decoder;
 mod refs;
-mod std_params;
+pub(super) mod std_params;
 mod std_picture;
 
 pub(super) use decoder::Av1Decoder;

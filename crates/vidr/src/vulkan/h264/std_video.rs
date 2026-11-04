@@ -40,7 +40,7 @@ unsafe impl AllZero for StdVideoDecodeH264ReferenceInfoFlags {}
 
 /// The `StdVideoH264LevelIdc` of `level_idc`, or `None` for a level with no value.
 /// Level 1b, which `level_idc` 9 states in High profiles, takes level 1.1's value.
-pub(super) const fn std_level(level_idc: u8) -> Option<u32> {
+pub(in crate::vulkan) const fn std_level(level_idc: u8) -> Option<u32> {
     Some(match level_idc {
         10 => 0,
         9 | 11 => 1,

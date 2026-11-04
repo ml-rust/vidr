@@ -106,11 +106,13 @@ impl RunRuntime for CpuRuntime {
 mod webgpu {
     use numr::runtime::wgpu::{WgpuDevice, WgpuRuntime, is_wgpu_available};
     #[cfg(feature = "vulkan-video")]
-    use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanOptions};
+    use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanEncoder, VulkanOptions};
 
     #[cfg(feature = "vulkan-video")]
     use super::super::backends::decode_error;
     use super::*;
+    #[cfg(feature = "vulkan-video")]
+    use crate::plan::encoder_open_error;
 
     impl RunRuntime for WgpuRuntime {
         const BACKEND: &'static str = "boostr on numr WebGPU, F32";
@@ -170,6 +172,24 @@ mod webgpu {
             let decoder =
                 VulkanDecoder::new(&device, decode.codec, &decode.config).map_err(failed)?;
             Ok(Box::new(decoder))
+        }
+
+        #[cfg(feature = "vulkan-video")]
+        fn open_encoder(
+            opened: &Opened<Self>,
+            backend: EncoderBackend,
+            config: EncodeConfig,
+        ) -> Result<BoxEncoder<Self>, RemasterError> {
+            if backend != EncoderBackend::Vulkan {
+                return open_cpu_encoder::<Self>(opened.library.as_deref(), backend, config);
+            }
+            let device = VulkanDevice::open_shared(VulkanOptions::default()).map_err(|error| {
+                RemasterError::Gpu {
+                    reason: error.to_string(),
+                }
+            })?;
+            let encoder = VulkanEncoder::new(&device, config).map_err(encoder_open_error)?;
+            Ok(Box::new(encoder))
         }
     }
 }

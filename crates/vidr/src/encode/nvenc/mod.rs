@@ -7,7 +7,6 @@
 mod encoder;
 mod ffi;
 mod lock;
-mod output;
 mod params;
 #[cfg(test)]
 mod params_tests;

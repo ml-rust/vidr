@@ -342,11 +342,14 @@ const fn refused_by_hardware(error: &EncodeError) -> bool {
         EncodeError::CodecUnsupported { .. }
             | EncodeError::BitDepthUnsupported { .. }
             | EncodeError::SizeOutOfRange { .. }
+            | EncodeError::VulkanRefused { .. }
+            | EncodeError::VulkanUnavailable { .. }
+            | EncodeError::VulkanNoMemoryType { .. }
     )
 }
 
-/// Opens the chosen encoder. A library check says only that NVENC loads, so what this
-/// GPU refuses comes here, and `--encoder auto` falls through to the CPU.
+/// Opens the chosen encoder. A library or queue check says only that the encoder loads, so what
+/// this GPU refuses comes here, and `--encoder auto` falls through to the CPU.
 fn open_encoder<R: RunRuntime>(
     opened: &Opened<R>,
     selector: &Selector,

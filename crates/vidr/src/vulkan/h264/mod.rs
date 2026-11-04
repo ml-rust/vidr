@@ -18,7 +18,7 @@ mod output;
 mod params;
 mod poc;
 mod slice;
-mod std_video;
+pub(super) mod std_video;
 #[cfg(test)]
 mod std_video_tests;
 #[cfg(test)]

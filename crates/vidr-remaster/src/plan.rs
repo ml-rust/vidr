@@ -72,12 +72,12 @@ pub struct EncodePlan {
     pub tags: ColorFacts,
 }
 
-/// The effort of `encoder`. NVENC and OpenH264 take `P5`. `P3` gives rav1r speed 7,
+/// The effort of `encoder`. NVENC, Vulkan Video, and OpenH264 take `P5`. `P3` gives rav1r speed 7,
 /// because its slower speeds take far longer per frame than a whole video allows.
 pub const fn encoder_preset(encoder: EncoderBackend) -> Preset {
     match encoder {
         EncoderBackend::Rav1r => Preset::P3,
-        EncoderBackend::Nvenc | EncoderBackend::Openh264(_) => Preset::P5,
+        EncoderBackend::Nvenc | EncoderBackend::Vulkan | EncoderBackend::Openh264(_) => Preset::P5,
     }
 }
 
@@ -109,8 +109,8 @@ pub fn encode_config(plan: &EncodePlan) -> Result<EncodeConfig, RemasterError> {
     Ok(config)
 }
 
-/// Names the fix when the encoder refuses to open: NVENC's own message asks for
-/// "a codec the GPU encodes at this depth", and the command line has one. OpenH264
+/// Names the fix when the encoder refuses to open: the hardware encoder's own message asks
+/// for "a codec the GPU encodes at this depth", and the command line has one. OpenH264
 /// is the only encoder that refuses the `format` field.
 pub fn encoder_open_error(error: EncodeError) -> RemasterError {
     match error {
