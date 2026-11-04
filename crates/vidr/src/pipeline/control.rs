@@ -1,4 +1,7 @@
 //! The stop flag and progress counters a caller shares with a run.
+//!
+//! This file needs no `pipeline` feature, so a caller holds a control in any
+//! build, and a build with no pump can still report a stop.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -41,7 +44,7 @@ pub struct PumpReport<O> {
     pub frames_out: u64,
     /// Packets the sink took.
     pub packets: u64,
-    /// What [`PacketSink::finish`](super::PacketSink::finish) returned.
+    /// What `PacketSink::finish` returned.
     pub output: O,
 }
 
@@ -52,7 +55,7 @@ impl PumpControl {
     }
 
     /// Asks the run to stop. A stage sees the flag between frames, and a run
-    /// then returns [`PipelineError::Stopped`](super::PipelineError::Stopped).
+    /// then returns `PipelineError::Stopped`.
     /// A flag set before the run starts stops it at once.
     ///
     /// This call only stores an atomic flag, so a signal handler can make it.
@@ -78,6 +81,28 @@ impl PumpControl {
 }
 
 /// Adds one to a counter.
+#[cfg(feature = "pipeline")]
 pub(super) fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_control_has_no_stop_and_zero_counters() {
+        let control = PumpControl::new();
+        assert!(!control.stop_requested());
+        assert_eq!(control.progress(), PumpProgress::default());
+    }
+
+    #[test]
+    fn a_stop_request_stays_set() {
+        let control = PumpControl::new();
+        control.request_stop();
+        assert!(control.stop_requested());
+        control.request_stop();
+        assert!(control.stop_requested());
+    }
 }

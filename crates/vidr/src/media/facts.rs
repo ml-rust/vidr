@@ -6,6 +6,10 @@ use containr::matroska::{DisplayUnit, MatroskaTrack, MatroskaVideo, Projection};
 use containr::{Packet, Track, TrackKind};
 
 use super::input::Input;
+#[cfg(feature = "h264")]
+use crate::bitstream::{AvcConfig, h264_sps_vui};
+#[cfg(feature = "hevc")]
+use crate::bitstream::{HevcConfig, HevcNalType, hevc_sps_vui};
 use crate::check::{StreamFacts, TrackFacts, TrackPacketCount};
 use crate::decode::DecodeCodec;
 use crate::error::MediaError;
@@ -31,6 +35,9 @@ pub struct DecodeConfig {
 /// order mismatch reaches `check_output`. With an edit list, a frame's duration
 /// stops at the edit's end, as [`EditTimeline::present`] states.
 ///
+/// The sample aspect ratio is the container's, else the first SPS's, else
+/// square. A source that states its ratio only in the SPS keeps that ratio.
+///
 /// [`EditTimeline::present`]: crate::time::EditTimeline::present
 ///
 /// # Errors
@@ -48,7 +55,10 @@ pub fn read_stream_facts(input: &Input) -> Result<StreamFacts, MediaError> {
     let geometry = Geometry::new(
         coded,
         input.rotation(track)?,
-        input.sample_aspect_ratio(track).unwrap_or_default(),
+        input
+            .sample_aspect_ratio(track)
+            .or_else(|| input.bitstream_sample_aspect_ratio(track))
+            .unwrap_or_default(),
     );
     let time_base = Rational::new(i64::from(track.timebase.num), u64::from(track.timebase.den))
         .map_err(|error| MediaError::Time {
@@ -246,6 +256,40 @@ fn matroska_aspect(video: &MatroskaVideo) -> Option<SampleAspectRatio> {
     )
 }
 
+pub(super) fn bitstream_sample_aspect_ratio(track: &Track) -> Option<SampleAspectRatio> {
+    let config = decode_config(track).ok()?;
+    let (width, height) = sps_sample_aspect_ratio(&config)?;
+    SampleAspectRatio::from_fraction(u64::from(width), u64::from(height))
+}
+
+/// The ratio in the VUI of a config record's first SPS. AV1 and VP9 state no
+/// ratio in their config records.
+fn sps_sample_aspect_ratio(config: &DecodeConfig) -> Option<(u16, u16)> {
+    match config.codec {
+        #[cfg(feature = "h264")]
+        DecodeCodec::H264 => {
+            let parsed = AvcConfig::parse(&config.config).ok()?;
+            let sps = parsed.sps.first()?;
+            h264_sps_vui(sps).ok()?.sample_aspect_ratio
+        }
+        #[cfg(not(feature = "h264"))]
+        DecodeCodec::H264 => None,
+        #[cfg(feature = "hevc")]
+        DecodeCodec::Hevc => {
+            let parsed = HevcConfig::parse(&config.config).ok()?;
+            let sps = parsed
+                .arrays
+                .iter()
+                .filter(|array| array.nal_unit_type == HevcNalType::SPS)
+                .find_map(|array| array.nal_units.first())?;
+            hevc_sps_vui(sps).ok()?.sample_aspect_ratio
+        }
+        #[cfg(not(feature = "hevc"))]
+        DecodeCodec::Hevc => None,
+        DecodeCodec::Av1 | DecodeCodec::Vp9 => None,
+    }
+}
+
 pub(super) fn decode_config(track: &Track) -> Result<DecodeConfig, MediaError> {
     let (codec, config) = match &track.matroska {
         Some(mkv) => matroska_config(track.id, mkv)?,
@@ -270,6 +314,14 @@ fn matroska_config(
         return Err(MediaError::ContentEncoding {
             track_id,
             count: mkv.content_encodings.len(),
+        });
+    }
+    if let Some(video) = &mkv.video
+        && video.crop != [0; 4]
+    {
+        return Err(MediaError::MatroskaCrop {
+            track_id,
+            crop: video.crop,
         });
     }
     let codec = match mkv.codec_id.as_str() {
@@ -368,6 +420,51 @@ mod tests {
             video: None,
             audio: None,
             extra: Vec::new(),
+        }
+    }
+
+    /// avcC around a Main profile SPS: sps id 0, frame num, poc type 2, one
+    /// reference frame, 320 wide, 16 high, progressive, no cropping, with a VUI
+    /// of `aspect_ratio_idc` 2, which is 12:11, and no other field.
+    #[cfg(feature = "h264")]
+    fn avcc_with_table_ratio() -> Vec<u8> {
+        let sps = [0x67, 77, 0, 30, 0xDA, 0x05, 0x3B, 0x02, 0x00];
+        let pps = [0x68, 0xCE];
+        let mut record = vec![1, 77, 0, 30, 0xFF, 0xE1, 0, sps.len() as u8];
+        record.extend_from_slice(&sps);
+        record.extend_from_slice(&[1, 0, pps.len() as u8]);
+        record.extend_from_slice(&pps);
+        record
+    }
+
+    #[cfg(feature = "h264")]
+    #[test]
+    fn the_first_sps_supplies_a_ratio() {
+        let config = DecodeConfig {
+            codec: DecodeCodec::H264,
+            config: avcc_with_table_ratio(),
+        };
+        assert_eq!(sps_sample_aspect_ratio(&config), Some((12, 11)));
+    }
+
+    #[cfg(feature = "h264")]
+    #[test]
+    fn a_record_that_does_not_parse_states_no_ratio() {
+        let config = DecodeConfig {
+            codec: DecodeCodec::H264,
+            config: vec![9, 9, 9],
+        };
+        assert_eq!(sps_sample_aspect_ratio(&config), None);
+    }
+
+    #[test]
+    fn av1_and_vp9_records_state_no_ratio() {
+        for codec in [DecodeCodec::Av1, DecodeCodec::Vp9] {
+            let config = DecodeConfig {
+                codec,
+                config: vec![1, 2, 3],
+            };
+            assert_eq!(sps_sample_aspect_ratio(&config), None);
         }
     }
 
@@ -515,6 +612,19 @@ mod tests {
             Err(MediaError::ContentEncoding {
                 track_id: 3,
                 count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn matroska_refuses_a_pixel_crop_by_name() {
+        let mut cropped = matroska("V_MPEG4/ISO/AVC", Some(&[1]));
+        cropped.video = Some(video(None, DisplayUnit::Pixels, [2, 0, 0, 4]));
+        assert_eq!(
+            matroska_config(3, &cropped),
+            Err(MediaError::MatroskaCrop {
+                track_id: 3,
+                crop: [2, 0, 0, 4],
             })
         );
     }

@@ -101,6 +101,13 @@ pub enum MediaError {
         /// The codec.
         codec: DecodeCodec,
     },
+    /// A Matroska video track states a pixel crop, which NVDEC does not apply.
+    MatroskaCrop {
+        /// The Matroska `TrackNumber`.
+        track_id: u32,
+        /// `PixelCropTop`, `PixelCropBottom`, `PixelCropLeft`, `PixelCropRight`.
+        crop: [u64; 4],
+    },
     /// A Matroska track's packets or config carry a `ContentEncoding`.
     ContentEncoding {
         /// The track id.
@@ -253,6 +260,11 @@ impl fmt::Display for MediaError {
                 f,
                 "track {track_id} holds {codec} with no config record. The input is damaged. \
                  Remux it with `ffmpeg -i <input> -c copy <output.mp4>`."
+            ),
+            Self::MatroskaCrop { track_id, crop } => write!(
+                f,
+                "track {track_id} states a Matroska pixel crop {crop:?}, which vidr does not \
+                 apply. Remux the file without the crop, or re-encode it cropped."
             ),
             Self::ContentEncoding { track_id, count } => write!(
                 f,

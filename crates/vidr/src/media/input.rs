@@ -174,9 +174,18 @@ impl Input {
     /// ratio of the Matroska display size to the cropped pixel size.
     ///
     /// `None` when the container states none. The bitstream's ratio then
-    /// applies.
+    /// applies: [`Input::bitstream_sample_aspect_ratio`].
     pub fn sample_aspect_ratio(&self, track: &Track) -> Option<SampleAspectRatio> {
         facts::sample_aspect_ratio(track)
+    }
+
+    /// The sample aspect ratio the first SPS of `track`'s config record states.
+    ///
+    /// [`Input::sample_aspect_ratio`] takes precedence over this value, as in
+    /// ffmpeg. `None` for no VUI ratio, a record that does not parse, AV1, VP9,
+    /// and a codec whose feature is off.
+    pub fn bitstream_sample_aspect_ratio(&self, track: &Track) -> Option<SampleAspectRatio> {
+        facts::bitstream_sample_aspect_ratio(track)
     }
 
     /// The colour tags the container states for `track`. Pass them to
