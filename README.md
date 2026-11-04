@@ -91,6 +91,8 @@ To build against sibling checkouts, copy `.cargo/config.toml.example` to `.cargo
 cargo build --release -p vidr-remaster --features cuda,mp4,mkv,model-srvgg,model-rrdb
 ```
 
+A build without those features reports which ones it lacks.
+
 ### Flags
 
 | Flag                          | Value                                                     | Default                         |
