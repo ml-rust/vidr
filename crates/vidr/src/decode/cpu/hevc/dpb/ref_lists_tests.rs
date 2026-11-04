@@ -7,7 +7,7 @@ use crate::bitstream::hevc_sps_full::tests as sps_tests;
 use crate::decode::cpu::hevc::motion::col::ColMotion;
 use crate::decode::cpu::hevc::picture::Picture;
 
-fn entry(poc: i32, long_term: bool) -> RefEntry<u8> {
+fn entry(poc: i32, long_term: bool) -> RefEntry<Arc<Frame<u8>>> {
     RefEntry {
         frame: Some(Arc::new(Frame {
             picture: Picture::new(8, 8).unwrap(),
@@ -21,7 +21,7 @@ fn entry(poc: i32, long_term: bool) -> RefEntry<u8> {
 }
 
 /// Before: POC 4, 2. After: POC 8. Long-term: POC 1.
-fn sets() -> RefPicSets<u8> {
+fn sets() -> RefPicSets<Arc<Frame<u8>>> {
     let mut sets = RefPicSets::empty();
     sets.before = vec![entry(4, false), entry(2, false)];
     sets.after = vec![entry(8, false)];

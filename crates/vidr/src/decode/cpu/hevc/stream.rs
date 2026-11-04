@@ -5,6 +5,7 @@
 //! in output order (C.5.2). `decode::hevc::HevcDecoder` adapts it to the `Decoder` trait.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::bitstream::hevc_pps::PicParameterSet;
@@ -13,11 +14,12 @@ use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::rbsp::unescape;
 use crate::bitstream::{HevcNalType, VuiSignal};
 
-use super::dpb::buffer::Frame;
+use super::dpb::buffer::{DpbLimits, Frame};
 use super::dpb::poc::{PictureFacts, PictureStart, SequenceState, is_cra};
 use super::error::{HevcError, SequenceFormat};
 use super::hash::picture_hash::find_picture_hash;
 use super::picture_decoder::{PictureBegin, PictureDecoder};
+use super::stage::{PictureStage, UnitSite};
 
 /// `sps_seq_parameter_set_id` values.
 const SPS_IDS: usize = 16;
@@ -36,11 +38,11 @@ pub(crate) struct DecodeOptions {
 /// [`Frame`] while it serves as a reference, so an output holds no copy of its samples.
 /// [`Frame::picture`] carries the conformance window.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DecodedPicture {
+pub(crate) enum DecodedPicture<A = Arc<Frame<u8>>, B = Arc<Frame<u16>>> {
     /// `BitDepth` 8.
-    Eight(Arc<Frame<u8>>),
+    Eight(A),
     /// `BitDepth` 9 or 10.
-    Ten(Arc<Frame<u16>>),
+    Ten(B),
 }
 
 /// The facts of a picture at its first slice segment, for a caller that labels each
@@ -56,23 +58,28 @@ pub(crate) struct StartedPicture {
     pub(crate) irap_no_rasl: bool,
     /// The colour fields of the active SPS's VUI.
     pub(crate) signal: VuiSignal,
+    /// `sps_max_dec_pic_buffering_minus1[ HighestTid ] + 1`.
+    pub(crate) dpb_size: usize,
 }
 
 /// Takes NAL units in decoding order. [`Self::next_output`] returns the pictures in
 /// output order.
-#[derive(Debug)]
-pub(crate) struct StreamDecoder {
+pub(crate) struct StreamDecoder<E = PictureDecoder<u8>, T = PictureDecoder<u16>>
+where
+    E: PictureStage<u8>,
+    T: PictureStage<u16>,
+{
     options: DecodeOptions,
     sps: Vec<Option<SeqParameterSet>>,
     pps: Vec<Option<PicParameterSet>>,
     /// The independent slice segment header of the current slice.
     independent: Option<SliceSegmentHeader>,
-    eight: PictureDecoder<u8>,
-    ten: PictureDecoder<u16>,
+    eight: E,
+    ten: T,
     sequence: SequenceState,
     /// True through the slice segments of a skipped RASL picture.
     skip_picture: bool,
-    output: VecDeque<DecodedPicture>,
+    output: VecDeque<DecodedPicture<E::Output, T::Output>>,
     /// Pictures that have started decoding.
     pictures_started: u64,
     /// The picture the latest NAL unit started.
@@ -81,18 +88,43 @@ pub(crate) struct StreamDecoder {
     sequence_format: Option<SequenceFormat>,
     /// `slice_pic_parameter_set_id` of the current picture.
     picture_pps: Option<u32>,
+    /// The pts of the packet in progress.
+    pts: i64,
+}
+
+impl<E, T> fmt::Debug for StreamDecoder<E, T>
+where
+    E: PictureStage<u8>,
+    T: PictureStage<u16>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamDecoder")
+            .field("pictures_started", &self.pictures_started)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamDecoder {
-    /// A decoder with no parameter sets.
+    /// A decoder with no parameter sets, on the calling thread.
     pub(crate) fn new(options: DecodeOptions) -> Self {
+        Self::with_stages(options, PictureDecoder::new(), PictureDecoder::new())
+    }
+}
+
+impl<E, T> StreamDecoder<E, T>
+where
+    E: PictureStage<u8>,
+    T: PictureStage<u16>,
+{
+    /// A decoder with no parameter sets, over the given picture stages.
+    pub(crate) fn with_stages(options: DecodeOptions, eight: E, ten: T) -> Self {
         Self {
             options,
             sps: vec![None; SPS_IDS],
             pps: vec![None; PPS_IDS],
             independent: None,
-            eight: PictureDecoder::new(),
-            ten: PictureDecoder::new(),
+            eight,
+            ten,
             sequence: SequenceState::new(),
             skip_picture: false,
             output: VecDeque::new(),
@@ -100,7 +132,19 @@ impl StreamDecoder {
             started: None,
             sequence_format: None,
             picture_pps: None,
+            pts: 0,
         }
+    }
+
+    /// The picture stages, for a test that changes how they run.
+    #[cfg(test)]
+    pub(crate) const fn stages_mut(&mut self) -> (&mut E, &mut T) {
+        (&mut self.eight, &mut self.ten)
+    }
+
+    /// Names the packet that the next NAL units come from.
+    pub(crate) const fn set_pts(&mut self, pts: i64) {
+        self.pts = pts;
     }
 
     /// Decodes one NAL unit, 2-byte header included and start code excluded. Units of
@@ -127,6 +171,12 @@ impl StreamDecoder {
         if first & 1 != 0 || second >> 3 != 0 {
             return Ok(());
         }
+        let site = UnitSite::Nal {
+            bytes: nal.len(),
+            pts: self.pts,
+        };
+        self.eight.enter_unit(site);
+        self.ten.enter_unit(site);
         let result = self.dispatch(nal, HevcNalType::from_header(first));
         if result.is_err() {
             self.eight.abandon();
@@ -137,7 +187,7 @@ impl StreamDecoder {
     }
 
     /// The next picture in output order, when one is ready.
-    pub(crate) fn next_output(&mut self) -> Option<DecodedPicture> {
+    pub(crate) fn next_output(&mut self) -> Option<DecodedPicture<E::Output, T::Output>> {
         self.output.pop_front()
     }
 
@@ -212,8 +262,10 @@ impl StreamDecoder {
     ///
     /// # Errors
     ///
-    /// Any error of [`PictureDecoder::finish`]. The waiting pictures still leave.
+    /// Any error of [`PictureStage::finish`]. The waiting pictures still leave.
     pub(crate) fn flush(&mut self) -> Result<(), HevcError> {
+        self.eight.enter_unit(UnitSite::End);
+        self.ten.enter_unit(UnitSite::End);
         let result = self.end_picture();
         self.eight.flush_output();
         self.ten.flush_output();
@@ -285,6 +337,7 @@ impl StreamDecoder {
                     output: header.pic_output_flag,
                     irap_no_rasl,
                     signal: sps.vui.map_or_else(VuiSignal::default, |vui| vui.signal),
+                    dpb_size: DpbLimits::from_sps(sps).max_dec_buffering,
                 });
             }
         } else if !self.skip_picture && !self.eight.is_active() && !self.ten.is_active() {
@@ -309,9 +362,9 @@ impl StreamDecoder {
         }
         let data = unescape(nal);
         if self.eight.is_active() {
-            self.eight.decode_slice(&header, &data)
+            self.eight.decode_slice(&header, data)
         } else {
-            self.ten.decode_slice(&header, &data)
+            self.ten.decode_slice(&header, data)
         }
     }
 }
@@ -333,9 +386,9 @@ fn check_sequence_format(
 }
 
 /// Ends the picture of whichever sample type has one.
-fn finish_active(
-    eight: &mut PictureDecoder<u8>,
-    ten: &mut PictureDecoder<u16>,
+fn finish_active<E: PictureStage<u8>, T: PictureStage<u16>>(
+    eight: &mut E,
+    ten: &mut T,
     check_hash: bool,
 ) -> Result<(), HevcError> {
     if eight.is_active() {

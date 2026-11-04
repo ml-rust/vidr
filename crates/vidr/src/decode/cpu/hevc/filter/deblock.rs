@@ -1,8 +1,17 @@
 //! The deblocking filter process on a whole picture (8.7.2). Sections of one edge
 //! direction touch no common samples, so their order does not matter. Vertical edges
 //! run first, because horizontal edges read their result (8.7.2.1).
+//!
+//! The same passes run over bands of rows, one writer per band, because each section's
+//! samples lie in one band. A vertical section stays in its four rows, so each CTB row is
+//! one band. A horizontal luma section at row `y` reads rows `y - 4` to `y + 3`, and those
+//! ranges of the 8x8 grid never overlap. So a band of that pass starts 4 luma rows above its
+//! CTB row, and 2 chroma rows above in chroma.
+
+use std::ops::Range;
 
 use fearless_simd::Simd;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::decode::cpu::dsp::deblock::{
     EdgeFilter, EdgeSection, beta, filter_chroma_section, luma_section, tc,
@@ -11,7 +20,7 @@ use crate::decode::cpu::dsp::sample::Sample;
 use crate::decode::cpu::dsp::simd::{Cpu, with_simd};
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
-use crate::decode::cpu::hevc::picture::{Picture, Plane};
+use crate::decode::cpu::hevc::picture::{Picture, PlaneRows};
 use crate::decode::cpu::hevc::qp::qp_c_from_index;
 use crate::decode::cpu::hevc::syntax::maps::ParseMaps;
 
@@ -27,6 +36,10 @@ const CHROMA_SECTION: u32 = 8;
 const CHROMA_GRID: u32 = 16;
 /// `bS` that filters chroma (8.7.2.5.1, 8.7.2.5.2).
 const BS_CHROMA: u8 = 2;
+/// Luma rows that a band of horizontal edges starts above its CTB row.
+const HORIZONTAL_BAND_LEAD: usize = 4;
+/// The smallest CTB side, as a shift, for which a band holds whole sections and grid rows.
+const MIN_BAND_CTB_LOG2: u32 = 4;
 
 /// What the filter reads besides the samples.
 #[derive(Clone, Copy, Debug)]
@@ -91,6 +104,15 @@ impl DeblockContext<'_> {
     }
 }
 
+/// The rows of a picture one writer filters, and the luma rows of the sections it takes.
+struct EdgeBand<'a, S> {
+    luma: PlaneRows<'a, S>,
+    cb: PlaneRows<'a, S>,
+    cr: PlaneRows<'a, S>,
+    /// The luma rows of `q0` of the sections of this band.
+    rows: Range<u32>,
+}
+
 /// Runs the whole process of 8.7.2 on `picture`.
 pub(crate) fn deblock_picture<S: Sample>(picture: &mut Picture<S>, context: &DeblockContext<'_>) {
     if !context.edges.has_edges() {
@@ -102,24 +124,100 @@ pub(crate) fn deblock_picture<S: Sample>(picture: &mut Picture<S>, context: &Deb
 /// [`deblock_picture`] compiled for `cpu`.
 fn deblock_on<S: Sample>(cpu: Cpu, picture: &mut Picture<S>, context: &DeblockContext<'_>) {
     let protected = context.maps.any_no_filter();
+    let (luma, cb, cr) = picture.planes_mut();
+    let mut band = EdgeBand {
+        luma: luma.rows_mut(),
+        cb: cb.rows_mut(),
+        cr: cr.rows_mut(),
+        rows: 0..context.params.height,
+    };
     with_simd!(cpu, simd => {
-        vertical_edges(simd, picture, context, protected);
-        horizontal_edges(simd, picture, context, protected);
+        vertical_edges(simd, &mut band, context, protected);
+        horizontal_edges(simd, &mut band, context, protected);
     });
+}
+
+/// [`deblock_picture`] with each pass over bands of rows on the current rayon pool. The
+/// output equals it, because 8.7.2 orders only the two passes.
+pub(crate) fn deblock_picture_in_rows<S: Sample>(
+    picture: &mut Picture<S>,
+    context: &DeblockContext<'_>,
+) {
+    if !context.edges.has_edges() {
+        return;
+    }
+    if context.layout.ctb_log2() < MIN_BAND_CTB_LOG2 {
+        deblock_on(Cpu::detected(), picture, context);
+        return;
+    }
+    let protected = context.maps.any_no_filter();
+    edge_bands(picture, context, 0)
+        .into_par_iter()
+        .for_each(|mut band| {
+            with_simd!(Cpu::detected(), simd => {
+                vertical_edges(simd, &mut band, context, protected);
+            });
+        });
+    edge_bands(picture, context, HORIZONTAL_BAND_LEAD)
+        .into_par_iter()
+        .for_each(|mut band| {
+            with_simd!(Cpu::detected(), simd => {
+                horizontal_edges(simd, &mut band, context, protected);
+            });
+        });
+}
+
+/// One band per CTB row. Each band but the first starts `lead` luma rows above its CTB row,
+/// and half that in chroma.
+fn edge_bands<'a, S: Sample>(
+    picture: &'a mut Picture<S>,
+    context: &DeblockContext<'_>,
+    lead: usize,
+) -> Vec<EdgeBand<'a, S>> {
+    let ctb = 1usize << context.layout.ctb_log2();
+    let height = context.params.height as usize;
+    let count = height.div_ceil(ctb);
+    let ends = |size: usize, lead: usize| {
+        (1..=count).map(move |row| {
+            if row == count {
+                usize::MAX
+            } else {
+                row * size - lead
+            }
+        })
+    };
+    let (luma, cb, cr) = picture.planes_mut();
+    let luma = luma.split_rows(ends(ctb, lead));
+    let cb = cb.split_rows(ends(ctb / 2, lead / 2));
+    let cr = cr.split_rows(ends(ctb / 2, lead / 2));
+    luma.into_iter()
+        .zip(cb)
+        .zip(cr)
+        .enumerate()
+        .map(|(row, ((luma, cb), cr))| EdgeBand {
+            luma,
+            cb,
+            cr,
+            rows: (row * ctb) as u32..(((row + 1) * ctb).min(height)) as u32,
+        })
+        .collect()
 }
 
 #[inline(always)]
 fn vertical_edges<V: Simd, S: Sample>(
     simd: V,
-    picture: &mut Picture<S>,
+    band: &mut EdgeBand<'_, S>,
     context: &DeblockContext<'_>,
     protected: bool,
 ) {
-    let (width, height) = (context.params.width, context.params.height);
-    for (y, row) in (0..height)
-        .step_by(SECTION as usize)
-        .zip(context.edges.vertical_rows())
-    {
+    let width = context.params.width;
+    let (first, end) = (band.rows.start, band.rows.end);
+    for (y, row) in (first..end).step_by(SECTION as usize).zip(
+        context
+            .edges
+            .vertical_rows()
+            .skip((first / SECTION) as usize),
+    ) {
         // Column 0 is the picture edge, and no edge lies there.
         for (x, &strength) in (0..width)
             .step_by(GRID as usize)
@@ -132,21 +230,19 @@ fn vertical_edges<V: Simd, S: Sample>(
                 p: (x - 1, y),
             };
             let filter = context.luma_filter(sides, strength, protected);
-            let plane = picture.luma_mut();
-            let section = vertical_section(plane, x as usize, y as usize);
-            luma_section(simd, plane.samples_mut(), section, &filter);
+            let section = vertical_section(&band.luma, x as usize, y as usize);
+            luma_section(simd, band.luma.samples_mut(), section, &filter);
         }
     }
-    for y in (0..height).step_by(CHROMA_SECTION as usize) {
+    for y in (first..end).step_by(CHROMA_SECTION as usize) {
         for x in (CHROMA_GRID..width).step_by(CHROMA_GRID as usize) {
             if context.edges.vertical_at(x, y) == BS_CHROMA {
                 let sides = Sides {
                     q: (x, y),
                     p: (x - 1, y),
                 };
-                chroma_section(picture, context, sides, |plane| {
-                    vertical_section(plane, x as usize / 2, y as usize / 2)
-                });
+                let section = vertical_section(&band.cb, x as usize / 2, y as usize / 2);
+                chroma_section(band, context, sides, section);
             }
         }
     }
@@ -155,17 +251,20 @@ fn vertical_edges<V: Simd, S: Sample>(
 #[inline(always)]
 fn horizontal_edges<V: Simd, S: Sample>(
     simd: V,
-    picture: &mut Picture<S>,
+    band: &mut EdgeBand<'_, S>,
     context: &DeblockContext<'_>,
     protected: bool,
 ) {
-    let (width, height) = (context.params.width, context.params.height);
+    let width = context.params.width;
+    let end = band.rows.end;
     // Row 0 is the picture edge, and no edge lies there.
-    for (y, row) in (0..height)
-        .step_by(GRID as usize)
-        .zip(context.edges.horizontal_rows())
-        .skip(1)
-    {
+    let first = band.rows.start.max(GRID);
+    for (y, row) in (first..end).step_by(GRID as usize).zip(
+        context
+            .edges
+            .horizontal_rows()
+            .skip((first / GRID) as usize),
+    ) {
         for (x, &strength) in (0..width)
             .step_by(SECTION as usize)
             .zip(row)
@@ -176,57 +275,51 @@ fn horizontal_edges<V: Simd, S: Sample>(
                 p: (x, y - 1),
             };
             let filter = context.luma_filter(sides, strength, protected);
-            let plane = picture.luma_mut();
-            let section = horizontal_section(plane, x as usize, y as usize);
-            luma_section(simd, plane.samples_mut(), section, &filter);
+            let section = horizontal_section(&band.luma, x as usize, y as usize);
+            luma_section(simd, band.luma.samples_mut(), section, &filter);
         }
     }
-    for y in (CHROMA_GRID..height).step_by(CHROMA_GRID as usize) {
+    let first_chroma = band.rows.start.max(CHROMA_GRID);
+    for y in (first_chroma..end).step_by(CHROMA_GRID as usize) {
         for x in (0..width).step_by(CHROMA_SECTION as usize) {
             if context.edges.horizontal_at(x, y) == BS_CHROMA {
                 let sides = Sides {
                     q: (x, y),
                     p: (x, y - 1),
                 };
-                chroma_section(picture, context, sides, |plane| {
-                    horizontal_section(plane, x as usize / 2, y as usize / 2)
-                });
+                let section = horizontal_section(&band.cb, x as usize / 2, y as usize / 2);
+                chroma_section(band, context, sides, section);
             }
         }
     }
 }
 
-/// Filters Cb then Cr at one section. `cQpPicOffset` differs per plane (8.7.2.5.1).
+/// Filters Cb then Cr at one section. Both planes have one layout, so `section` serves
+/// each. `cQpPicOffset` differs per plane (8.7.2.5.1).
 fn chroma_section<S: Sample>(
-    picture: &mut Picture<S>,
+    band: &mut EdgeBand<'_, S>,
     context: &DeblockContext<'_>,
     sides: Sides,
-    locate: impl Fn(&Plane<S>) -> EdgeSection,
+    section: EdgeSection,
 ) {
-    let offsets = [
-        context.params.pps_cb_qp_offset,
-        context.params.pps_cr_qp_offset,
-    ];
-    for (index, offset) in offsets.into_iter().enumerate() {
-        let filter = context.chroma_filter(sides, offset);
-        let plane = picture.plane_mut(index + 1);
-        let section = locate(plane);
-        filter_chroma_section(plane.samples_mut(), section, &filter);
-    }
+    let filter = context.chroma_filter(sides, context.params.pps_cb_qp_offset);
+    filter_chroma_section(band.cb.samples_mut(), section, &filter);
+    let filter = context.chroma_filter(sides, context.params.pps_cr_qp_offset);
+    filter_chroma_section(band.cr.samples_mut(), section, &filter);
 }
 
-const fn vertical_section<S: Sample>(plane: &Plane<S>, x: usize, y: usize) -> EdgeSection {
+const fn vertical_section<S>(rows: &PlaneRows<'_, S>, x: usize, y: usize) -> EdgeSection {
     EdgeSection {
-        q0: y * plane.stride() + x,
+        q0: rows.index_of(x, y),
         across: 1,
-        along: plane.stride(),
+        along: rows.stride(),
     }
 }
 
-const fn horizontal_section<S: Sample>(plane: &Plane<S>, x: usize, y: usize) -> EdgeSection {
+const fn horizontal_section<S>(rows: &PlaneRows<'_, S>, x: usize, y: usize) -> EdgeSection {
     EdgeSection {
-        q0: y * plane.stride() + x,
-        across: plane.stride(),
+        q0: rows.index_of(x, y),
+        across: rows.stride(),
         along: 1,
     }
 }

@@ -6,24 +6,24 @@ use std::sync::Arc;
 use crate::bitstream::hevc_pred_weight::MAX_REFS;
 use crate::bitstream::hevc_slice::{SLICE_TYPE_B, SLICE_TYPE_I, SliceSegmentHeader};
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
-use crate::decode::cpu::dsp::sample::Sample;
 use crate::decode::cpu::hevc::error::HevcError;
 use crate::decode::cpu::hevc::motion::types::RefLists;
 use crate::decode::cpu::hevc::recon::weights::ExplicitWeights;
 use crate::decode::cpu::hevc::syntax::records::push_record;
 
 use super::buffer::{Frame, RefEntry, RefPicSets};
+use super::stored::StoredPicture;
 
-/// `RefPicList0` and `RefPicList1` of one slice. The pictures stay behind `Arc`, so a
+/// `RefPicList0` and `RefPicList1` of one slice. The pictures stay behind handles, so a
 /// slice copies no samples.
 #[derive(Clone, Debug)]
-pub(crate) struct SliceRefs<S> {
+pub(crate) struct SliceLists<P> {
     /// The pictures of each list, by reference index.
-    pub(crate) frames: [Vec<Arc<Frame<S>>>; 2],
+    pub(crate) frames: [Vec<P>; 2],
     /// The POC and long-term facts of each list.
     pub(crate) lists: RefLists,
     /// `ColPic`. `None` with `slice_temporal_mvp_enabled_flag` 0.
-    pub(crate) col: Option<Arc<Frame<S>>>,
+    pub(crate) col: Option<P>,
     /// `NoBackwardPredFlag`.
     pub(crate) no_backward_pred: bool,
     /// `collocated_from_l0_flag`.
@@ -32,7 +32,10 @@ pub(crate) struct SliceRefs<S> {
     pub(crate) weights: Option<Box<ExplicitWeights>>,
 }
 
-impl<S: Sample> SliceRefs<S> {
+/// The lists of a slice whose pictures are finished, as the reconstruct stage reads them.
+pub(crate) type SliceRefs<S> = SliceLists<Arc<Frame<S>>>;
+
+impl<P: StoredPicture> SliceLists<P> {
     /// The state of an I slice: no lists.
     pub(crate) fn intra() -> Self {
         Self {
@@ -56,7 +59,7 @@ impl<S: Sample> SliceRefs<S> {
     /// - [`HevcError::Allocation`] when a list does not fit in memory.
     pub(crate) fn build(
         header: &SliceSegmentHeader,
-        sets: &RefPicSets<S>,
+        sets: &RefPicSets<P>,
         current_poc: i32,
         sps: &SeqParameterSet,
     ) -> Result<Self, HevcError> {
@@ -97,7 +100,7 @@ impl<S: Sample> SliceRefs<S> {
             .frames
             .iter()
             .flatten()
-            .all(|frame| frame.poc <= current_poc);
+            .all(|frame| frame.poc() <= current_poc);
         if header.slice_temporal_mvp_enabled_flag {
             let col_list =
                 usize::from(header.slice_type == SLICE_TYPE_B && !header.collocated_from_l0_flag);
@@ -118,11 +121,11 @@ impl<S: Sample> SliceRefs<S> {
     fn fill_list(
         &mut self,
         list: usize,
-        order: &[&Vec<RefEntry<S>>; 3],
+        order: &[&Vec<RefEntry<P>>; 3],
         request: ListRequest<'_>,
     ) -> Result<(), HevcError> {
         let temporary_len = request.active.max(request.total);
-        let chosen: Vec<&RefEntry<S>> = order
+        let chosen: Vec<&RefEntry<P>> = order
             .iter()
             .flat_map(|set| set.iter())
             .cycle()
@@ -152,7 +155,7 @@ impl<S: Sample> SliceRefs<S> {
             };
             push_record(
                 &mut self.frames[list],
-                Arc::clone(frame),
+                frame.clone(),
                 "reference picture list",
             )?;
             self.lists.poc[list][index] = entry.poc_value();
@@ -163,11 +166,11 @@ impl<S: Sample> SliceRefs<S> {
     }
 }
 
-impl<S> RefEntry<S> {
+impl<P: StoredPicture> RefEntry<P> {
     /// `PicOrderCntVal` of the picture. For a long-term entry with no MSB the entry
     /// names an LSB, and the picture holds the whole value.
     fn poc_value(&self) -> i32 {
-        self.frame.as_ref().map_or(self.poc, |frame| frame.poc)
+        self.frame.as_ref().map_or(self.poc, StoredPicture::poc)
     }
 }
 

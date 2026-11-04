@@ -195,7 +195,7 @@ scripts/conformance/fetch_hevc.sh DIR
 VIDR_HEVC_CONFORMANCE=DIR cargo test -p vidr --release --features cpu-hevc hevc_zips_decode -- --nocapture
 ```
 
-The test decodes each HEVC_v1 zip through `HevcDecoder`. It checks each picture's hash SEI message and the zip's MD5 of the whole decoded stream, keeps no frame, and needs `unzip`. It prints a table by vector and names each failure. `VIDR_HEVC_ONLY` picks zips by name, and `VIDR_HEVC_REPORT` names a file for one line per vector. Without `cpu-hevc`, the same variable reads each zip's layout and decodes nothing.
+The test decodes each HEVC_v1 zip through `HevcDecoder`. It checks each picture's hash SEI message and the zip's MD5 of the whole decoded stream, keeps no frame, and needs `unzip`. It prints a table by vector and names each failure. `VIDR_HEVC_ONLY` picks zips by name, `VIDR_HEVC_REPORT` names a file for one line per vector, and `VIDR_HEVC_THREADS` sets the worker threads per decoder, 1 by default. Without `cpu-hevc`, the same variable reads each zip's layout and decodes nothing.
 
 ## Scope
 

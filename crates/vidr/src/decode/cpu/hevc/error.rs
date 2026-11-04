@@ -129,6 +129,32 @@ pub(crate) enum HevcError {
         /// The values the specification allows.
         allowed: &'static str,
     },
+    /// A picture reads a reference picture whose decoding failed.
+    ReferenceFailed {
+        /// `PicOrderCntVal` of the reference picture.
+        poc: i32,
+    },
+    /// A worker thread panics while it decodes a picture.
+    WorkerPanic {
+        /// The stage that panics: `parse` or `reconstruct`.
+        stage: &'static str,
+        /// The panic message.
+        message: String,
+    },
+    /// The worker pool stops before a picture finishes.
+    WorkerStopped,
+    /// A worker thread does not start.
+    WorkerStart {
+        /// The threads the decoder asks for.
+        threads: usize,
+        /// The system's message.
+        reason: String,
+    },
+    /// A lock of the worker pool is poisoned, because a thread panics while it holds it.
+    LockPoisoned {
+        /// What the lock guards.
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for HevcError {
@@ -223,6 +249,31 @@ impl fmt::Display for HevcError {
                 "HEVC slice data holds {element} equal to {value}, and the specification allows \
                  {allowed}. The input is corrupt. Remux the source, and re-encode it if the remux \
                  reports the same error."
+            ),
+            Self::ReferenceFailed { poc } => write!(
+                f,
+                "An HEVC picture refers to POC {poc}, and decoding that picture failed. Fix the \
+                 first error this decoder reports, or remux the source."
+            ),
+            Self::WorkerPanic { stage, message } => write!(
+                f,
+                "A worker thread panics in the {stage} stage of an HEVC picture: {message}. \
+                 Report this as a vidr bug, or decode with one thread."
+            ),
+            Self::WorkerStopped => write!(
+                f,
+                "The worker pool stops before an HEVC picture finishes. Open a new decoder, and \
+                 send the stream again."
+            ),
+            Self::WorkerStart { threads, reason } => write!(
+                f,
+                "The worker pool of {threads} threads does not start: {reason}. Ask for fewer \
+                 threads, or free system resources."
+            ),
+            Self::LockPoisoned { what } => write!(
+                f,
+                "The lock of {what} is poisoned, because a worker thread panics while it holds \
+                 it. Report this as a vidr bug, or decode with one thread."
             ),
         }
     }

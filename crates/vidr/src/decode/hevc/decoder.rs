@@ -1,22 +1,23 @@
-//! HEVC software decode on this crate's own core, into numr tensors through host
-//! memory.
-//!
-//! Each frame takes one copy to the tensors, and [`Decoder::route`] declares it. A
-//! 10-bit picture first copies once on the host, into little-endian bytes. HEVC has
-//! patent pools: the README states what a binary distribution needs.
+//! `HevcDecoder` and its path with every stage on the calling thread. The `threaded` module
+//! holds the path over the worker pool.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::num::NonZero;
 
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
-use super::cpu::dsp::sample::Sample;
-use super::cpu::hevc::dpb::buffer::Frame;
-use super::cpu::hevc::error::HevcError;
-use super::cpu::hevc::params::MAX_LUMA_PICTURE_SIZE;
-use super::cpu::hevc::picture::HostScratch;
-use super::cpu::hevc::stream::{DecodeOptions, DecodedPicture, StreamDecoder};
-use super::{ChromaFormat, ColorFacts, DecodeCodec, DecodedFrame, Decoder, PixelFormat, vui_color};
+use super::super::cpu::dsp::sample::Sample;
+use super::super::cpu::hevc::dpb::buffer::Frame;
+use super::super::cpu::hevc::error::HevcError;
+use super::super::cpu::hevc::params::MAX_LUMA_PICTURE_SIZE;
+use super::super::cpu::hevc::picture::{DisplayWindow, HostScratch};
+use super::super::cpu::hevc::stream::{
+    DecodeOptions, DecodedPicture, StartedPicture, StreamDecoder,
+};
+use super::super::{
+    ChromaFormat, ColorFacts, DecodeCodec, DecodedFrame, Decoder, PixelFormat, vui_color,
+};
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::{HevcConfig, HevcNalType, LengthSize, annexb, length_prefixed};
 use crate::error::DecodeError;
@@ -24,19 +25,66 @@ use crate::frame::{upload_planes, upload_route};
 use crate::geometry::Dimensions;
 use crate::route::FrameRoute;
 
-const DECODER: &str = "HevcDecoder";
+use super::threaded::ThreadedEngine;
+
+pub(super) const DECODER: &str = "HevcDecoder";
 /// The luma samples of the frames one `send` can output: 16 pictures, the largest
 /// `MaxDpbSize` (A-2), at `MaxLumaPs` of level 6.2. One access unit stays below it.
 const MAX_SEND_LUMA_SAMPLES: u64 = 16 * MAX_LUMA_PICTURE_SIZE;
+/// The most workers the decoder picks by itself. Past this, more pictures in flight cost
+/// memory and gain little. [`HevcOptions::threads`] sets any other count.
+const MAX_AUTO_THREADS: usize = 32;
 
 /// What a picture's packet stated when the picture started decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PendingPicture {
+pub(super) struct PendingPicture {
     pts: i64,
     color: ColorFacts,
 }
 
+/// What [`HevcDecoder::with_options`] takes. The default picks the thread count and runs
+/// no hash check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HevcOptions {
+    /// Worker threads. `None` picks them from [`std::thread::available_parallelism`], at
+    /// most 32. `Some(1)` decodes on the calling thread, with no worker and no channel.
+    /// `Some(0)` is an error.
+    pub threads: Option<usize>,
+    /// Compares each picture with its decoded picture hash SEI message (D.3.20). A
+    /// difference is a decode error. A picture with no such message passes unchecked.
+    pub check_picture_hash: bool,
+}
+
+/// The code that runs the core.
+pub(super) enum Engine {
+    /// Every stage on the calling thread.
+    Serial(Box<StreamDecoder>),
+    /// Picture stages on a worker pool.
+    Threaded(Box<ThreadedEngine>),
+}
+
+impl Engine {
+    /// Takes one unit of the `hvcC` record.
+    fn config_unit(&mut self, nal: &[u8]) -> Result<(), HevcError> {
+        match self {
+            Self::Serial(stream) => stream.decode_nal(nal),
+            Self::Threaded(engine) => engine.config_unit(nal),
+        }
+    }
+}
+
 /// HEVC software decode into numr tensors on any backend.
+///
+/// # Threads
+///
+/// [`Self::new`] runs on a pool of worker threads. Header parsing, reference marking,
+/// and output order stay on the calling thread. Each picture's parse starts on a worker when
+/// its slices have arrived, and its reconstruction starts when the pictures it reads have
+/// finished. Output bytes, order, and pts are the same for every thread count.
+///
+/// `send` returns while pictures run, and later `send` calls deliver their frames. A worker's
+/// error comes back from a later `send` or from `flush`, in decode order: the frames before
+/// it arrive first, as with one thread. `flush` waits for every picture.
 ///
 /// # Input
 ///
@@ -79,29 +127,31 @@ struct PendingPicture {
 /// | Samples on one picture side | 16888 (A.4.1) | [`DecodeError::Software`] |
 /// | Pictures in the buffer | `MaxDpbSize` of level 6.2 at the picture size: 6 to 16 (A-2) | [`DecodeError::Software`] |
 /// | Luma samples of the frames from one `send` | 16 pictures of the largest size | [`DecodeError::Software`] |
+/// | Pictures in flight on workers | Worker threads plus the picture buffer size, at most 16 | `send` blocks |
 ///
 /// A caller holds the frame queue to its own size: call [`Decoder::receive`] until
-/// it returns `None` after each `send`.
+/// it returns `None` after each `send`. With workers, one call can queue the frames of the
+/// pictures in flight on top of its own.
 ///
 /// # Errors after the first
 ///
 /// After a decode error or a refusal, every later `send` and `flush` returns the same
 /// error. A packet whose NAL units do not split leaves the decoder usable.
 pub struct HevcDecoder<R: Runtime> {
-    device: R::Device,
-    stream: StreamDecoder,
+    pub(super) device: R::Device,
+    pub(super) engine: Engine,
     /// The size of each sample's length fields. `None` for Annex-B input.
     length_size: Option<LengthSize>,
     /// Pictures in the core that give a frame later, by [`Frame::decode_order`].
-    pending: BTreeMap<u64, PendingPicture>,
-    scratch: HostScratch,
-    frames: VecDeque<DecodedFrame<R>>,
+    pub(super) pending: BTreeMap<u64, PendingPicture>,
+    pub(super) scratch: HostScratch,
+    pub(super) frames: VecDeque<DecodedFrame<R>>,
     /// The pts of the packet in `send`.
     send_pts: i64,
     /// The luma samples of the frames the packet in `send` has output.
     send_luma: u64,
     /// The largest `send_luma`.
-    send_luma_limit: u64,
+    pub(super) send_luma_limit: u64,
     flushed: bool,
     error: Option<DecodeError>,
 }
@@ -110,7 +160,8 @@ impl<R> HevcDecoder<R>
 where
     R: Runtime<DType = DType>,
 {
-    /// Opens a decoder whose frames go to tensors on `device`.
+    /// Opens a decoder whose frames go to tensors on `device`. It picks the worker threads
+    /// from [`std::thread::available_parallelism`].
     ///
     /// `config` is the track's `hvcC` payload, or empty for raw Annex-B input.
     ///
@@ -119,8 +170,27 @@ where
     /// - [`DecodeError::Bitstream`] for a config record or parameter set that does
     ///   not parse.
     /// - [`DecodeError::UnsupportedLayout`] for a layout an SPS in `hvcC` states.
+    /// - [`DecodeError::Software`] when a worker thread does not start.
     pub fn new(device: &R::Device, config: &[u8]) -> Result<Self, DecodeError> {
-        Self::open(device, config, DecodeOptions::default())
+        Self::with_options(device, config, HevcOptions::default())
+    }
+
+    /// As [`Self::new`], with `threads` workers. `1` decodes on the calling thread, with no
+    /// worker and no channel.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`], and [`DecodeError::Software`] for a `threads` of 0.
+    pub fn with_threads(
+        device: &R::Device,
+        config: &[u8],
+        threads: usize,
+    ) -> Result<Self, DecodeError> {
+        let options = HevcOptions {
+            threads: Some(threads),
+            ..HevcOptions::default()
+        };
+        Self::with_options(device, config, options)
     }
 
     /// As [`Self::new`], and also compares each picture with its decoded picture hash
@@ -131,32 +201,71 @@ where
     ///
     /// As [`Self::new`].
     pub fn with_picture_hash_check(device: &R::Device, config: &[u8]) -> Result<Self, DecodeError> {
-        let options = DecodeOptions {
+        let options = HevcOptions {
             check_picture_hash: true,
+            ..HevcOptions::default()
         };
-        Self::open(device, config, options)
+        Self::with_options(device, config, options)
     }
 
-    fn open(
+    /// As [`Self::new`], with the choices of `options`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_threads`].
+    pub fn with_options(
         device: &R::Device,
         config: &[u8],
-        options: DecodeOptions,
+        options: HevcOptions,
     ) -> Result<Self, DecodeError> {
-        let mut stream = StreamDecoder::new(options);
+        let threads = match options.threads {
+            Some(0) => {
+                return Err(DecodeError::Software {
+                    decoder: DECODER,
+                    call: "HevcDecoder::with_options",
+                    input: "a thread count of 0".to_owned(),
+                    reason: "the thread count starts at 1".to_owned(),
+                });
+            }
+            Some(threads) => threads,
+            None => std::thread::available_parallelism()
+                .map_or(1, NonZero::get)
+                .min(MAX_AUTO_THREADS),
+        };
+        let core = DecodeOptions {
+            check_picture_hash: options.check_picture_hash,
+        };
+        let engine = if threads == 1 {
+            Engine::Serial(Box::new(StreamDecoder::new(core)))
+        } else {
+            let started = ThreadedEngine::start(threads, core);
+            Engine::Threaded(Box::new(started.map_err(|error| {
+                let input = format!("{threads} threads");
+                core_error("HevcDecoder::with_options", &input, error)
+            })?))
+        };
+        Self::open(device, config, engine)
+    }
+
+    pub(super) fn open(
+        device: &R::Device,
+        config: &[u8],
+        mut engine: Engine,
+    ) -> Result<Self, DecodeError> {
         let mut length_size = None;
         if !config.is_empty() {
             let parsed = HevcConfig::parse(config)?;
             length_size = Some(parsed.length_size);
             for nal in parsed.nal_units() {
                 check_sps(nal)?;
-                stream.decode_nal(nal).map_err(|error| {
+                engine.config_unit(nal).map_err(|error| {
                     core_error("StreamDecoder::decode_nal", "the hvcC record", error)
                 })?;
             }
         }
         Ok(Self {
             device: device.clone(),
-            stream,
+            engine,
             length_size,
             pending: BTreeMap::new(),
             scratch: HostScratch::default(),
@@ -181,11 +290,20 @@ where
         }
     }
 
+    /// Stores a first error. It ends the workers, because no later picture can matter.
     fn keep_error(&mut self, result: Result<(), DecodeError>) -> Result<(), DecodeError> {
         if let Err(error) = &result {
             self.error = Some(error.clone());
+            self.stop_workers();
         }
         result
+    }
+
+    /// Joins the workers. A decoder with none does nothing.
+    fn stop_workers(&mut self) {
+        if let Engine::Threaded(engine) = &mut self.engine {
+            engine.stop();
+        }
     }
 
     fn decode_units(&mut self, units: &[&[u8]], pts: i64) -> Result<(), DecodeError> {
@@ -197,9 +315,25 @@ where
 
     /// Decodes one NAL unit, and queues every picture it completes.
     fn decode_unit(&mut self, nal: &[u8], pts: i64) -> Result<(), DecodeError> {
-        check_sps(nal)?;
-        let result = self.stream.decode_nal(nal);
-        let started = self.stream.take_started();
+        let (result, started) = match &mut self.engine {
+            Engine::Serial(stream) => {
+                check_sps(nal)?;
+                let result = stream.decode_nal(nal);
+                (result, stream.take_started())
+            }
+            Engine::Threaded(_) => return self.threaded_unit(nal, pts),
+        };
+        self.note_started(started, pts);
+        self.drain()?;
+        self.drop_dropped(started);
+        result.map_err(|error| {
+            let input = format!("the {}-byte NAL unit at pts {pts}", nal.len());
+            core_error("StreamDecoder::decode_nal", &input, error)
+        })
+    }
+
+    /// Records the packet facts of a picture that gives a frame later.
+    pub(super) fn note_started(&mut self, started: Option<StartedPicture>, pts: i64) {
         if let Some(picture) = started.filter(|picture| picture.output) {
             let pending = PendingPicture {
                 pts,
@@ -207,22 +341,27 @@ where
             };
             self.pending.insert(picture.decode_order, pending);
         }
-        self.drain()?;
-        // The core has output or dropped each earlier picture, and the drain took the
-        // output ones. So an earlier entry left is a dropped picture.
+    }
+
+    /// Forgets the pictures an IRAP picture drops. The core has output or dropped each
+    /// earlier picture, and the caller took the output ones. So an earlier entry left is a
+    /// dropped picture.
+    pub(super) fn drop_dropped(&mut self, started: Option<StartedPicture>) {
         if let Some(picture) = started.filter(|picture| picture.irap_no_rasl) {
             self.pending = self.pending.split_off(&picture.decode_order);
         }
-        result.map_err(|error| {
-            let input = format!("the {}-byte NAL unit at pts {pts}", nal.len());
-            core_error("StreamDecoder::decode_nal", &input, error)
-        })
     }
 
     /// Moves every output picture of the core to the frame queue.
     fn drain(&mut self) -> Result<(), DecodeError> {
-        while let Some(picture) = self.stream.next_output() {
-            self.charge_send(&picture)?;
+        while let Engine::Serial(stream) = &mut self.engine
+            && let Some(picture) = stream.next_output()
+        {
+            let window = match &picture {
+                DecodedPicture::Eight(frame) => frame.picture.window(),
+                DecodedPicture::Ten(frame) => frame.picture.window(),
+            };
+            self.charge_send(window)?;
             let frame = match &picture {
                 DecodedPicture::Eight(frame) => self.convert(frame, PixelFormat::Nv12)?,
                 DecodedPicture::Ten(frame) => self.convert(frame, PixelFormat::P010)?,
@@ -233,11 +372,7 @@ where
     }
 
     /// Counts one output picture against the packet in `send`, before its upload.
-    fn charge_send(&mut self, picture: &DecodedPicture) -> Result<(), DecodeError> {
-        let window = match picture {
-            DecodedPicture::Eight(frame) => frame.picture.window(),
-            DecodedPicture::Ten(frame) => frame.picture.window(),
-        };
+    pub(super) fn charge_send(&mut self, window: DisplayWindow) -> Result<(), DecodeError> {
         let luma = (window.width as u64).saturating_mul(window.height as u64);
         self.send_luma = self.send_luma.saturating_add(luma);
         if self.send_luma <= self.send_luma_limit {
@@ -269,10 +404,14 @@ where
 
     /// Ends the stream. A picture still pending here is a lost frame.
     fn finish(&mut self) -> Result<(), DecodeError> {
-        let ended = self.stream.flush();
-        self.drain()?;
-        ended
-            .map_err(|error| core_error("StreamDecoder::flush", "the end of the stream", error))?;
+        match &mut self.engine {
+            Engine::Serial(stream) => {
+                let ended = stream.flush();
+                self.drain()?;
+                ended.map_err(end_error)?;
+            }
+            Engine::Threaded(_) => self.threaded_finish()?,
+        }
         match self.pending.values().map(|picture| picture.pts).min() {
             None => Ok(()),
             Some(first_pts) => Err(DecodeError::MissingPictures {
@@ -286,7 +425,7 @@ where
 
 /// Refuses an SPS of the base layer with no vidr frame. Every other NAL unit passes,
 /// and the core drops the other layers.
-fn check_sps(nal: &[u8]) -> Result<(), DecodeError> {
+pub(super) fn check_sps(nal: &[u8]) -> Result<(), DecodeError> {
     let (Some(&first), Some(&second)) = (nal.first(), nal.get(1)) else {
         return Ok(());
     };
@@ -323,7 +462,7 @@ fn check_layout(chroma_format_idc: u32, luma: u32, chroma: u32) -> Result<(), De
 }
 
 /// Names an error of the core in the crate's public error type.
-fn core_error(call: &'static str, input: &str, error: HevcError) -> DecodeError {
+pub(super) fn core_error(call: &'static str, input: &str, error: HevcError) -> DecodeError {
     match error {
         HevcError::Header(error) => DecodeError::Bitstream(error),
         HevcError::Unsupported {
@@ -346,8 +485,13 @@ fn core_error(call: &'static str, input: &str, error: HevcError) -> DecodeError 
     }
 }
 
+/// Names an error of the core at the end of the stream.
+pub(super) fn end_error(error: HevcError) -> DecodeError {
+    core_error("StreamDecoder::flush", "the end of the stream", error)
+}
+
 /// Copies the conformance window of one picture to tensors on `device`.
-fn to_frame<R, S>(
+pub(super) fn to_frame<R, S>(
     device: &R::Device,
     frame: &Frame<S>,
     pending: PendingPicture,
@@ -394,13 +538,13 @@ where
     R: Runtime<DType = DType>,
 {
     fn send(&mut self, packet: &[u8], pts: i64) -> Result<(), DecodeError> {
+        self.stored_error()?;
         if self.flushed {
             return Err(DecodeError::AfterFlush { pts });
         }
         if packet.is_empty() {
             return Err(DecodeError::EmptyPacket { pts });
         }
-        self.stored_error()?;
         self.send_pts = pts;
         self.send_luma = 0;
         let units: Vec<&[u8]> = match self.length_size {
@@ -412,17 +556,23 @@ where
     }
 
     fn flush(&mut self) -> Result<(), DecodeError> {
+        self.stored_error()?;
         if self.flushed {
             return Ok(());
         }
         self.flushed = true;
-        self.stored_error()?;
         self.send_luma = 0;
         let result = self.finish();
+        self.stop_workers();
         self.keep_error(result)
     }
 
     fn receive(&mut self) -> Option<DecodedFrame<R>> {
+        if self.frames.is_empty() && self.error.is_none() {
+            let result = self.advance_ready();
+            // The next `send` or `flush` returns this error.
+            let _ = self.keep_error(result);
+        }
         self.frames.pop_front()
     }
 
@@ -435,8 +585,8 @@ where
 mod tests {
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
-    use super::super::cpu::hevc::stream_tests;
     use super::*;
+    use crate::decode::cpu::hevc::stream_tests;
 
     const fn refused(
         bit_depth_luma: u8,
@@ -590,5 +740,25 @@ mod tests {
     fn the_decoder_moves_between_threads() {
         const fn assert_send<T: Send>() {}
         assert_send::<HevcDecoder<CpuRuntime>>();
+    }
+
+    #[test]
+    fn a_thread_count_of_zero_is_a_named_error() {
+        let opened = HevcDecoder::<CpuRuntime>::with_threads(&CpuDevice::new(), &[], 0);
+        let Err(DecodeError::Software { input, .. }) = opened else {
+            panic!("a thread count of 0 opens no decoder");
+        };
+        assert_eq!(input, "a thread count of 0");
+    }
+
+    /// A stored error also outranks the refusals of a later call.
+    #[test]
+    fn a_stored_error_stays_after_a_flush() {
+        let mut decoder =
+            HevcDecoder::<CpuRuntime>::with_threads(&CpuDevice::new(), &[], 1).unwrap();
+        let first = decoder.send(&SLICE_WITH_NO_PPS, 0).unwrap_err();
+        assert_eq!(decoder.flush(), Err(first.clone()));
+        assert_eq!(decoder.flush(), Err(first.clone()));
+        assert_eq!(decoder.send(&SLICE_WITH_NO_PPS, 1), Err(first));
     }
 }

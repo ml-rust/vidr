@@ -84,6 +84,8 @@ impl Reconstructor {
                     continue;
                 }
                 let Some(frame) = refs.frames[list].get(motion.ref_idx[list] as usize) else {
+                    // A zero prediction keeps output free of earlier blocks and thread count.
+                    self.inter_samples[list].clear();
                     continue;
                 };
                 let source = frame.picture.plane(c_idx).view();

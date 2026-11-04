@@ -91,7 +91,8 @@ cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
 # HEVC software decode written in this crate, pure Rust, Main and Main 10 at
 # 4:2:0. Each frame takes one copy through host memory. HEVC has patent pools: see
 # the README. The kernels select AVX2 or NEON at run time through fearless_simd.
-cpu-hevc = ["frame", "hevc", "dep:fearless_simd"]
+# Pictures run on a fixed rayon pool, which lends picture rows to workers in safe code.
+cpu-hevc = ["frame", "hevc", "dep:fearless_simd", "dep:rayon"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
@@ -118,6 +119,8 @@ rusty_vp9 = { version = "=0.1.3", optional = true, default-features = false }
 fearless_simd = { version = "1.2", optional = true, features = [
   "force_support_fallback",
 ] }
+# The fixed worker pool of the HEVC decoder, and its filter passes over picture rows.
+rayon = { version = "1.12", optional = true }
 
 [[example]]
 name = "hevc_decode"

@@ -3,9 +3,9 @@
 //!
 //! The parse stage reads CABAC data and writes plain records for one CTU. The
 //! reconstruct stage reads those records and no bitstream state: it derives motion,
-//! predicts, and adds residuals. A later unit can run the two stages on separate
-//! threads. The in-loop filters run per picture after both stages. Finished pictures
-//! enter a decoded picture buffer, which holds references and returns output order.
+//! predicts, and adds residuals. The in-loop filters run per picture after both stages.
+//! Finished pictures enter a decoded picture buffer, which holds references and returns
+//! output order. `threads` runs these stages on a worker pool with the same output.
 
 pub(crate) mod cabac;
 pub(crate) mod dpb;
@@ -22,7 +22,9 @@ pub(crate) mod recon;
 pub(crate) mod residual;
 pub(crate) mod scaling;
 pub(crate) mod scan;
+pub(crate) mod stage;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(in crate::decode) mod stream_tests;
 pub(crate) mod syntax;
+pub(crate) mod threads;

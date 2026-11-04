@@ -635,6 +635,36 @@ pub(crate) fn intra_pictures(count: usize) -> Vec<Vec<u8>> {
     units
 }
 
+/// The SPS and PPS of pictures of two 16x16 CTBs.
+pub(crate) fn two_ctb_parameter_sets() -> Vec<Vec<u8>> {
+    vec![small_sps(32, 16, 0), small_pps(0)]
+}
+
+/// An IDR picture of two CTBs.
+pub(crate) fn two_ctb_picture() -> Vec<u8> {
+    SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(2))
+}
+
+/// An IDR picture whose slice stops after the first of two CTBs.
+pub(crate) fn half_of_two_ctb_picture() -> Vec<u8> {
+    SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(1))
+}
+
+/// An IDR picture whose slice has no data, which the parse refuses.
+pub(crate) fn empty_slice_picture() -> Vec<u8> {
+    SmallSlice::first(IDR_W_RADL).nal(&[])
+}
+
+/// The second slice segment of a picture of two CTBs, at address 1.
+pub(crate) fn second_ctb_slice() -> Vec<u8> {
+    SmallSlice {
+        nal_unit_type: IDR_W_RADL,
+        pps_id: 0,
+        address: Some((1, 1)),
+    }
+    .nal(&intra_ctus(1))
+}
+
 /// `units` as one Annex-B packet.
 pub(crate) fn annexb_of(units: &[Vec<u8>]) -> Vec<u8> {
     let mut stream = Vec::new();

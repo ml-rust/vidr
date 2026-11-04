@@ -103,11 +103,16 @@ fn parse(params: &CodingParams, layout: &PicLayout, data: &[u8]) -> Result<Parse
         first_ctb_rs: 0,
         dependent: false,
     };
-    parse_slice_segment(&input, &mut maps, &mut carry, |_, records: &CtuRecords| {
-        let cu = records.cus[0];
-        ctus.push((cu.x, cu.y));
-        Ok(())
-    })?;
+    parse_slice_segment(
+        &input,
+        &mut maps,
+        &mut carry,
+        |_, records: &mut CtuRecords| {
+            let cu = records.cus[0];
+            ctus.push((cu.x, cu.y));
+            Ok(())
+        },
+    )?;
     Ok(Parsed { ctus, maps, carry })
 }
 

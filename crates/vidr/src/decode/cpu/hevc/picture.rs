@@ -90,6 +90,48 @@ impl<S: Sample> Plane<S> {
         &mut self.samples
     }
 
+    /// Every sample for reading, stride gaps included.
+    pub(crate) fn samples(&self) -> &[S] {
+        &self.samples
+    }
+
+    /// Every row for writing.
+    pub(crate) fn rows_mut(&mut self) -> PlaneRows<'_, S> {
+        PlaneRows {
+            samples: &mut self.samples,
+            first_row: 0,
+            width: self.width,
+            stride: self.stride,
+        }
+    }
+
+    /// Splits the plane into runs of rows, for one writer each. Each entry of `ends`
+    /// is the row after one run, in rising order. A row past the plane ends the last run
+    /// at the plane's end, and later runs are empty.
+    pub(crate) fn split_rows(
+        &mut self,
+        ends: impl Iterator<Item = usize>,
+    ) -> Vec<PlaneRows<'_, S>> {
+        let (width, stride) = (self.width, self.stride);
+        let mut rest = self.samples.as_mut_slice();
+        let mut first_row = 0;
+        let mut runs = Vec::new();
+        for end in ends {
+            let rows = end.saturating_sub(first_row);
+            let count = rows.saturating_mul(stride).min(rest.len());
+            let (samples, after) = std::mem::take(&mut rest).split_at_mut(count);
+            rest = after;
+            runs.push(PlaneRows {
+                samples,
+                first_row,
+                width,
+                stride,
+            });
+            first_row = first_row.max(end);
+        }
+        runs
+    }
+
     /// This plane as the inter kernels read it.
     pub(crate) fn view(&self) -> RefPlane<'_, S> {
         RefPlane {
@@ -125,6 +167,37 @@ impl<S> fmt::Debug for Plane<S> {
             .field("height", &self.height)
             .field("stride", &self.stride)
             .finish()
+    }
+}
+
+/// A run of whole rows of one plane, for writing. Row numbers stay those of the plane.
+pub(crate) struct PlaneRows<'a, S> {
+    samples: &'a mut [S],
+    first_row: usize,
+    width: usize,
+    stride: usize,
+}
+
+impl<S> PlaneRows<'_, S> {
+    /// Row `y` for writing, or `None` outside this run.
+    pub(crate) fn row_mut(&mut self, y: usize) -> Option<&mut [S]> {
+        let start = y.checked_sub(self.first_row)? * self.stride;
+        self.samples.get_mut(start..start + self.width)
+    }
+
+    /// The samples of this run. Row `first_row` starts at index 0.
+    pub(crate) fn samples_mut(&mut self) -> &mut [S] {
+        self.samples
+    }
+
+    /// The index in this run of the sample at column `x` of row `y`.
+    pub(crate) const fn index_of(&self, x: usize, y: usize) -> usize {
+        y.saturating_sub(self.first_row) * self.stride + x
+    }
+
+    /// Samples from one row start to the next.
+    pub(crate) const fn stride(&self) -> usize {
+        self.stride
     }
 }
 
@@ -240,6 +313,11 @@ impl<S: Sample> Picture<S> {
             1 => &mut self.cb,
             _ => &mut self.cr,
         }
+    }
+
+    /// The three planes for writing: luma, Cb, and Cr.
+    pub(crate) const fn planes_mut(&mut self) -> (&mut Plane<S>, &mut Plane<S>, &mut Plane<S>) {
+        (&mut self.luma, &mut self.cb, &mut self.cr)
     }
 
     /// The output area.
@@ -431,6 +509,24 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// Runs cover each row once, and a row keeps its plane's number.
+    #[test]
+    fn split_rows_keep_their_numbers() {
+        let mut plane = Plane::<u8>::new(4, 5).unwrap();
+        for y in 0..5 {
+            plane.row_mut(y).unwrap().fill(y as u8);
+        }
+        let mut runs = plane.split_rows([1, 3, 16].into_iter());
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].row_mut(0).unwrap(), [0; 4]);
+        assert_eq!(runs[0].row_mut(1), None);
+        assert_eq!(runs[1].row_mut(0), None);
+        assert_eq!(runs[1].row_mut(2).unwrap(), [2; 4]);
+        assert_eq!(runs[1].index_of(1, 2), runs[1].stride() + 1);
+        assert_eq!(runs[2].row_mut(4).unwrap(), [4; 4]);
+        assert_eq!(runs[2].row_mut(5), None);
     }
 
     #[test]

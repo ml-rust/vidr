@@ -87,6 +87,11 @@ impl PredSamples {
         }
     }
 
+    /// Sets every value to zero.
+    pub(crate) fn clear(&mut self) {
+        self.samples.fill(0);
+    }
+
     /// `width` values of row `y`.
     #[cfg(test)]
     pub(crate) fn row(&self, y: usize, width: usize) -> &[i16] {

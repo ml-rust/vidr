@@ -42,7 +42,7 @@ pub(crate) struct SegmentInput<'a> {
 }
 
 /// Parses one slice segment. `on_ctu` runs after each CTU with the picture maps and
-/// that CTU's records.
+/// that CTU's records. It can swap the records for another set: the next CTU clears them.
 ///
 /// # Errors
 ///
@@ -58,7 +58,7 @@ pub(crate) fn parse_slice_segment<F>(
     mut on_ctu: F,
 ) -> Result<(), HevcError>
 where
-    F: FnMut(&ParseMaps, &CtuRecords) -> Result<(), HevcError>,
+    F: FnMut(&ParseMaps, &mut CtuRecords) -> Result<(), HevcError>,
 {
     let (params, layout) = (input.params, input.layout);
     let mut parser = CtuParser::new(params, layout, maps, input.data, input.start)?;
@@ -88,7 +88,7 @@ where
             parser.sao_syntax(rs);
         }
         parser.parse_coding_tree(x, y)?;
-        on_ctu(parser.maps, &parser.records)?;
+        on_ctu(parser.maps, &mut parser.records)?;
         parser.store_wavefront(rs, carry);
         let end = parser.end_of_slice_segment_flag();
         parser.check_not_exhausted()?;

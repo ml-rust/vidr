@@ -5,3 +5,4 @@ pub(crate) mod buffer;
 pub(crate) mod poc;
 pub(crate) mod ref_lists;
 pub(crate) mod rps;
+pub(crate) mod stored;

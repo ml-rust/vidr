@@ -2,5 +2,7 @@
 
 pub(crate) mod deblock;
 pub(crate) mod edges;
+#[cfg(test)]
+mod in_rows_tests;
 pub(crate) mod sao;
 pub(crate) mod strength;

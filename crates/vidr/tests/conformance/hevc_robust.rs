@@ -14,6 +14,7 @@
 //! | `VIDR_HEVC_ROBUST_KEEP` | A directory for each failing stream | No file |
 //! | `VIDR_HEVC_ROBUST_TRACE` | Set to print each case before it runs | No line |
 //! | `VIDR_CONFORMANCE_JOBS` | Zips decoded at once | Half the logical CPUs |
+//! | `VIDR_HEVC_THREADS` | Worker threads per decoder. 1 decodes on the calling thread | 1 |
 //!
 //! Zip name, seed, and kind fix the mutated bytes. To run one case again, set
 //! `VIDR_HEVC_ONLY` to its zip and `VIDR_HEVC_ROBUST_SEEDS` above its seed.
@@ -41,16 +42,17 @@ use std::time::Duration;
 
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use vidr::decode::Decoder;
-use vidr::decode::hevc::HevcDecoder;
+use vidr::decode::hevc::{HevcDecoder, HevcOptions};
 
 use super::hevc::{read_stream, selected_zips, zip_name};
+use super::hevc_decode::hevc_threads;
 use super::runner::{panic_text, run_each};
 use crate::cpu_hevc::packets::nal_packets;
 
 const DEFAULT_SEEDS: u64 = 8;
 const DEFAULT_DEADLINE_SECS: u64 = 600;
-/// Frames one send can leave queued: the largest `MaxDpbSize` (A-2), and the picture that
-/// the send finishes.
+/// Frames one send can leave queued on one thread: the largest `MaxDpbSize` (A-2), and the
+/// picture that the send finishes.
 const MAX_QUEUED_FRAMES: usize = 17;
 /// Bits per flip at the low rate.
 const LOW_RATE_BITS: usize = 100_000;
@@ -278,6 +280,16 @@ fn mutate(stream: &[u8], name: &str, kind: Kind, seed: u64) -> Vec<u8> {
     out
 }
 
+/// Frames one send can leave queued. Workers add the pictures in flight: their thread count
+/// plus the largest `MaxDpbSize`, each with one output waiting.
+const fn max_queued_frames(threads: usize) -> usize {
+    if threads == 1 {
+        MAX_QUEUED_FRAMES
+    } else {
+        MAX_QUEUED_FRAMES + threads + 16
+    }
+}
+
 /// How one stream ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -298,11 +310,11 @@ struct Decode {
 /// stream, because each later call returns the same error.
 fn decode(stream: &[u8], check_hash: bool) -> Decode {
     let device = CpuDevice::new();
-    let opened = if check_hash {
-        HevcDecoder::<CpuRuntime>::with_picture_hash_check(&device, &[])
-    } else {
-        HevcDecoder::<CpuRuntime>::new(&device, &[])
+    let options = HevcOptions {
+        threads: Some(hevc_threads()),
+        check_picture_hash: check_hash,
     };
+    let opened = HevcDecoder::<CpuRuntime>::with_options(&device, &[], options);
     let mut peak_queued = 0;
     let mut finish = |decoder: &mut HevcDecoder<CpuRuntime>| {
         peak_queued = peak_queued.max(decoder.queued());
@@ -482,9 +494,10 @@ fn run_zip(zip: &Path, settings: &Settings) -> ZipReport {
                     ))
                 }
             };
-            if run.peak_queued > MAX_QUEUED_FRAMES {
+            let limit = max_queued_frames(hevc_threads());
+            if run.peak_queued > limit {
                 detail = Some(format!(
-                    "{} frames queued after one send, and the limit is {MAX_QUEUED_FRAMES}",
+                    "{} frames queued after one send, and the limit is {limit}",
                     run.peak_queued
                 ));
             }

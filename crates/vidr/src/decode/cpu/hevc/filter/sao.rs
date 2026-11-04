@@ -1,13 +1,18 @@
 //! The sample adaptive offset process on a whole picture (8.7.3).
+//!
+//! Every read comes from a copy of the deblocked plane, and a CTB writes only its own
+//! rows. So CTB rows run in any order, one writer per row.
 
 use fearless_simd::Simd;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::decode::cpu::dsp::sample::Sample;
 use crate::decode::cpu::dsp::sao::{band_run, edge_run};
 use crate::decode::cpu::dsp::simd::{Cpu, with_simd};
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
-use crate::decode::cpu::hevc::picture::{Picture, Plane};
+use crate::decode::cpu::hevc::picture::{Picture, Plane, PlaneRows};
 use crate::decode::cpu::hevc::syntax::maps::ParseMaps;
 use crate::decode::cpu::hevc::syntax::sao::{SaoKind, SaoPlane};
 
@@ -68,20 +73,71 @@ pub(crate) fn sao_picture<S: Sample>(
             .plane_mut(c_idx)
             .copy_samples_from(picture.plane(c_idx));
         let source = deblocked.plane(c_idx);
-        let target = picture.plane_mut(c_idx);
+        let mut target = picture.plane_mut(c_idx).rows_mut();
         for rs in 0..context.layout.ctb_count() {
             let values = context.maps.sao(rs).planes[c_idx];
             if values.kind != SaoKind::Off {
-                sao_ctb(source, target, context, rs, c_idx, &values);
+                sao_ctb(source, &mut target, context, rs, c_idx, &values);
             }
         }
+    }
+}
+
+/// [`sao_picture`] with the copy and each CTB row on the current rayon pool. The output
+/// equals it.
+pub(crate) fn sao_picture_in_rows<S: Sample>(
+    picture: &mut Picture<S>,
+    deblocked: &mut Picture<S>,
+    context: &SaoContext<'_>,
+) {
+    let width_in_ctbs = (context.layout.width_in_ctbs() as usize).max(1);
+    let ctb_rows = context.layout.ctb_count() / width_in_ctbs;
+    for c_idx in 0..3 {
+        let plane_active = (0..context.layout.ctb_count())
+            .any(|rs| context.maps.sao(rs).planes[c_idx].kind != SaoKind::Off);
+        if !plane_active {
+            continue;
+        }
+        let ctb_height = (1usize << context.layout.ctb_log2()) >> usize::from(c_idx > 0);
+        let chunk = picture
+            .plane(c_idx)
+            .stride()
+            .saturating_mul(ctb_height)
+            .max(1);
+        let source = picture.plane(c_idx).samples();
+        let copy = deblocked.plane_mut(c_idx).samples_mut();
+        if copy.len() == source.len() {
+            copy.par_chunks_mut(chunk)
+                .zip(source.par_chunks(chunk))
+                .for_each(|(to, from)| to.copy_from_slice(from));
+        }
+        let source = deblocked.plane(c_idx);
+        let ends = (1..=ctb_rows).map(|row| {
+            if row == ctb_rows {
+                usize::MAX
+            } else {
+                row * ctb_height
+            }
+        });
+        let bands = picture.plane_mut(c_idx).split_rows(ends);
+        bands
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(row, mut target)| {
+                for rs in row * width_in_ctbs..(row + 1) * width_in_ctbs {
+                    let values = context.maps.sao(rs).planes[c_idx];
+                    if values.kind != SaoKind::Off {
+                        sao_ctb(source, &mut target, context, rs, c_idx, &values);
+                    }
+                }
+            });
     }
 }
 
 /// The CTB modification process (8.7.3.2).
 fn sao_ctb<S: Sample>(
     source: &Plane<S>,
-    target: &mut Plane<S>,
+    target: &mut PlaneRows<'_, S>,
     context: &SaoContext<'_>,
     rs: usize,
     c_idx: usize,
@@ -205,7 +261,7 @@ struct EdgeRow<'a> {
 fn edge_row<V: Simd, S: Sample>(
     simd: V,
     source: &Plane<S>,
-    target: &mut Plane<S>,
+    target: &mut PlaneRows<'_, S>,
     y: usize,
     edge: &EdgeRow<'_>,
 ) {
@@ -265,7 +321,7 @@ struct EdgeSpan {
 fn edge_span<V: Simd, S: Sample>(
     simd: V,
     source: &Plane<S>,
-    target: &mut Plane<S>,
+    target: &mut PlaneRows<'_, S>,
     span: &EdgeSpan,
     columns: (usize, usize),
     edge: &EdgeRow<'_>,
@@ -311,7 +367,7 @@ fn neighbour_run<S: Sample>(
 /// `cu_transquant_bypass_flag` 1, or PCM with `pcm_loop_filter_disabled_flag` 1.
 fn restore_unfiltered<S: Sample>(
     source: &Plane<S>,
-    target: &mut Plane<S>,
+    target: &mut PlaneRows<'_, S>,
     context: &SaoContext<'_>,
     area: &CtbArea,
 ) {

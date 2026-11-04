@@ -2,7 +2,8 @@
 //! (8.3.3), and the output order process (C.5.2).
 //!
 //! Pictures live behind [`Arc`], so a reference list or an output holds a picture
-//! with no copy of its samples.
+//! with no copy of its samples. The buffer is generic over [`StoredPicture`], so the
+//! threaded path keeps handles to pictures that later finish.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use crate::decode::cpu::hevc::picture::{DisplayWindow, Picture};
 use crate::decode::cpu::hevc::syntax::records::push_record;
 
 use super::rps::{LongTermPoc, RpsPocs};
+use super::stored::{Reclaim, StoredPicture};
 
 /// Finished buffers kept for reuse.
 const MAX_FREE_FRAMES: usize = 4;
@@ -43,8 +45,8 @@ enum Marking {
 
 /// One picture storage buffer.
 #[derive(Clone, Debug)]
-struct Entry<S> {
-    frame: Arc<Frame<S>>,
+struct Entry<P> {
+    frame: P,
     marking: Marking,
     /// "Needed for output".
     needed_for_output: bool,
@@ -56,9 +58,9 @@ struct Entry<S> {
 
 /// One entry of `RefPicSetStCurrBefore`, `RefPicSetStCurrAfter`, or `RefPicSetLtCurr`.
 #[derive(Clone, Debug)]
-pub(crate) struct RefEntry<S> {
+pub(crate) struct RefEntry<P> {
     /// `None` for "no reference picture".
-    pub(crate) frame: Option<Arc<Frame<S>>>,
+    pub(crate) frame: Option<P>,
     /// The POC the entry names.
     pub(crate) poc: i32,
     /// True for an entry of `RefPicSetLtCurr`.
@@ -67,19 +69,19 @@ pub(crate) struct RefEntry<S> {
 
 /// The current picture's sets that reference lists read.
 #[derive(Clone, Debug)]
-pub(crate) struct RefPicSets<S> {
+pub(crate) struct RefPicSets<P> {
     /// `RefPicSetStCurrBefore`.
-    pub(crate) before: Vec<RefEntry<S>>,
+    pub(crate) before: Vec<RefEntry<P>>,
     /// `RefPicSetStCurrAfter`.
-    pub(crate) after: Vec<RefEntry<S>>,
+    pub(crate) after: Vec<RefEntry<P>>,
     /// `RefPicSetLtCurr`.
-    pub(crate) long_term: Vec<RefEntry<S>>,
+    pub(crate) long_term: Vec<RefEntry<P>>,
     /// Entries of `RefPicSetStFoll` and `RefPicSetLtFoll` that hold "no reference
     /// picture": the POC, and true for a long-term entry.
     missing_foll: Vec<(i32, bool)>,
 }
 
-impl<S> RefPicSets<S> {
+impl<P> RefPicSets<P> {
     /// Sets with no entries.
     pub(crate) const fn empty() -> Self {
         Self {
@@ -132,21 +134,24 @@ pub(crate) struct FrameFormat {
 
 /// The decoded picture buffer of one sample type.
 #[derive(Clone, Debug)]
-pub(crate) struct Dpb<S> {
-    entries: Vec<Entry<S>>,
+pub(crate) struct Dpb<S, P = Arc<Frame<S>>> {
+    entries: Vec<Entry<P>>,
     /// Pictures the bumping process output, oldest first.
-    output: VecDeque<Arc<Frame<S>>>,
+    output: VecDeque<P>,
     /// Buffers with no remaining reader.
     free: Vec<Frame<S>>,
+    /// Removed pictures that other holders still keep.
+    waiting: Vec<P>,
 }
 
-impl<S: Sample> Dpb<S> {
+impl<S: Sample, P: StoredPicture<Sample = S>> Dpb<S, P> {
     /// An empty buffer.
     pub(crate) const fn new() -> Self {
         Self {
             entries: Vec::new(),
             output: VecDeque::new(),
             free: Vec::new(),
+            waiting: Vec::new(),
         }
     }
 
@@ -161,7 +166,7 @@ impl<S: Sample> Dpb<S> {
         rps: &RpsPocs,
         max_poc_lsb: u32,
         irap_no_rasl: bool,
-    ) -> Result<RefPicSets<S>, HevcError> {
+    ) -> Result<RefPicSets<P>, HevcError> {
         for entry in &mut self.entries {
             entry.in_rps = false;
             if irap_no_rasl {
@@ -226,10 +231,10 @@ impl<S: Sample> Dpb<S> {
     }
 
     /// (8-6) for one entry, and step 2 of 8.3.2.
-    fn take_long_term(&mut self, item: &LongTermPoc, max_poc_lsb: u32) -> Option<Arc<Frame<S>>> {
+    fn take_long_term(&mut self, item: &LongTermPoc, max_poc_lsb: u32) -> Option<P> {
         let mask = i64::from(max_poc_lsb) - 1;
         let found = self.entries.iter_mut().find(|entry| {
-            let poc = i64::from(entry.frame.poc);
+            let poc = i64::from(entry.frame.poc());
             let matches = if item.msb_present {
                 poc == i64::from(item.poc)
             } else {
@@ -239,17 +244,17 @@ impl<S: Sample> Dpb<S> {
         })?;
         found.marking = Marking::LongTerm;
         found.in_rps = true;
-        Some(Arc::clone(&found.frame))
+        Some(found.frame.clone())
     }
 
     /// (8-7) for one entry.
-    fn take_short_term(&mut self, poc: i32) -> Option<Arc<Frame<S>>> {
+    fn take_short_term(&mut self, poc: i32) -> Option<P> {
         let found = self
             .entries
             .iter_mut()
-            .find(|entry| entry.marking == Marking::ShortTerm && entry.frame.poc == poc)?;
+            .find(|entry| entry.marking == Marking::ShortTerm && entry.frame.poc() == poc)?;
         found.in_rps = true;
-        Some(Arc::clone(&found.frame))
+        Some(found.frame.clone())
     }
 
     /// C.5.2.2: output and removal before the current picture decodes.
@@ -279,7 +284,7 @@ impl<S: Sample> Dpb<S> {
             while self.bump() {}
         }
         for entry in self.entries.drain(..) {
-            recycle(&mut self.free, entry.frame);
+            recycle(&mut self.free, &mut self.waiting, entry.frame);
         }
     }
 
@@ -297,16 +302,21 @@ impl<S: Sample> Dpb<S> {
     /// C.5.2.3 for the finished current picture, with C.3.4 before it. A picture with
     /// `PicOutputFlag` 0 stores as "not needed for output".
     pub(crate) fn insert(&mut self, frame: Frame<S>, output: bool, limits: &DpbLimits) {
-        let poc = frame.poc;
+        self.insert_picture(P::finished(frame), output, limits);
+    }
+
+    /// [`Self::insert`] for a picture the buffer holds in its stored form.
+    pub(crate) fn insert_picture(&mut self, picture: P, output: bool, limits: &DpbLimits) {
+        let poc = picture.poc();
         if output {
             for entry in &mut self.entries {
-                if entry.needed_for_output && entry.frame.poc > poc {
+                if entry.needed_for_output && entry.frame.poc() > poc {
                     entry.latency = entry.latency.saturating_add(1);
                 }
             }
         }
         self.entries.push(Entry {
-            frame: Arc::new(frame),
+            frame: picture,
             marking: Marking::ShortTerm,
             needed_for_output: output,
             latency: 0,
@@ -344,14 +354,14 @@ impl<S: Sample> Dpb<S> {
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.needed_for_output)
-            .min_by_key(|(_, entry)| entry.frame.poc)
+            .min_by_key(|(_, entry)| entry.frame.poc())
             .map(|(index, _)| index);
         let Some(index) = first else {
             return false;
         };
         if let Some(entry) = self.entries.get_mut(index) {
             entry.needed_for_output = false;
-            self.output.push_back(Arc::clone(&entry.frame));
+            self.output.push_back(entry.frame.clone());
         }
         self.remove_finished();
         true
@@ -364,7 +374,7 @@ impl<S: Sample> Dpb<S> {
         while let Some(entry) = self.entries.get(index) {
             if !entry.needed_for_output && entry.marking == Marking::Unused {
                 let removed = self.entries.swap_remove(index);
-                recycle(&mut self.free, removed.frame);
+                recycle(&mut self.free, &mut self.waiting, removed.frame);
             } else {
                 index += 1;
             }
@@ -378,7 +388,7 @@ impl<S: Sample> Dpb<S> {
     /// [`HevcError::Allocation`] when a picture does not fit in memory.
     pub(crate) fn generate_unavailable(
         &mut self,
-        sets: &RefPicSets<S>,
+        sets: &RefPicSets<P>,
         format: &FrameFormat,
     ) -> Result<(), HevcError> {
         for &(poc, long_term) in &sets.missing_foll {
@@ -394,7 +404,7 @@ impl<S: Sample> Dpb<S> {
                 .col
                 .prepare(format.width as u32, format.height as u32)?;
             let entry = Entry {
-                frame: Arc::new(frame),
+                frame: P::finished(frame),
                 marking: if long_term {
                     Marking::LongTerm
                 } else {
@@ -417,6 +427,9 @@ impl<S: Sample> Dpb<S> {
     /// - [`HevcError::Allocation`] when a picture does not fit in memory.
     /// - [`HevcError::DisplayWindow`] for a conformance window that does not fit.
     pub(crate) fn take_frame(&mut self, format: &FrameFormat) -> Result<Frame<S>, HevcError> {
+        for picture in std::mem::take(&mut self.waiting) {
+            recycle(&mut self.free, &mut self.waiting, picture);
+        }
         let reusable = self.free.iter().position(|frame| {
             frame.picture.luma().width() == format.width
                 && frame.picture.luma().height() == format.height
@@ -438,17 +451,22 @@ impl<S: Sample> Dpb<S> {
     }
 
     /// The oldest output picture.
-    pub(crate) fn pop_output(&mut self) -> Option<Arc<Frame<S>>> {
+    pub(crate) fn pop_output(&mut self) -> Option<P> {
         self.output.pop_front()
     }
 }
 
-/// Keeps the buffer of a picture nothing else holds.
-fn recycle<S>(free: &mut Vec<Frame<S>>, frame: Arc<Frame<S>>) {
-    if free.len() < MAX_FREE_FRAMES
-        && let Ok(frame) = Arc::try_unwrap(frame)
-    {
-        free.push(frame);
+/// Keeps the buffer of a picture nothing else holds. A picture that another holder keeps
+/// waits for a later call, when its type retries.
+fn recycle<S, P: StoredPicture<Sample = S>>(
+    free: &mut Vec<Frame<S>>,
+    waiting: &mut Vec<P>,
+    picture: P,
+) {
+    match picture.reclaim() {
+        Reclaim::Buffer(frame) if free.len() < MAX_FREE_FRAMES => free.push(*frame),
+        Reclaim::Busy(picture) if P::WAITS_TO_RECLAIM => waiting.push(picture),
+        _ => {}
     }
 }
 

@@ -10,6 +10,7 @@
 //! | `VIDR_HEVC_ONLY` | Run zips whose name holds this text | Every zip |
 //! | `VIDR_HEVC_REPORT` | A file for one line per vector | No file |
 //! | `VIDR_CONFORMANCE_JOBS` | Vectors decoded at once | Half the logical CPUs |
+//! | `VIDR_HEVC_THREADS` | Worker threads per decoder. 1 decodes on the calling thread | 1 |
 //!
 //! Each picture checks against its hash SEI message, in the decoder. Each output
 //! picture also feeds one MD5 of the whole stream, as the reference decoder writes its
@@ -40,7 +41,7 @@ use std::sync::Mutex;
 
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use vidr::bitstream::{HevcNalType, annexb};
-use vidr::decode::hevc::HevcDecoder;
+use vidr::decode::hevc::{HevcDecoder, HevcOptions};
 use vidr::decode::{DecodedFrame, Decoder, PixelFormat};
 use vidr::{BitstreamError, DecodeError};
 
@@ -51,6 +52,18 @@ use crate::cpu_hevc::packets::nal_packets;
 
 /// `payloadType` of the decoded picture hash SEI message (D.2.1).
 const PICTURE_HASH_PAYLOAD: u8 = 132;
+
+/// `VIDR_HEVC_THREADS`, or 1 when it is unset.
+pub(super) fn hevc_threads() -> usize {
+    std::env::var("VIDR_HEVC_THREADS").map_or(1, |text| {
+        text.parse::<usize>()
+            .ok()
+            .filter(|&threads| threads > 0)
+            .unwrap_or_else(|| {
+                panic!("VIDR_HEVC_THREADS holds `{text}`. Set it to 1 or more, or unset it.")
+            })
+    })
+}
 
 /// What one vector did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,7 +238,11 @@ impl FrameSink {
 
 /// Sends every NAL unit, and drains the frames after each.
 fn feed(stream: &[u8], sink: &mut FrameSink) -> Result<(), Stop> {
-    let mut decoder = HevcDecoder::<CpuRuntime>::with_picture_hash_check(&CpuDevice::new(), &[])
+    let options = HevcOptions {
+        threads: Some(hevc_threads()),
+        check_picture_hash: true,
+    };
+    let mut decoder = HevcDecoder::<CpuRuntime>::with_options(&CpuDevice::new(), &[], options)
         .map_err(|error| stop_of(&error, "open"))?;
     let packets =
         nal_packets(stream).map_err(|error| Stop::Fail(format!("the bitstream: {error}")))?;
