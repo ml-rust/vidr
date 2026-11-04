@@ -40,6 +40,9 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
     "CC0-1.0",
+    # dynasm and dynasmrt, through boostr and regexr. MPL-2.0 is file-level
+    # copyleft: it binds changes to those files, not code that links them.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.93
 unused-allowed-license = "allow"

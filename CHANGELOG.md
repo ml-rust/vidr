@@ -68,3 +68,14 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 ### Fixed
 
 - `vidr`: NVDEC decode of VP9 reported matrix coefficients 0 (identity) and limited range for every stream, because NVDEC returns an all-zero video signal description for VP9. `ColorFacts::yuv_spec` returned `None`, so frame conversion refused a BT.709 VP9 stream. `NvdecDecoder` now reads `color_space` and `color_range` from the latest key frame header, maps `color_space` to H.273 `MatrixCoefficients`, and reports transfer and primaries as unspecified, because VP9 carries neither. A stream with no key frame header yet reports matrix 2, never 0.
+- `vidr`: `frame::to_rgb_reusing` writes an even frame into a buffer the caller keeps, and `frame::reuse_tensor` keeps such a buffer. `FrameError::OutOfMemory` separates an allocation failure from other numr errors.
+- `vidr-remaster`: the model catalog in `catalog`, in the default build, with no network code.
+  - `catalog_entry` states each model's directory name, download URL, licence, network, and Cargo feature.
+  - `models_root_from_env` reads `--models-dir` or `VIDR_MODELS_DIR`. `resolve_model_dir` returns the model's directory. A missing directory or checkpoint names the expected path and the URL.
+  - `require_model` refuses a model by name when its feature is off. `licence_notice` states that `purevision` uses CC BY-NC-SA 4.0, for a run's report and for these errors.
+- `vidr-remaster`: `RemasterTransform`, a `FrameTransform` over any numr backend with the `transform` feature, and the features `mp4`, `mkv`, `h264`, `hevc`, `model-srvgg`, `model-rrdb`, `f16`, and `cuda`.
+  - `load` and `from_model` run `to_rgb` at F16 NHWC, `SrModel::forward_native`, a cast to F32, an antialiased bicubic resize to the target, and `from_rgb`. An equal size skips the cast and the resize. `from_rgb` clamps RGB to 0..1, as the PoC does.
+  - `resize_only` runs the same steps without a model, for `--from-upscaled`.
+  - The output format follows each frame's bit depth, and `ColorPlan` supplies both colour specs. RGB and resize buffers persist across frames of one size. Output planes are new per frame, because the encoder holds them.
+  - An allocation failure names the frame size, the model, and the next action: `--model fast` or a smaller source.
+- `vidr-remaster`: `coded_output_size` turns a display output size into the encoder's size, with the sides swapped for a 90 or 270 degree source.

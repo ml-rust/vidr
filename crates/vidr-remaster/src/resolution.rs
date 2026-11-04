@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use vidr::{Dimensions, GeometryError};
+use vidr::{Dimensions, GeometryError, Rotation};
 
 /// Smallest shorter edge any mode produces.
 const MINIMUM_SHORT_EDGE: u64 = 480;
@@ -188,6 +188,20 @@ pub fn choose_resolution(
     Ok(output)
 }
 
+/// Returns the size the encoder takes, from the display size
+/// [`choose_resolution`] returns.
+///
+/// The model runs on coded pixels, and the output keeps the source's rotation.
+/// So a source rotated by 90 or 270 degrees encodes its output with width and
+/// height swapped. A 180-degree rotation keeps both.
+pub const fn coded_output_size(display_output: Dimensions, rotation: Rotation) -> Dimensions {
+    if rotation.swaps_axes() {
+        display_output.transposed()
+    } else {
+        display_output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +304,35 @@ mod tests {
             let mode: ResolutionMode = name.parse().expect("valid mode");
             assert_eq!(mode.to_string(), name);
         }
+    }
+
+    #[test]
+    fn the_coded_output_size_swaps_sides_for_90_and_270_degrees() {
+        let display = dims(720, 1280);
+        let cases = [
+            (Rotation::Upright, (720, 1280)),
+            (Rotation::Clockwise90, (1280, 720)),
+            (Rotation::Clockwise180, (720, 1280)),
+            (Rotation::Clockwise270, (1280, 720)),
+        ];
+        for (rotation, expected) in cases {
+            assert_eq!(pair(coded_output_size(display, rotation)), expected);
+        }
+    }
+
+    #[test]
+    fn a_rotated_phone_clip_encodes_landscape_and_displays_portrait() {
+        // Coded 1920x1080, rotated 90 degrees, displays as 1080x1920.
+        let coded = dims(1920, 1080);
+        let rotation = Rotation::Clockwise90;
+        let display = coded_output_size(coded, rotation);
+        let output = choose_resolution(display, ResolutionMode::Fixed(StandardResolution::P720))
+            .expect("output size");
+        assert_eq!(pair(output), (720, 1280));
+        let encoder = coded_output_size(output, rotation);
+        assert_eq!(pair(encoder), (1280, 720));
+        assert_eq!(encoder.width() % 2, 0);
+        assert_eq!(encoder.height() % 2, 0);
     }
 
     #[test]

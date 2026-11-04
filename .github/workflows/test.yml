@@ -100,6 +100,15 @@ jobs:
           - { crate: vidr, features: "pipeline" }
           - { crate: vidr, features: "pipeline,mp4,mkv" }
           - { crate: vidr-remaster, features: "" }
+          - { crate: vidr-remaster, features: "mp4" }
+          - { crate: vidr-remaster, features: "mkv" }
+          - { crate: vidr-remaster, features: "h264" }
+          - { crate: vidr-remaster, features: "hevc" }
+          - { crate: vidr-remaster, features: "f16" }
+          - { crate: vidr-remaster, features: "transform" }
+          - { crate: vidr-remaster, features: "model-srvgg" }
+          - { crate: vidr-remaster, features: "model-rrdb" }
+          - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -130,6 +139,7 @@ jobs:
         include:
           - { crate: vidr, features: "h264,hevc,av1,vp9,frame,mp4,mkv,pipeline" }
           - { crate: vidr-remaster, features: "" }
+          - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
