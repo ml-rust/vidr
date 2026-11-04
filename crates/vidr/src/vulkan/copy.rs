@@ -22,7 +22,7 @@ use wgpu::hal::vulkan as hal_vulkan;
 use super::barriers::image_barrier;
 use super::device::VulkanDevice;
 use super::engine::CopySource;
-use crate::decode::PixelFormat;
+use crate::decode::{ColorFacts, DecodedFrame, PixelFormat};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
 
@@ -137,6 +137,29 @@ fn raw_buffer(buffer: &wgpu::Buffer) -> Result<vk::Buffer, DecodeError> {
     .ok_or_else(|| DecodeError::VulkanUnavailable {
         reason: "numr's buffer is not a Vulkan buffer".to_owned(),
     })
+}
+
+/// A frame of size `coded`, from the top left of what `source` names. Its planes take one copy
+/// on the device.
+pub(super) fn whole_frame(
+    device: &VulkanDevice,
+    source: &CopySource,
+    format: PixelFormat,
+    coded: (u32, u32),
+    color: ColorFacts,
+    pts: i64,
+) -> Result<DecodedFrame<WgpuRuntime>, DecodeError> {
+    let area = FrameArea {
+        left: 0,
+        top: 0,
+        width: coded.0,
+        height: coded.1,
+    };
+    let display = area.display(coded)?;
+    let (y, uv) = copy_planes(device, source, area, format)?;
+    Ok(DecodedFrame::from_packed_planes(
+        y, uv, format, pts, display, color,
+    ))
 }
 
 /// Copies both planes of an image in `format` to new tensors and waits for the copy.

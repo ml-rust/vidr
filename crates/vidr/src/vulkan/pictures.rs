@@ -88,7 +88,13 @@ pub(super) struct PictureStore {
 
 impl PictureStore {
     /// `extent` is the size of each image. With `separate` false, every slot is a layer
-    /// of one image. `readable` lets a copy read a slot's image in either mode.
+    /// of one image. `readable` lets a copy read a slot's image in either mode. `output_image`
+    /// adds the output image in coincide mode. An AV1 frame with film grain needs it, because its
+    /// output never matches its slot.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument states one fact of the session"
+    )]
     pub(super) fn new(
         device: &Arc<VulkanDevice>,
         profile: &VideoProfile,
@@ -97,6 +103,7 @@ impl PictureStore {
         separate: bool,
         extent: (u32, u32),
         readable: bool,
+        output_image: bool,
     ) -> Result<Self, DecodeError> {
         let usage = slot_usage(mode, readable);
         let slot_format = query_format(device, profile, usage)?;
@@ -151,14 +158,13 @@ impl PictureStore {
                 state: SlotState::Empty,
             });
         }
-        let output = match mode {
-            DpbMode::Coincide => None,
-            DpbMode::Distinct => {
-                let format = query_format(device, profile, output_usage())?;
-                let image = make(1, output_usage(), format, "the output image")?;
-                let view = ImageView::new(device, image.raw, format.format, 0)?;
-                Some((view, image))
-            }
+        let output = if mode == DpbMode::Distinct || output_image {
+            let format = query_format(device, profile, output_usage())?;
+            let image = make(1, output_usage(), format, "the output image")?;
+            let view = ImageView::new(device, image.raw, format.format, 0)?;
+            Some((view, image))
+        } else {
+            None
         };
         Ok(Self {
             mode,

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use ash::vk;
 use numr::runtime::wgpu::WgpuRuntime;
 
+use super::av1::Av1Decoder;
 use super::caps::DpbPreference;
 use super::device::VulkanDevice;
 use super::gap;
@@ -20,6 +21,7 @@ enum Backend {
     H264(H264Decoder),
     Hevc(HevcDecoder),
     Vp9(Vp9Decoder),
+    Av1(Box<Av1Decoder>),
 }
 
 /// Refuses a codec the device opened without, by name.
@@ -27,6 +29,7 @@ fn check_device_codec(device: &VulkanDevice, codec: DecodeCodec) -> Result<(), D
     let op = match codec {
         DecodeCodec::Hevc => vk::VideoCodecOperationFlagsKHR::DECODE_H265,
         DecodeCodec::Vp9 => gap::DECODE_VP9,
+        DecodeCodec::Av1 => vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
         _ => return Ok(()),
     };
     if device.decode_ops.contains(op) {
@@ -56,6 +59,9 @@ fn check_device_codec(device: &VulkanDevice, codec: DecodeCodec) -> Result<(), D
 ///   With an empty `config`, `send` takes Annex-B access units.
 /// - HEVC: the same, with `hvcC`.
 /// - VP9: `config` goes unread, and `send` takes a frame or a superframe.
+/// - AV1: `config` is the track's `av1C` payload, or empty. `send` takes low-overhead OBUs: a
+///   container sample or a temporal unit, as `NvdecDecoder` takes them. Annex B framing is refused
+///   by name.
 ///
 /// # Refused
 ///
@@ -68,7 +74,9 @@ fn check_device_codec(device: &VulkanDevice, codec: DecodeCodec) -> Result<(), D
 ///   lacks, because Vulkan Video activates a DPB slot only through a decode.
 /// - VP9: profiles other than 0 and 2, and a frame that grows past its session while it keeps
 ///   references. [`VulkanDecoder::with_max_coded_size`] sizes that session.
-/// - AV1 has no path here yet.
+/// - AV1: profiles other than Main, 4:0:0, and depths other than 8 and 10. Large-scale tile
+///   coding. A frame that reads a reference name with no frame, or one `ref_order_hint` states
+///   as lost. A size outside what the driver lists, for each frame. Film grain, when the driver lists no `filmGrainSupport` profile.
 ///
 /// # Output
 ///
@@ -82,6 +90,12 @@ fn check_device_codec(device: &VulkanDevice, codec: DecodeCodec) -> Result<(), D
 ///
 /// VP9 returns the last shown frame of a chunk, as libvpx does, and a hidden frame only
 /// fills a slot. `show_existing_frame` copies the slot again.
+///
+/// AV1 returns the last shown frame of a temporal unit, the highest spatial layer of operating
+/// point 0. It drops the OBUs outside that point. A frame takes `UpscaledWidth` by `FrameHeight`,
+/// as dav1d gives, and the render size goes unread. A frame with `apply_grain` 1 takes film grain
+/// from the driver, in an output image of its own. Its slot stays free of grain. Its grained
+/// planes stay with the slot, because a later `show_existing_frame` repeats those planes.
 ///
 /// # Threads
 ///
@@ -120,7 +134,7 @@ impl VulkanDecoder {
 
     /// As [`VulkanDecoder::new`], with a VP9 session of at least `max_coded`, up to what the
     /// driver lists. A frame that keeps references can then grow to that size. The other codecs
-    /// take their size from their parameter sets, and ignore this.
+    /// take their size from their parameter sets or sequence header, and ignore this.
     ///
     /// # Errors
     ///
@@ -169,15 +183,11 @@ impl VulkanDecoder {
             DecodeCodec::Vp9 => {
                 Backend::Vp9(Vp9Decoder::new(Arc::clone(device), preference, max_coded))
             }
-            other => {
-                return Err(DecodeError::VulkanRefused {
-                    codec: other,
-                    what: "the codec".to_owned(),
-                    reason: "this release decodes H.264, HEVC, and VP9 on Vulkan Video, and this \
-                             codec is not supported yet"
-                        .to_owned(),
-                });
-            }
+            DecodeCodec::Av1 => Backend::Av1(Box::new(Av1Decoder::new(
+                Arc::clone(device),
+                config,
+                preference,
+            )?)),
         };
         Ok(Self {
             device: Arc::clone(device),
@@ -219,6 +229,7 @@ impl Decoder<WgpuRuntime> for VulkanDecoder {
             Backend::H264(decoder) => decoder.send(packet, pts),
             Backend::Hevc(decoder) => decoder.send(packet, pts),
             Backend::Vp9(decoder) => decoder.send(packet, pts),
+            Backend::Av1(decoder) => decoder.send(packet, pts),
         });
         self.keep_error(result)
     }
@@ -232,8 +243,8 @@ impl Decoder<WgpuRuntime> for VulkanDecoder {
         match &mut self.backend {
             Backend::H264(decoder) => decoder.flush(),
             Backend::Hevc(decoder) => decoder.flush(),
-            // VP9 output has no reorder, so nothing waits.
-            Backend::Vp9(_) => {}
+            // VP9 and AV1 output has no reorder, so nothing waits.
+            Backend::Vp9(_) | Backend::Av1(_) => {}
         }
         Ok(())
     }
@@ -243,6 +254,7 @@ impl Decoder<WgpuRuntime> for VulkanDecoder {
             Backend::H264(decoder) => decoder.receive(),
             Backend::Hevc(decoder) => decoder.receive(),
             Backend::Vp9(decoder) => decoder.receive(),
+            Backend::Av1(decoder) => decoder.receive(),
         }
     }
 

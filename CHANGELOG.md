@@ -16,7 +16,16 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `DecodeError::VulkanDeviceLost` names a lost device, and `VulkanDevice::is_lost` states it. wgpu's panic on a lost device in `poll` becomes this error. `VulkanDevice::open_shared` opens a new device on the next numr index after a loss.
   - After an error, each later `send` and `flush` returns that error, also after a flush.
   - `hevc_vulkan_mutations_stay_safe` and `vp9_vulkan_mutations_stay_safe` run seeded damage through `VulkanDecoder` on one device, and report each lost device.
-- `vidr-remaster`: `auto` and `--decoder vulkan` on WebGPU take HEVC and VP9 sources through Vulkan Video. AV1 stays on the CPU.
+- `vidr`: AV1 Main decode on Vulkan Video behind `vulkan-video`, at 8 or 10 bits, 4:2:0, on the shared `DecodeEngine`. Real-GPU tests pass on NVIDIA's driver only, in its coincident DPB mode. The libaom sweep shows no failure there. It refuses streams by name below the driver's smallest coded size, and monochrome streams. No AMD or Intel GPU has run it, and no validation layer has run on it.
+  - `bitstream::av1` holds a whole parser: the sequence header, `uncompressed_header()` with the state it reads from the reference names, tile groups, temporal units, and operating point 0. It holds no decoding state past the header syntax.
+  - Session parameters hold the sequence header, and a new sequence header opens a new session at a key frame. Eight reference names share nine DPB slots. A sample holds several frames, and it gives its last shown frame per temporal unit.
+  - A frame with `apply_grain` 1 takes film grain from the driver, in an output image of its own, as `VUID-vkCmdDecodeVideoKHR-pDecodeInfo-09249` states. A frame shown again repeats its grained planes. A driver with no `filmGrainSupport` profile refuses by name.
+  - `DecodeError::VulkanTileRange` names a tile outside its frame's bytes. Annex B framing and tile lists are refused by name.
+  - `Av1Parser` refuses by name a sequence header or `OBU_FRAME_HEADER` inside an open frame, and a redundant header that is no exact copy. `parse_frame_header` refuses a `ref_frame_idx` with `RefValid` 0, and a `delta_frame_id_minus_1` that misses `RefFrameId`.
+  - A name that `ref_order_hint` states as lost goes empty in the reference pool. A frame that reads it takes `DecodeError::VulkanRefused`, and never decodes against the stale slot.
+  - Each Vulkan decoder keeps what its session parameters point to in stable heap storage for the life of the parameters, because NVIDIA's driver reads through those pointers after the create call returns.
+  - `scripts/conformance/fetch_av1.sh` fetches libaom's vectors. `libaom_vectors_match_on_dav1d`, `libaom_vectors_match_on_vulkan_video`, and `av1_vulkan_mutations_stay_safe` read them from `VIDR_AV1_VECTORS`.
+- `vidr-remaster`: `auto` and `--decoder vulkan` on WebGPU take HEVC, VP9, and AV1 sources through Vulkan Video, and the run's output check reads each output codec on it. `ExecutionError::VulkanCodec` goes.
 - `vidr`: exact frame timing model. `Rational` time values with checked arithmetic and named rounding modes, `rescale`, `TrackTiming` with the last-frame duration chain and total duration, and `EditTimeline` for MP4-style edit lists at rate 1.
 - `vidr`: frame geometry. `Rotation` in multiples of 90 degrees from degrees or a `tkhd` display matrix, sample and display aspect ratios.
 - `vidr`: bitstream filters behind the `h264`, `hevc`, and `av1` features.
@@ -154,7 +163,7 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - Dropping a decoder waits for its last decode and for wgpu's queue, each for at most 60 s. After a timeout or a lost device, its Vulkan objects stay allocated for the life of the process.
   - Slices stay in the packet until the decode, and go straight into a bitstream buffer that stays mapped. A write to non-coherent memory still ends with a flush.
   - It depends on `ash` 0.38, `wgpu` 30, and `h264-reader` 0.9. `vulkan::gap` holds the VP9 decode `pNext` layouts `ash` lacks.
-- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264, HEVC, and VP9. The encoder stays on the CPU, and AV1 takes a CPU decoder.
+- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264, HEVC, VP9, and AV1. The encoder stays on the CPU.
 - `vidr-remaster`: under `--decoder auto`, the refusals `H264Tool`, `H264Interlaced`, `H264BitDepth`, and `VulkanNoMemoryType` fall through to a CPU decoder. `VulkanCopyTimeout` ends the run.
 
 ### Changed

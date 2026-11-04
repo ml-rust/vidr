@@ -129,6 +129,13 @@ impl<R: Runtime> DecodedFrame<R> {
         }
     }
 
+    /// The same planes at another pts, for a frame shown again.
+    #[cfg(feature = "vulkan-video")]
+    pub(crate) fn with_pts(mut self, pts: i64) -> Self {
+        self.pts = pts;
+        self
+    }
+
     /// How the planes hold their samples.
     pub fn plane_form(&self) -> PlaneForm {
         self.form

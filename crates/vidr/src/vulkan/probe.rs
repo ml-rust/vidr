@@ -27,12 +27,16 @@ pub(super) const REQUIRED_EXTENSIONS: [&CStr; 4] = [
 
 /// Device extensions for one more codec. A device can lack them, and a stream of that codec
 /// is then refused by name.
-pub(super) const CODEC_EXTENSIONS: [(&CStr, vk::VideoCodecOperationFlagsKHR); 2] = [
+pub(super) const CODEC_EXTENSIONS: [(&CStr, vk::VideoCodecOperationFlagsKHR); 3] = [
     (
         ash::khr::video_decode_h265::NAME,
         vk::VideoCodecOperationFlagsKHR::DECODE_H265,
     ),
     (gap::VIDEO_DECODE_VP9_NAME, gap::DECODE_VP9),
+    (
+        vk::KHR_VIDEO_DECODE_AV1_NAME,
+        vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
+    ),
 ];
 
 /// One queue family as the driver lists it.
@@ -361,6 +365,23 @@ mod tests {
         let single = FamilyFacts { count: 1, ..both };
         let refused = place(&device(vec![single])).expect_err("refused");
         assert!(refused.contains("one queue"), "{refused}");
+    }
+
+    /// AV1 has no feature structure: its extension and its family decide.
+    #[test]
+    fn av1_needs_the_family_and_the_extension() {
+        let av1 = vk::VideoCodecOperationFlagsKHR::DECODE_AV1;
+        let family = FamilyFacts {
+            video_ops: vk::VideoCodecOperationFlagsKHR::DECODE_H264 | av1,
+            ..decode_family()
+        };
+        let mut facts = device(vec![general(), family]);
+        let ops = |facts: &DeviceFacts| place(facts).expect("placed").decode_ops;
+        assert!(!ops(&facts).contains(av1));
+        facts.extensions.push("VK_KHR_video_decode_av1".to_owned());
+        assert!(ops(&facts).contains(av1));
+        let narrow = device(vec![general(), decode_family()]);
+        assert!(!ops(&narrow).contains(av1));
     }
 
     #[test]

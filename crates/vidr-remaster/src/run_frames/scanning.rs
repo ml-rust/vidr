@@ -428,6 +428,12 @@ mod tests {
                 tiles_offset: 9,
                 frame_bytes: 9,
             },
+            DecodeError::VulkanTileRange {
+                pts: 1,
+                offset: 9,
+                size: 1,
+                bytes: 9,
+            },
             DecodeError::VulkanDeviceLost {
                 call: "vkQueueSubmit2",
                 input: "the picture at pts 1".to_owned(),

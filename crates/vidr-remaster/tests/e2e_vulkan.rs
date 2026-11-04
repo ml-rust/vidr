@@ -139,32 +139,14 @@ fn an_explicit_vulkan_decoder_runs_a_vp9_source() {
     );
 }
 
-/// An explicit request on AV1 names the absence, before any work.
+/// AV1 takes its session from the sequence header, and rav1r writes nothing here. libaom writes
+/// the source, and the output check reads the H.264 output on Vulkan Video.
 #[test]
-fn an_explicit_request_on_av1_is_not_supported_yet() {
-    let Some(mut case) = start("vulkan_av1") else {
-        return;
-    };
-    let Some(encoder) = case.first_encoder(&["libsvtav1", "libaom-av1"]) else {
-        return;
-    };
-    let source = case.source("clip.mp4", FRAMES, &["-c:v", encoder]);
-    let output = case.path("out.mp4");
-    let run = case.run_on(
-        "wgpu",
-        &source,
-        &[
-            "--codec",
-            "h264",
-            "--decoder",
-            "vulkan",
-            "--encoder",
-            "cpu",
-            "-o",
-            output.to_str().expect("a UTF-8 path"),
-        ],
+fn an_explicit_vulkan_decoder_runs_an_av1_source() {
+    run_source_on_vulkan(
+        "vulkan_av1",
+        DecodeCodec::Av1,
+        "libaom-av1",
+        &["-cpu-used", "8", "-row-mt", "0"],
     );
-    let error = run.error();
-    assert!(error.contains("not supported yet"), "{error}");
-    assert!(!output.exists(), "no output");
 }

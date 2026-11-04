@@ -20,8 +20,8 @@
 //! `color_space` and `color_range` from a frame header.
 //!
 //! Crate-internal parsers read whole headers for software and Vulkan decoders:
-//! HEVC VPS, SPS, PPS, and slice segment headers, and the VP9 uncompressed
-//! header.
+//! HEVC VPS, SPS, PPS, and slice segment headers, the VP9 uncompressed header, and
+//! the AV1 sequence and frame headers.
 
 mod bits;
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
@@ -99,9 +99,17 @@ mod vp9;
 )]
 mod vp9_header;
 
-#[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
+#[cfg(all(test, any(feature = "hevc", feature = "vp9", feature = "av1")))]
 mod header_oracle;
-#[cfg(all(test, any(feature = "hevc", feature = "vp9", feature = "vulkan-video")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "hevc",
+        feature = "vp9",
+        feature = "av1",
+        feature = "vulkan-video"
+    )
+))]
 pub(crate) mod test_bits;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]

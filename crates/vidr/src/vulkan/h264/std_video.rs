@@ -1,10 +1,8 @@
 //! The mapping from parsed H.264 headers into Vulkan's `StdVideoH264*` structures. It
 //! touches no device, so tests read each field back.
 //!
-//! An owner holds what a structure points to. `as_std` builds the structure on demand,
-//! so the pointers stay valid while the owner lives.
-
-use std::ptr;
+//! An owner holds what a structure points to, in stable heap storage. `as_std` builds the
+//! structure on demand, so the pointers stay valid while the owner lives, across moves too.
 
 use ash::vk::native::{
     StdVideoDecodeH264PictureInfo, StdVideoDecodeH264PictureInfoFlags,
@@ -20,6 +18,7 @@ use h264_reader::nal::sps::{
 };
 
 use super::dpb::RefFrame;
+use crate::vulkan::retained::{Retained, RetainedList};
 use crate::vulkan::zeroed::{AllZero, zeroed};
 
 // SAFETY: integers, bitfield units, and raw pointers only.
@@ -71,26 +70,26 @@ pub(super) const fn std_level(level_idc: u8) -> Option<u32> {
 fn scaling_lists(
     lists_4x4: [[u8; 16]; 6],
     lists_8x8: &[[u8; 64]],
-) -> Box<StdVideoH264ScalingLists> {
-    let mut lists = Box::new(StdVideoH264ScalingLists {
+) -> Retained<StdVideoH264ScalingLists> {
+    let mut lists = StdVideoH264ScalingLists {
         scaling_list_present_mask: 0b11_1111,
         use_default_scaling_matrix_mask: 0,
         ScalingList4x4: lists_4x4,
         ScalingList8x8: [[16; 64]; 6],
-    });
+    };
     for (index, list) in lists_8x8.iter().take(6).enumerate() {
         lists.ScalingList8x8[index] = *list;
         lists.scaling_list_present_mask |= 1 << (6 + index);
     }
-    lists
+    Retained::new(lists)
 }
 
 /// An SPS as a `StdVideoH264SequenceParameterSet`, with what it points to.
 pub(super) struct StdSps {
-    value: StdVideoH264SequenceParameterSet,
-    offsets: Vec<i32>,
-    scaling: Option<Box<StdVideoH264ScalingLists>>,
-    vui: Option<Box<StdVideoH264SequenceParameterSetVui>>,
+    value: Retained<StdVideoH264SequenceParameterSet>,
+    offsets: RetainedList<i32>,
+    scaling: Option<Retained<StdVideoH264ScalingLists>>,
+    vui: Option<Retained<StdVideoH264SequenceParameterSetVui>>,
 }
 
 impl StdSps {
@@ -165,8 +164,8 @@ impl StdSps {
             scaling_lists(matrix.scaling_lists_4x4(), lists_8x8.as_slice())
         });
         Self {
-            value,
-            offsets,
+            value: Retained::new(value),
+            offsets: RetainedList::new(offsets),
             scaling,
             vui: sps.vui_parameters.as_ref().map(std_vui),
         }
@@ -174,15 +173,15 @@ impl StdSps {
 
     /// The structure, valid while `self` lives.
     pub(super) fn as_std(&self) -> StdVideoH264SequenceParameterSet {
-        let mut value = self.value;
+        let mut value = self.value.get();
         if !self.offsets.is_empty() {
             value.pOffsetForRefFrame = self.offsets.as_ptr();
         }
         if let Some(scaling) = &self.scaling {
-            value.pScalingLists = ptr::from_ref(&**scaling);
+            value.pScalingLists = scaling.as_ptr();
         }
         if let Some(vui) = &self.vui {
-            value.pSequenceParameterSetVui = ptr::from_ref(&**vui);
+            value.pSequenceParameterSetVui = vui.as_ptr();
         }
         value
     }
@@ -190,7 +189,7 @@ impl StdSps {
 
 /// The VUI, without HRD parameters. A decode reads none of them, so both present flags
 /// stay 0 and `pHrdParameters` stays null.
-fn std_vui(vui: &VuiParameters) -> Box<StdVideoH264SequenceParameterSetVui> {
+fn std_vui(vui: &VuiParameters) -> Retained<StdVideoH264SequenceParameterSetVui> {
     let mut flags: StdVideoH264SpsVuiFlags = zeroed();
     let mut value: StdVideoH264SequenceParameterSetVui = zeroed();
     if let Some(aspect) = &vui.aspect_ratio_info {
@@ -240,13 +239,13 @@ fn std_vui(vui: &VuiParameters) -> Box<StdVideoH264SequenceParameterSetVui> {
         value.max_dec_frame_buffering = restrictions.max_dec_frame_buffering as u8;
     }
     value.flags = flags;
-    Box::new(value)
+    Retained::new(value)
 }
 
 /// A PPS as a `StdVideoH264PictureParameterSet`, with what it points to.
 pub(super) struct StdPps {
-    value: StdVideoH264PictureParameterSet,
-    scaling: Option<Box<StdVideoH264ScalingLists>>,
+    value: Retained<StdVideoH264PictureParameterSet>,
+    scaling: Option<Retained<StdVideoH264ScalingLists>>,
 }
 
 impl StdPps {
@@ -291,16 +290,48 @@ impl StdPps {
             let lists_8x8 = lists_8x8.as_ref().map_or(&[][..], |lists| lists.as_slice());
             scaling_lists(matrix.scaling_lists_4x4(&sps.chroma_info), lists_8x8)
         });
-        Self { value, scaling }
+        Self {
+            value: Retained::new(value),
+            scaling,
+        }
     }
 
     /// The structure, valid while `self` lives.
     pub(super) fn as_std(&self) -> StdVideoH264PictureParameterSet {
-        let mut value = self.value;
+        let mut value = self.value.get();
         if let Some(scaling) = &self.scaling {
-            value.pScalingLists = ptr::from_ref(&**scaling);
+            value.pScalingLists = scaling.as_ptr();
         }
         value
+    }
+}
+
+/// The parameter sets of one session parameters object, with each array the create call names.
+pub(super) struct StdParameterSets {
+    _sps: StdSps,
+    _pps: Vec<StdPps>,
+    sps_list: RetainedList<StdVideoH264SequenceParameterSet>,
+    pps_list: RetainedList<StdVideoH264PictureParameterSet>,
+}
+
+impl StdParameterSets {
+    pub(super) fn new(sps: StdSps, pps: Vec<StdPps>) -> Self {
+        let sps_list = RetainedList::new(vec![sps.as_std()]);
+        let pps_list = RetainedList::new(pps.iter().map(StdPps::as_std).collect());
+        Self {
+            _sps: sps,
+            _pps: pps,
+            sps_list,
+            pps_list,
+        }
+    }
+
+    pub(super) fn sps_list(&self) -> &[StdVideoH264SequenceParameterSet] {
+        self.sps_list.as_slice()
+    }
+
+    pub(super) fn pps_list(&self) -> &[StdVideoH264PictureParameterSet] {
+        self.pps_list.as_slice()
     }
 }
 

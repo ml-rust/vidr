@@ -10,6 +10,8 @@ Sidecar format, one section per parsed header, in stream order:
     @ vps|sps|pps|slice|vp9 HEX
     name value
 
+`gen_av1_headers.py` writes the AV1 sidecars and states their sections.
+
 HEX is the NAL unit or VP9 frame the section describes, emulation prevention
 bytes included. Each following line is one syntax element as `trace_headers`
 logs it. A name holds its indices, for example `used_by_curr_pic_flag[2]`.
@@ -76,6 +78,10 @@ class SyntaxWriter:
     def su(self, count, value):
         """Writes a VP9 `s(n)`: magnitude, then sign."""
         return self.u(count, abs(value)).flag(value < 0)
+
+    def su_av1(self, count, value):
+        """Writes an AV1 `su(n)`: two's complement in `count` bits."""
+        return self.u(count, value & ((1 << count) - 1))
 
     def trailing(self):
         """Writes `rbsp_trailing_bits()` or `byte_alignment()`."""
@@ -1123,5 +1129,7 @@ def generate(out_dir, extract):
                 continue
             write_sidecar(out_dir / f"{name}.headers", from_mp4_vp9(mp4, extract, work))
             print(f"{name}: libvpx")
+        from gen_av1_headers import generate as generate_av1
+        generate_av1(out_dir, work)
     if shutil.which("vpxenc") is None:
         print("notice: vpxenc is not on PATH, so headers_vp9_resize is absent")

@@ -1,8 +1,8 @@
 //! The mapping from parsed HEVC parameter sets into Vulkan's `StdVideoH265*` structures. It
 //! touches no device, so tests read each field back.
 //!
-//! An owner holds what a structure points to. `as_std` builds the structure on demand, so
-//! the pointers stay valid while the owner lives.
+//! An owner holds what a structure points to, in stable heap storage. `as_std` builds the
+//! structure on demand, so the pointers stay valid while the owner lives, across moves too.
 //!
 //! The crate's VUI parser keeps the colour fields and `min_spatial_segmentation_idc`. So a
 //! `StdVideoH265SequenceParameterSetVui` states those and leaves timing and HRD unset. A VPS
@@ -26,6 +26,7 @@ use crate::bitstream::hevc_rps::ShortTermRefPicSet;
 use crate::bitstream::hevc_scaling::ScalingListData;
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::hevc_vps::VideoParameterSet;
+use crate::vulkan::retained::{Retained, RetainedList};
 use crate::vulkan::zeroed::{AllZero, zeroed};
 
 // SAFETY: integers and bitfield units only.
@@ -71,9 +72,9 @@ fn ptl_of(general: &GeneralPtl) -> StdVideoH265ProfileTierLevel {
 
 /// A VPS as a `StdVideoH265VideoParameterSet`, with what it points to.
 pub(super) struct StdVps {
-    value: StdVideoH265VideoParameterSet,
-    ptl: Box<StdVideoH265ProfileTierLevel>,
-    buffers: Box<StdVideoH265DecPicBufMgr>,
+    value: Retained<StdVideoH265VideoParameterSet>,
+    ptl: Retained<StdVideoH265ProfileTierLevel>,
+    buffers: Retained<StdVideoH265DecPicBufMgr>,
 }
 
 impl StdVps {
@@ -95,9 +96,9 @@ impl StdVps {
         value.vps_time_scale = vps.vps_time_scale;
         value.vps_num_ticks_poc_diff_one_minus1 = vps.vps_num_ticks_poc_diff_one_minus1;
         Self {
-            value,
-            ptl: Box::new(ptl_of(&vps.profile_tier_level.general)),
-            buffers: Box::new(std_dec_pic_buf_mgr(
+            value: Retained::new(value),
+            ptl: Retained::new(ptl_of(&vps.profile_tier_level.general)),
+            buffers: Retained::new(std_dec_pic_buf_mgr(
                 &vps.vps_max_latency_increase_plus1,
                 &vps.vps_max_dec_pic_buffering_minus1,
                 &vps.vps_max_num_reorder_pics,
@@ -107,23 +108,23 @@ impl StdVps {
 
     pub(super) fn as_std(&self) -> StdVideoH265VideoParameterSet {
         StdVideoH265VideoParameterSet {
-            pDecPicBufMgr: ptr::from_ref(&*self.buffers),
+            pDecPicBufMgr: self.buffers.as_ptr(),
             pHrdParameters: ptr::null(),
-            pProfileTierLevel: ptr::from_ref(&*self.ptl),
-            ..self.value
+            pProfileTierLevel: self.ptl.as_ptr(),
+            ..self.value.get()
         }
     }
 }
 
 /// An SPS as a `StdVideoH265SequenceParameterSet`, with what it points to.
 pub(super) struct StdSps {
-    value: StdVideoH265SequenceParameterSet,
-    ptl: Box<StdVideoH265ProfileTierLevel>,
-    buffers: Box<StdVideoH265DecPicBufMgr>,
-    scaling: Option<Box<StdVideoH265ScalingLists>>,
-    short_term: Vec<StdVideoH265ShortTermRefPicSet>,
-    long_term: Box<StdVideoH265LongTermRefPicsSps>,
-    vui: Option<Box<StdVideoH265SequenceParameterSetVui>>,
+    value: Retained<StdVideoH265SequenceParameterSet>,
+    ptl: Retained<StdVideoH265ProfileTierLevel>,
+    buffers: Retained<StdVideoH265DecPicBufMgr>,
+    scaling: Option<Retained<StdVideoH265ScalingLists>>,
+    short_term: RetainedList<StdVideoH265ShortTermRefPicSet>,
+    long_term: Retained<StdVideoH265LongTermRefPicsSps>,
+    vui: Option<Retained<StdVideoH265SequenceParameterSetVui>>,
 }
 
 fn sps_flags(sps: &SeqParameterSet) -> StdVideoH265SpsFlags {
@@ -265,11 +266,11 @@ impl StdSps {
         let vui = sps
             .vui
             .as_ref()
-            .map(|vui| Box::new(std_vui(&vui.signal, vui.min_spatial_segmentation_idc)));
+            .map(|vui| Retained::new(std_vui(&vui.signal, vui.min_spatial_segmentation_idc)));
         Self {
-            value,
-            ptl: Box::new(ptl_of(&sps.profile_tier_level.general)),
-            buffers: Box::new(std_dec_pic_buf_mgr(
+            value: Retained::new(value),
+            ptl: Retained::new(ptl_of(&sps.profile_tier_level.general)),
+            buffers: Retained::new(std_dec_pic_buf_mgr(
                 &sps.sps_max_latency_increase_plus1,
                 &sps.sps_max_dec_pic_buffering_minus1,
                 &sps.sps_max_num_reorder_pics,
@@ -278,26 +279,26 @@ impl StdSps {
                 sps.sps_scaling_list_data_present_flag,
                 &sps.scaling_list_data,
             ),
-            short_term: sps.st_ref_pic_set.iter().map(std_short_term).collect(),
-            long_term: Box::new(std_long_term(sps)),
+            short_term: RetainedList::new(sps.st_ref_pic_set.iter().map(std_short_term).collect()),
+            long_term: Retained::new(std_long_term(sps)),
             vui,
         }
     }
 
     pub(super) fn as_std(&self) -> StdVideoH265SequenceParameterSet {
         StdVideoH265SequenceParameterSet {
-            pProfileTierLevel: ptr::from_ref(&*self.ptl),
-            pDecPicBufMgr: ptr::from_ref(&*self.buffers),
-            pScalingLists: self.scaling.as_deref().map_or(ptr::null(), ptr::from_ref),
+            pProfileTierLevel: self.ptl.as_ptr(),
+            pDecPicBufMgr: self.buffers.as_ptr(),
+            pScalingLists: self.scaling.as_ref().map_or(ptr::null(), Retained::as_ptr),
             pShortTermRefPicSet: if self.short_term.is_empty() {
                 ptr::null()
             } else {
                 self.short_term.as_ptr()
             },
-            pLongTermRefPicsSps: ptr::from_ref(&*self.long_term),
-            pSequenceParameterSetVui: self.vui.as_deref().map_or(ptr::null(), ptr::from_ref),
+            pLongTermRefPicsSps: self.long_term.as_ptr(),
+            pSequenceParameterSetVui: self.vui.as_ref().map_or(ptr::null(), Retained::as_ptr),
             pPredictorPaletteEntries: ptr::null(),
-            ..self.value
+            ..self.value.get()
         }
     }
 }
@@ -307,10 +308,10 @@ impl StdSps {
 fn scaling_of(
     present: bool,
     data: &Option<Box<ScalingListData>>,
-) -> Option<Box<StdVideoH265ScalingLists>> {
+) -> Option<Retained<StdVideoH265ScalingLists>> {
     data.as_deref()
         .filter(|_| present)
-        .map(|data| Box::new(std_scaling_lists(data)))
+        .map(|data| Retained::new(std_scaling_lists(data)))
 }
 
 fn pps_flags(pps: &PicParameterSet) -> StdVideoH265PpsFlags {
@@ -363,8 +364,8 @@ fn pps_flags(pps: &PicParameterSet) -> StdVideoH265PpsFlags {
 
 /// A PPS as a `StdVideoH265PictureParameterSet`, with what it points to.
 pub(super) struct StdPps {
-    value: StdVideoH265PictureParameterSet,
-    scaling: Option<Box<StdVideoH265ScalingLists>>,
+    value: Retained<StdVideoH265PictureParameterSet>,
+    scaling: Option<Retained<StdVideoH265ScalingLists>>,
 }
 
 impl StdPps {
@@ -407,7 +408,7 @@ impl StdPps {
             }
         }
         Self {
-            value,
+            value: Retained::new(value),
             scaling: scaling_of(
                 pps.pps_scaling_list_data_present_flag,
                 &pps.scaling_list_data,
@@ -417,9 +418,47 @@ impl StdPps {
 
     pub(super) fn as_std(&self) -> StdVideoH265PictureParameterSet {
         StdVideoH265PictureParameterSet {
-            pScalingLists: self.scaling.as_deref().map_or(ptr::null(), ptr::from_ref),
+            pScalingLists: self.scaling.as_ref().map_or(ptr::null(), Retained::as_ptr),
             pPredictorPaletteEntries: ptr::null(),
-            ..self.value
+            ..self.value.get()
         }
+    }
+}
+
+/// The parameter sets of one session parameters object, with each array the create call names.
+pub(super) struct StdParameterSets {
+    _vps: StdVps,
+    _sps: StdSps,
+    _pps: Vec<StdPps>,
+    vps_list: RetainedList<StdVideoH265VideoParameterSet>,
+    sps_list: RetainedList<StdVideoH265SequenceParameterSet>,
+    pps_list: RetainedList<StdVideoH265PictureParameterSet>,
+}
+
+impl StdParameterSets {
+    pub(super) fn new(vps: StdVps, sps: StdSps, pps: Vec<StdPps>) -> Self {
+        let vps_list = RetainedList::new(vec![vps.as_std()]);
+        let sps_list = RetainedList::new(vec![sps.as_std()]);
+        let pps_list = RetainedList::new(pps.iter().map(StdPps::as_std).collect());
+        Self {
+            _vps: vps,
+            _sps: sps,
+            _pps: pps,
+            vps_list,
+            sps_list,
+            pps_list,
+        }
+    }
+
+    pub(super) fn vps_list(&self) -> &[StdVideoH265VideoParameterSet] {
+        self.vps_list.as_slice()
+    }
+
+    pub(super) fn sps_list(&self) -> &[StdVideoH265SequenceParameterSet] {
+        self.sps_list.as_slice()
+    }
+
+    pub(super) fn pps_list(&self) -> &[StdVideoH265PictureParameterSet] {
+        self.pps_list.as_slice()
     }
 }

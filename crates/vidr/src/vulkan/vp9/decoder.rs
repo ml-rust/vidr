@@ -14,10 +14,10 @@ use crate::bitstream::{
     KEY_FRAME, RefFrameTable, UncompressedHeader, Vp9HeaderParser, split_superframe,
 };
 use crate::decode::vp9_frame::{check_layout, vp9_color_facts};
-use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, PixelFormat};
+use crate::decode::{DecodeCodec, DecodedFrame, PixelFormat};
 use crate::error::DecodeError;
 use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
-use crate::vulkan::copy::{FrameArea, copy_planes};
+use crate::vulkan::copy::whole_frame as to_frame;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{CopySource, DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
 use crate::vulkan::error::{DECODER, request_error};
@@ -47,27 +47,6 @@ pub(in crate::vulkan) struct Vp9Decoder {
     pool: RefPool,
     active: Option<Active>,
     frames: VecDeque<DecodedFrame<WgpuRuntime>>,
-}
-
-fn to_frame(
-    device: &VulkanDevice,
-    source: &CopySource,
-    format: PixelFormat,
-    coded: (u32, u32),
-    color: ColorFacts,
-    pts: i64,
-) -> Result<DecodedFrame<WgpuRuntime>, DecodeError> {
-    let area = FrameArea {
-        left: 0,
-        top: 0,
-        width: coded.0,
-        height: coded.1,
-    };
-    let display = area.display(coded)?;
-    let (y, uv) = copy_planes(device, source, area, format)?;
-    Ok(DecodedFrame::from_packed_planes(
-        y, uv, format, pts, display, color,
-    ))
 }
 
 /// The refusal of a frame that outgrows its session at a frame that keeps references.
@@ -221,6 +200,7 @@ impl Vp9Decoder {
                 slots: SLOTS,
                 active_references: ACTIVE_REFERENCES,
                 readable_slots: true,
+                output_image: false,
             },
         )?;
         self.active = Some(Active {
@@ -341,10 +321,10 @@ fn submit_frame(
         compressed_header_offset,
         tiles_offset,
     };
-    let references = refs.distinct.map(|(slot, coded)| SlotRef {
-        slot,
+    let references = refs.distinct.map(|named| SlotRef {
+        slot: named.map_or(0, |named| named.slot),
         codec_info: ptr::null(),
-        coded,
+        coded: named.map_or((0, 0), |named| named.coded),
     });
     let request = DecodeRequest {
         bitstream: &[frame],
@@ -357,6 +337,8 @@ fn submit_frame(
         references: &references[..refs.count],
         reference: header.refresh_frame_flags != 0,
         output: header.show_frame,
+        separate_output: false,
+        byte_ranges: &[],
         pts,
     };
     // SAFETY: `picture_info` is the VP9 structure of this VP9 session. It and all it

@@ -17,7 +17,9 @@ use super::params::{
 };
 use super::poc::PocState;
 use super::slice::{Picture, parse_slice};
-use super::std_video::{PictureFacts, StdPps, StdSps, std_picture_info, std_reference_info};
+use super::std_video::{
+    PictureFacts, StdParameterSets, StdPps, StdSps, std_picture_info, std_reference_info,
+};
 use crate::bitstream::{AvcConfig, H264NalType, ToAnnexB, annexb, h264_sps_vui};
 use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, PixelFormat, vui_color};
 use crate::error::DecodeError;
@@ -56,6 +58,10 @@ struct Active {
     facts: SequenceFacts,
     key: SessionKey,
     engine: DecodeEngine,
+    /// What the session parameters' pointers name. NVIDIA's driver reads through them after
+    /// `vkCreateVideoSessionParametersKHR` returns. This drops after `engine`, so it outlives the
+    /// parameters, and it stays when a new sequence keeps the session.
+    parameter_sets: Option<StdParameterSets>,
     dpb: Dpb,
     poc: PocState,
     display: Dimensions,
@@ -185,6 +191,8 @@ fn decode_frame(
         references: &references,
         reference,
         output: true,
+        separate_output: false,
+        byte_ranges: &[],
         pts,
     };
     // SAFETY: each pointer in `request` names a H.264 structure above, for this H.264
@@ -302,12 +310,13 @@ impl H264Decoder {
             .set_limits(facts.reorder_frames, facts.buffer_frames);
 
         let previous = self.active.take();
-        let engine = match previous {
-            Some(active) if active.key == key => active.engine,
+        // A kept session keeps its parameters, so what they point to stays too.
+        let (engine, parameter_sets) = match previous {
+            Some(active) if active.key == key => (active.engine, active.parameter_sets),
             other => {
                 // The old session goes first, so its memory is free for the new one.
                 drop(other);
-                self.open_engine(&facts, profile, &caps)?
+                (self.open_engine(&facts, profile, &caps)?, None)
             }
         };
         self.parameters_stale = true;
@@ -317,6 +326,7 @@ impl H264Decoder {
             facts,
             key,
             engine,
+            parameter_sets,
             dpb,
             poc: PocState::default(),
             display,
@@ -342,6 +352,7 @@ impl H264Decoder {
                 slots: facts.slots(),
                 active_references: facts.max_references,
                 readable_slots: false,
+                output_image: false,
             },
         )
     }
@@ -471,20 +482,19 @@ impl H264Decoder {
             .filter(|pps: &&PicParameterSet| pps.seq_parameter_set_id.id() == id)
             .map(|pps| StdPps::new(pps, sps))
             .collect();
-        let sps_list = [std_sps.as_std()];
-        let pps_list: Vec<_> = owners.iter().map(StdPps::as_std).collect();
+        let sets = StdParameterSets::new(std_sps, owners);
         let add = vk::VideoDecodeH264SessionParametersAddInfoKHR::default()
-            .std_sp_ss(&sps_list)
-            .std_pp_ss(&pps_list);
+            .std_sp_ss(sets.sps_list())
+            .std_pp_ss(sets.pps_list());
         let create = vk::VideoDecodeH264SessionParametersCreateInfoKHR::default()
             .max_std_sps_count(1)
-            .max_std_pps_count(pps_list.len().max(1) as u32)
+            .max_std_pps_count(sets.pps_list().len().max(1) as u32)
             .parameters_add_info(&add);
         let Some(active) = &mut self.active else {
             return Ok(());
         };
-        // SAFETY: `create` chains the H.264 structures this session's codec takes, and
-        // each owner above lives through the call.
+        // SAFETY: `create` chains the H.264 structures this session's codec takes. `sets` lives
+        // through the call, then moves into `active`, and a move keeps each heap address.
         let parameters = unsafe {
             SessionParameters::new(
                 &self.device,
@@ -493,6 +503,8 @@ impl H264Decoder {
             )
         }?;
         active.engine.set_parameters(parameters);
+        // The old sets go only now: `set_parameters` dropped the object that points to them.
+        active.parameter_sets = Some(sets);
         self.parameters_stale = false;
         Ok(())
     }

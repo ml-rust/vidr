@@ -299,6 +299,17 @@ pub enum DecodeError {
         /// The bytes of the frame.
         frame_bytes: usize,
     },
+    /// An AV1 tile falls outside the bytes of its frame.
+    VulkanTileRange {
+        /// The frame's pts.
+        pts: i64,
+        /// The tile's offset in the frame's bytes.
+        offset: u32,
+        /// The tile's size.
+        size: u32,
+        /// The bytes of the frame.
+        bytes: u64,
+    },
     /// The Vulkan device is lost, so nothing on it runs again.
     VulkanDeviceLost {
         /// The call that reports it.
@@ -622,6 +633,17 @@ impl fmt::Display for DecodeError {
                  at byte {tiles_offset}. The frame has no tile bytes, so the stream is damaged. \
                  Run `ffmpeg -v error -i INPUT -f null -` on the source, and re-encode it if \
                  ffmpeg reports an error."
+            ),
+            Self::VulkanTileRange {
+                pts,
+                offset,
+                size,
+                bytes,
+            } => write!(
+                f,
+                "the AV1 frame at pts {pts} holds {bytes} bytes, and names a tile of {size} bytes \
+                 at byte {offset}. The stream is damaged. Run `ffmpeg -v error -i INPUT -f null -` \
+                 on the source, and re-encode it if ffmpeg reports an error."
             ),
             Self::VulkanDeviceLost { call, input } => write!(
                 f,

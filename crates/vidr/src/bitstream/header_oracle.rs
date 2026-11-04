@@ -110,6 +110,9 @@ fn compare(label: &str, oracle: &[(String, i64)], ignored: &[&[&str]], emitted: 
     );
 }
 
+#[cfg(feature = "av1")]
+#[path = "header_oracle_av1.rs"]
+mod av1;
 #[cfg(feature = "hevc")]
 #[path = "header_oracle_hevc.rs"]
 mod hevc;

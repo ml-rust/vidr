@@ -3,7 +3,7 @@
 
 use ash::vk::native::StdVideoH265ProfileIdc_STD_VIDEO_H265_PROFILE_IDC_MAIN;
 
-use super::std_params::{StdPps, StdSps, StdVps};
+use super::std_params::{StdParameterSets, StdPps, StdSps, StdVps};
 use crate::bitstream::hevc_pps::PicParameterSet;
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::hevc_vps::VideoParameterSet;
@@ -106,6 +106,29 @@ fn a_real_pps_maps_field_by_field() {
     assert_eq!(std.flags.pps_loop_filter_across_slices_enabled_flag(), 1);
     assert_eq!(std.flags.pps_scaling_list_data_present_flag(), 0);
     assert!(std.pScalingLists.is_null());
+}
+
+/// The driver reads through these pointers after the create call, so a move keeps them good.
+#[test]
+fn moved_parameter_sets_keep_what_their_pointers_name() {
+    let vps = VideoParameterSet::parse(&REAL_VPS).expect("parses");
+    let parsed_sps = sps();
+    let sets = StdParameterSets::new(
+        StdVps::new(&vps),
+        StdSps::new(&parsed_sps),
+        vec![StdPps::new(&pps(), &parsed_sps)],
+    );
+    let (vps_list, sps_list) = (sets.vps_list().as_ptr(), sets.sps_list().as_ptr());
+    let moved = Some(sets);
+    let moved = moved.as_ref().expect("the sets");
+    assert_eq!(moved.vps_list().as_ptr(), vps_list);
+    assert_eq!(moved.sps_list().as_ptr(), sps_list);
+    assert_eq!(moved.pps_list().len(), 1);
+    // SAFETY: `moved` owns each list and each structure the lists point to.
+    let (vps_buffers, sps_buffers) =
+        unsafe { (*(*vps_list).pDecPicBufMgr, *(*sps_list).pDecPicBufMgr) };
+    assert_eq!(vps_buffers.max_num_reorder_pics[0], 2);
+    assert_eq!(sps_buffers.max_num_reorder_pics[0], 2);
 }
 
 /// Each tile size comes from the parser's (6-3) and (6-4), with uniform spacing too.

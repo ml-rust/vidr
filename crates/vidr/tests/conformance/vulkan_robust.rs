@@ -1,6 +1,6 @@
-//! Bad input through `VulkanDecoder`: seeded mutations of the HEVC_v1 zips and the libvpx
-//! vectors. Each stream ends in decoded pictures or a named error. A panic, a deadline, a
-//! validation error, or an error that does not repeat fails the test.
+//! Bad input through `VulkanDecoder`: seeded mutations of the HEVC_v1 zips, the libvpx vectors,
+//! and the libaom vectors. Each stream ends in decoded pictures or a named error. A panic, a
+//! deadline, a validation error, or an error that does not repeat fails the test.
 //!
 //! numr holds one device per index, and concurrent use loses it. So cases run one after another
 //! on the shared device. Pass `--no-capture` to see the table on a run that passes.
@@ -11,7 +11,9 @@
 //! | `VIDR_HEVC_ONLY` | Run zips whose name holds this text | Every zip |
 //! | `VIDR_VP9_VECTORS` | The directory of vectors | Skip with a notice |
 //! | `VIDR_VP9_FILTER` | Run vectors whose name holds this text | Every vector |
-//! | `VIDR_HEVC_ROBUST_SEEDS` | Seeds per stream and kind, from 0, for both codecs | 2 |
+//! | `VIDR_AV1_VECTORS` | The directory of libaom vectors | Skip with a notice |
+//! | `VIDR_AV1_FILTER` | Run libaom vectors whose name holds this text | Every vector |
+//! | `VIDR_HEVC_ROBUST_SEEDS` | Seeds per stream and kind, from 0, for every codec | 2 |
 //! | `VIDR_HEVC_ROBUST_DEADLINE_SECS` | Seconds one stream can take, drop included | 600 |
 //! | `VIDR_HEVC_ROBUST_TRACE` | Set to print each case before it runs | No line |
 //!
@@ -20,10 +22,11 @@
 //! remaining cases do not run, and the test fails. A stream over the deadline fails the test and
 //! ends the sweep, because its thread still holds the device. Rust cannot stop that thread.
 //!
-//! A VP9 stream has no NAL units. So the kinds that name a unit act on a packet, and the two
+//! A VP9 or AV1 stream has no NAL units. So the kinds that name a unit act on a packet. The two
 //! corruption kinds flip bits at the start of a packet.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -33,9 +36,13 @@ use vidr::DecodeError;
 use vidr::decode::{DecodeCodec, Decoder};
 use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanOptions};
 
+use super::av1_vectors::read_packets;
 use super::hevc::{read_stream, selected_zips, zip_name};
-use super::mutate::{Counts, Kind, env_number, mutate};
+use super::mutate::{
+    Counts, Kind, MAX_CORRUPT_UNITS, Prng, SLICE_HEADER_BYTES, env_number, flip_bits, mutate,
+};
 use super::runner::panic_text;
+use super::vector_files::{vector_name, vectors};
 use crate::vulkan::support::{codec_present, device, try_hevc_units};
 
 const DEFAULT_SEEDS: u64 = 2;
@@ -342,88 +349,120 @@ fn hevc_vulkan_mutations_stay_safe() {
     sweep.finish(zips.len());
 }
 
-#[cfg(feature = "mkv")]
-mod vp9 {
-    use std::path::PathBuf;
+/// Bytes at a packet's start that a parameter corruption reaches. They hold an AV1 frame's first
+/// OBUs. They also hold the uncompressed header of a VP9 frame with few segmentation or loop
+/// filter updates.
+const FRAME_HEADER_BYTES: usize = 32;
 
-    use super::super::mutate::{MAX_CORRUPT_UNITS, Prng, SLICE_HEADER_BYTES, flip_bits};
-    use super::super::vp9_vectors::{matroska_of, vector_name, vectors};
-    use super::super::vulkan_vp9::read_packets;
-    use super::*;
-
-    /// Bytes at a packet's start that a parameter corruption reaches. They hold the uncompressed
-    /// header of a frame with few segmentation or loop filter updates.
-    const FRAME_HEADER_BYTES: usize = 32;
-
-    /// The bytes of `mutated` cut back into the packets of `packets`, as far as they reach.
-    fn cut_like(mutated: &[u8], packets: &[(Vec<u8>, i64)]) -> Packets {
-        let mut rest = mutated;
-        let mut out = Vec::with_capacity(packets.len());
-        for (packet, pts) in packets {
-            let (head, tail) = rest.split_at(packet.len().min(rest.len()));
-            if head.is_empty() {
-                break;
-            }
-            out.push((head.to_vec(), *pts));
-            rest = tail;
+/// The bytes of `mutated` cut back into the packets of `packets`, as far as they reach.
+fn cut_like(mutated: &[u8], packets: &[(Vec<u8>, i64)]) -> Packets {
+    let mut rest = mutated;
+    let mut out = Vec::with_capacity(packets.len());
+    for (packet, pts) in packets {
+        let (head, tail) = rest.split_at(packet.len().min(rest.len()));
+        if head.is_empty() {
+            break;
         }
-        out
+        out.push((head.to_vec(), *pts));
+        rest = tail;
     }
+    out
+}
 
-    /// The packets of one case. Name, seed, and kind fix their bytes.
-    pub(super) fn mutate_packets(
-        packets: &[(Vec<u8>, i64)],
-        name: &str,
-        kind: Kind,
-        seed: u64,
-    ) -> Packets {
-        let mut prng = Prng::new(name, kind, seed);
-        let mut out = packets.to_vec();
-        let count = out.len();
-        match kind {
-            Kind::FlipLow | Kind::FlipHigh | Kind::RunZeros | Kind::RunOnes | Kind::Truncate => {
-                let joined: Vec<u8> = packets
-                    .iter()
-                    .flat_map(|(packet, _)| packet.iter().copied())
-                    .collect();
-                return cut_like(&mutate(&joined, name, kind, seed), packets);
+/// The packets of one case. Name, seed, and kind fix their bytes.
+fn mutate_packets(packets: &[(Vec<u8>, i64)], name: &str, kind: Kind, seed: u64) -> Packets {
+    let mut prng = Prng::new(name, kind, seed);
+    let mut out = packets.to_vec();
+    let count = out.len();
+    match kind {
+        Kind::FlipLow | Kind::FlipHigh | Kind::RunZeros | Kind::RunOnes | Kind::Truncate => {
+            let joined: Vec<u8> = packets
+                .iter()
+                .flat_map(|(packet, _)| packet.iter().copied())
+                .collect();
+            return cut_like(&mutate(&joined, name, kind, seed), packets);
+        }
+        Kind::DropNal => {
+            if count > 0 {
+                out.remove(prng.below(count));
             }
-            Kind::DropNal => {
-                if count > 0 {
-                    out.remove(prng.below(count));
-                }
+        }
+        Kind::DuplicateNal => {
+            if count > 0 {
+                let index = prng.below(count);
+                out.insert(index, out[index].clone());
             }
-            Kind::DuplicateNal => {
-                if count > 0 {
-                    let index = prng.below(count);
-                    out.insert(index, out[index].clone());
-                }
+        }
+        Kind::SwapNals => {
+            if count > 0 {
+                out.swap(prng.below(count), prng.below(count));
             }
-            Kind::SwapNals => {
-                if count > 0 {
-                    out.swap(prng.below(count), prng.below(count));
-                }
-            }
-            Kind::CorruptParameterSets | Kind::CorruptSliceHeaders => {
-                let reach = if kind == Kind::CorruptParameterSets {
-                    FRAME_HEADER_BYTES
-                } else {
-                    SLICE_HEADER_BYTES
-                };
-                for _ in 0..=prng.below(MAX_CORRUPT_UNITS) {
-                    let index = prng.below(count);
-                    if let Some((packet, _)) = out.get_mut(index) {
-                        let end = packet.len().min(reach);
-                        if end > 0 {
-                            let flips = 1 + prng.below(3);
-                            flip_bits(packet, 0..end, flips, &mut prng);
-                        }
+        }
+        Kind::CorruptParameterSets | Kind::CorruptSliceHeaders => {
+            let reach = if kind == Kind::CorruptParameterSets {
+                FRAME_HEADER_BYTES
+            } else {
+                SLICE_HEADER_BYTES
+            };
+            for _ in 0..=prng.below(MAX_CORRUPT_UNITS) {
+                let index = prng.below(count);
+                if let Some((packet, _)) = out.get_mut(index) {
+                    let end = packet.len().min(reach);
+                    if end > 0 {
+                        let flips = 1 + prng.below(3);
+                        flip_bits(packet, 0..end, flips, &mut prng);
                     }
                 }
             }
         }
-        out
     }
+    out
+}
+
+#[test]
+fn av1_vulkan_mutations_stay_safe() {
+    let Some(directory) = std::env::var_os("VIDR_AV1_VECTORS") else {
+        eprintln!(
+            "skipping: VIDR_AV1_VECTORS is unset. Run `scripts/conformance/fetch_av1.sh DIR`, \
+             then set it to DIR."
+        );
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let filter = std::env::var("VIDR_AV1_FILTER").ok();
+    let vectors = vectors(&directory, filter.as_deref());
+    assert!(
+        !vectors.is_empty(),
+        "{} holds no vector for filter {filter:?}. Run `scripts/conformance/fetch_av1.sh {}`.",
+        directory.display(),
+        directory.display()
+    );
+    let Some((device, _guard)) = device() else {
+        return;
+    };
+    if !codec_present(&device, DecodeCodec::Av1) {
+        return;
+    }
+    let mut sweep = Sweep::new(DecodeCodec::Av1, device);
+    for vector in &vectors {
+        let name = vector_name(vector);
+        match read_packets(vector) {
+            Ok(packets) => {
+                sweep.run_stream(&name, |kind, seed| {
+                    Ok(mutate_packets(&packets, &name, kind, seed))
+                });
+            }
+            Err(detail) => sweep.failures.push(format!("{name}: {detail}")),
+        }
+    }
+    sweep.finish(vectors.len());
+}
+
+#[cfg(feature = "mkv")]
+mod vp9 {
+    use super::super::vp9_vectors::matroska_of;
+    use super::super::vulkan_vp9::read_packets;
+    use super::*;
 
     #[test]
     fn vp9_vulkan_mutations_stay_safe() {
@@ -466,27 +505,27 @@ mod vp9 {
         }
         sweep.finish(vectors.len());
     }
+}
 
-    #[test]
-    fn a_case_fixes_its_packets_and_a_cut_keeps_their_order() {
-        let packets: Packets = vec![(vec![1; 40], 0), (vec![2; 40], 1), (vec![3; 40], 2)];
-        for kind in Kind::ALL {
-            let first = mutate_packets(&packets, "vector", kind, 5);
-            assert_eq!(
-                first,
-                mutate_packets(&packets, "vector", kind, 5),
-                "{}",
-                kind.label()
-            );
-            assert!(
-                first.iter().all(|(packet, _)| !packet.is_empty()),
-                "{}",
-                kind.label()
-            );
-        }
-        let cut = cut_like(&[9; 50], &packets);
-        assert_eq!(cut, [(vec![9; 40], 0), (vec![9; 10], 1)]);
-        assert!(mutate_packets(&[], "vector", Kind::DropNal, 0).is_empty());
-        assert!(mutate_packets(&[], "vector", Kind::CorruptSliceHeaders, 0).is_empty());
+#[test]
+fn a_case_fixes_its_packets_and_a_cut_keeps_their_order() {
+    let packets: Packets = vec![(vec![1; 40], 0), (vec![2; 40], 1), (vec![3; 40], 2)];
+    for kind in Kind::ALL {
+        let first = mutate_packets(&packets, "vector", kind, 5);
+        assert_eq!(
+            first,
+            mutate_packets(&packets, "vector", kind, 5),
+            "{}",
+            kind.label()
+        );
+        assert!(
+            first.iter().all(|(packet, _)| !packet.is_empty()),
+            "{}",
+            kind.label()
+        );
     }
+    let cut = cut_like(&[9; 50], &packets);
+    assert_eq!(cut, [(vec![9; 40], 0), (vec![9; 10], 1)]);
+    assert!(mutate_packets(&[], "vector", Kind::DropNal, 0).is_empty());
+    assert!(mutate_packets(&[], "vector", Kind::CorruptSliceHeaders, 0).is_empty());
 }

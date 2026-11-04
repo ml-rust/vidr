@@ -10,7 +10,7 @@ use h264_reader::Context;
 use super::dpb::{CurrentPicture, Marking, Mmco, RefFrame, marked_frame};
 use super::params::{parse_pps, parse_sps};
 use super::std_video::{
-    PictureFacts, StdPps, StdSps, std_level, std_picture_info, std_reference_info,
+    PictureFacts, StdParameterSets, StdPps, StdSps, std_level, std_picture_info, std_reference_info,
 };
 use super::test_nal::{NalWriter, REAL_PPS, REAL_SPS, TestSps, sps_nal};
 
@@ -125,6 +125,28 @@ fn poc_type_1_keeps_its_cycle() {
     assert_eq!(std.flags.delta_pic_order_always_zero_flag(), 0);
     // SAFETY: the count above says two offsets are set, and `owner` still lives.
     let offsets = unsafe { std::slice::from_raw_parts(std.pOffsetForRefFrame, 2) };
+    assert_eq!(offsets, [2, 4]);
+}
+
+/// The driver reads through these pointers after the create call, so a move keeps them good.
+#[test]
+fn moved_parameter_sets_keep_what_their_pointers_name() {
+    let type1 = TestSps {
+        poc_type: 1,
+        ..TestSps::default()
+    };
+    let sps = parse_sps(&sps_nal(&type1)).expect("parses");
+    let sets = StdParameterSets::new(StdSps::new(&sps), Vec::new());
+    let list = sets.sps_list().as_ptr();
+    let moved = Some(sets);
+    let moved = moved.as_ref().expect("the sets");
+    assert_eq!(moved.sps_list().as_ptr(), list);
+    assert!(moved.pps_list().is_empty());
+    // SAFETY: `moved` owns the list and the offsets, and the count below says two are set.
+    let offsets = unsafe {
+        assert_eq!((*list).num_ref_frames_in_pic_order_cnt_cycle, 2);
+        std::slice::from_raw_parts((*list).pOffsetForRefFrame, 2)
+    };
     assert_eq!(offsets, [2, 4]);
 }
 

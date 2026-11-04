@@ -25,7 +25,8 @@ use vidr::vulkan::{VulkanDecoder, VulkanDevice};
 
 use super::md5::hex_digest;
 use super::runner::panic_text;
-use super::vp9_vectors::{expected_hashes, matroska_of, refusal_expected, vector_name, vectors};
+use super::vector_files::{expected_hashes, vector_name, vectors};
+use super::vp9_vectors::{matroska_of, refusal_expected};
 use crate::vulkan::support::{assert_no_validation_errors, device, planar_planes};
 
 /// The largest session a sweep opens.

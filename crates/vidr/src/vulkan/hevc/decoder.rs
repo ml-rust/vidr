@@ -11,7 +11,7 @@ use numr::runtime::wgpu::WgpuRuntime;
 use super::picture::Picture;
 use super::sequence::{DECODER, SequenceFacts, sequence_facts};
 use super::slots::{ActiveReference, ListError, SlotLists, SlotPicture, SlotPool, slot_lists};
-use super::std_params::{StdPps, StdSps, StdVps};
+use super::std_params::{StdParameterSets, StdPps, StdSps, StdVps};
 use super::std_picture::{std_picture_info, std_reference_info};
 use crate::bitstream::hevc_pps::PicParameterSet;
 use crate::bitstream::hevc_slice::{SliceSegmentHeader, slice_pic_parameter_set_id};
@@ -43,6 +43,10 @@ struct Active {
     sps_bytes: Vec<u8>,
     facts: SequenceFacts,
     engine: DecodeEngine,
+    /// What the session parameters' pointers name. NVIDIA's driver reads through them after
+    /// `vkCreateVideoSessionParametersKHR` returns. This drops after `engine`, so it outlives the
+    /// parameters, and it stays when a new sequence keeps the session.
+    parameter_sets: Option<StdParameterSets>,
     pool: SlotPool,
     display: Dimensions,
     color: ColorFacts,
@@ -169,6 +173,8 @@ fn decode_frame(
         references: &references,
         reference: true,
         output,
+        separate_output: false,
+        byte_ranges: &[],
         pts,
     };
     // SAFETY: each pointer in `request` names a H.265 structure above, for this H.265 session,
@@ -281,13 +287,14 @@ impl HevcDecoder {
 
         let profile = VideoProfile::hevc(facts.std_profile_idc, facts.format);
         let caps = self.driver_caps(&facts, &profile)?;
-        let engine = self.session_for(&facts, profile, &caps)?;
+        let (engine, parameter_sets) = self.session_for(&facts, profile, &caps)?;
         self.parameters_stale = true;
         self.active = Some(Active {
             sps_id: id,
             sps_bytes,
             facts,
             engine,
+            parameter_sets,
             pool: SlotPool::new(facts.slots),
             display,
             color,
@@ -319,20 +326,23 @@ impl HevcDecoder {
         Ok(caps)
     }
 
-    /// Keeps the session of the active sequence when it fits `facts`, or opens a new one.
+    /// Keeps the session of the active sequence when it fits `facts`, or opens a new one. A kept
+    /// session keeps its parameters, so what they point to stays too.
     fn session_for(
         &mut self,
         facts: &SequenceFacts,
         profile: VideoProfile,
         caps: &DecodeCaps,
-    ) -> Result<DecodeEngine, DecodeError> {
+    ) -> Result<(DecodeEngine, Option<StdParameterSets>), DecodeError> {
         match self.active.take() {
-            Some(active) if same_session(&active.facts, facts) => Ok(active.engine),
+            Some(active) if same_session(&active.facts, facts) => {
+                Ok((active.engine, active.parameter_sets))
+            }
             other => {
                 // The old session goes first, so its memory is free for the new one.
                 drop(other);
                 let mode = dpb_mode(DecodeCodec::Hevc, caps.decode_flags, self.preference)?;
-                DecodeEngine::new(
+                let engine = DecodeEngine::new(
                     &self.device,
                     profile,
                     &EngineSpec {
@@ -342,8 +352,10 @@ impl HevcDecoder {
                         slots: facts.slots,
                         active_references: facts.active_references,
                         readable_slots: false,
+                        output_image: false,
                     },
-                )
+                )?;
+                Ok((engine, None))
             }
         }
     }
@@ -596,25 +608,21 @@ impl HevcDecoder {
                 pps_owners.push(StdPps::new(&stored.parsed, sps));
             }
         }
-        let vps_owner = StdVps::new(&vps.parsed);
-        let sps_owner = StdSps::new(sps);
-        let vps_list = [vps_owner.as_std()];
-        let sps_list = [sps_owner.as_std()];
-        let pps_list: Vec<_> = pps_owners.iter().map(StdPps::as_std).collect();
+        let sets = StdParameterSets::new(StdVps::new(&vps.parsed), StdSps::new(sps), pps_owners);
         let add = vk::VideoDecodeH265SessionParametersAddInfoKHR::default()
-            .std_vp_ss(&vps_list)
-            .std_sp_ss(&sps_list)
-            .std_pp_ss(&pps_list);
+            .std_vp_ss(sets.vps_list())
+            .std_sp_ss(sets.sps_list())
+            .std_pp_ss(sets.pps_list());
         let create = vk::VideoDecodeH265SessionParametersCreateInfoKHR::default()
             .max_std_vps_count(1)
             .max_std_sps_count(1)
-            .max_std_pps_count(pps_list.len().max(1) as u32)
+            .max_std_pps_count(sets.pps_list().len().max(1) as u32)
             .parameters_add_info(&add);
         let Some(active) = &mut self.active else {
             return Ok(());
         };
-        // SAFETY: `create` chains the H.265 structures this session's codec takes, and each
-        // owner above lives through the call.
+        // SAFETY: `create` chains the H.265 structures this session's codec takes. `sets` lives
+        // through the call, then moves into `active`, and a move keeps each heap address.
         let parameters = unsafe {
             SessionParameters::new(
                 &self.device,
@@ -623,6 +631,8 @@ impl HevcDecoder {
             )
         }?;
         active.engine.set_parameters(parameters);
+        // The old sets go only now: `set_parameters` dropped the object that points to them.
+        active.parameter_sets = Some(sets);
         self.parameters_stale = false;
         Ok(())
     }

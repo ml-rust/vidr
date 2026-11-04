@@ -39,7 +39,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// The error for a `field` that holds a forbidden `value`.
-    #[cfg(any(feature = "hevc", feature = "vp9"))]
+    #[cfg(any(feature = "hevc", feature = "vp9", feature = "av1"))]
     pub(crate) const fn invalid(
         &self,
         field: &'static str,
@@ -55,7 +55,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Bits read so far.
-    #[cfg(any(feature = "hevc", feature = "vp9"))]
+    #[cfg(any(feature = "hevc", feature = "vp9", feature = "av1"))]
     pub(crate) const fn position(&self) -> u64 {
         self.pos
     }
@@ -91,7 +91,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// Skips `count` bits.
-    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+    #[cfg(any(test, feature = "h264", feature = "hevc"))]
     pub(crate) fn skip(&mut self, count: u64, field: &'static str) -> Result<(), BitstreamError> {
         if count > self.bits_left() {
             return Err(self.truncated(field));

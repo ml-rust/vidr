@@ -46,11 +46,6 @@ pub enum ExecutionError {
         /// Why the CPU path is out.
         cpu: Box<Self>,
     },
-    /// `--decoder vulkan` names a codec that has no Vulkan Video path yet.
-    VulkanCodec {
-        /// The video's codec.
-        codec: SourceCodec,
-    },
     /// OpenH264 takes Baseline only, and the source states another profile.
     H264NotBaseline {
         /// `profile_idc` of the source.
@@ -117,12 +112,6 @@ impl fmt::Display for ExecutionError {
             } => write!(
                 f,
                 "No {side} fits this run. Hardware path: {hardware}. {cpu}"
-            ),
-            Self::VulkanCodec { codec } => write!(
-                f,
-                "{} on Vulkan Video is not supported yet. --decoder vulkan decodes H.264, HEVC, \
-                 and VP9 in this release. Pass --decoder auto or --decoder cpu.",
-                codec.name()
             ),
             Self::H264NotBaseline { profile_idc } => write!(
                 f,

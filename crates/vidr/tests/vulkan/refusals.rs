@@ -40,20 +40,6 @@ fn field_coded_and_10_bit_streams_are_refused_at_open() {
 }
 
 #[test]
-fn av1_is_not_supported_yet() {
-    let Some((device, _guard)) = device() else {
-        return;
-    };
-    let codec = DecodeCodec::Av1;
-    let error = VulkanDecoder::new(&device, codec, &[])
-        .err()
-        .unwrap_or_else(|| panic!("{codec}: opens"));
-    let text = error.to_string();
-    assert!(matches!(error, DecodeError::VulkanRefused { .. }), "{text}");
-    assert!(text.contains("not supported yet"), "{text}");
-}
-
-#[test]
 fn a_stream_that_starts_on_a_p_picture_is_refused() {
     let Some((device, _guard)) = device() else {
         return;

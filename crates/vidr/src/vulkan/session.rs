@@ -6,6 +6,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use ash::vk;
+use ash::vk::native::StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN;
 
 use super::caps::DecodeCaps;
 use super::device::VulkanDevice;
@@ -23,6 +24,8 @@ pub(super) enum VideoProfile {
     Hevc(vk::VideoDecodeH265ProfileInfoKHR<'static>, PixelFormat),
     /// VP9 at 8 or 10 bits. It uses no session parameters.
     Vp9(VideoDecodeVp9ProfileInfo, PixelFormat),
+    /// AV1 Main at 8 or 10 bits.
+    Av1(vk::VideoDecodeAV1ProfileInfoKHR<'static>, PixelFormat),
 }
 
 /// The Vulkan format of an image in `format`.
@@ -63,12 +66,23 @@ impl VideoProfile {
         )
     }
 
+    /// The profile of an AV1 Main stream. `film_grain` is `filmGrainSupport`.
+    pub(super) fn av1(film_grain: bool, format: PixelFormat) -> Self {
+        Self::Av1(
+            vk::VideoDecodeAV1ProfileInfoKHR::default()
+                .std_profile(StdVideoAV1Profile_STD_VIDEO_AV1_PROFILE_MAIN)
+                .film_grain_support(film_grain),
+            format,
+        )
+    }
+
     /// The codec's name in errors.
     pub(super) const fn codec(&self) -> DecodeCodec {
         match self {
             Self::H264(_) => DecodeCodec::H264,
             Self::Hevc(..) => DecodeCodec::Hevc,
             Self::Vp9(..) => DecodeCodec::Vp9,
+            Self::Av1(..) => DecodeCodec::Av1,
         }
     }
 
@@ -76,7 +90,7 @@ impl VideoProfile {
     pub(super) const fn pixel_format(&self) -> PixelFormat {
         match self {
             Self::H264(_) => PixelFormat::Nv12,
-            Self::Hevc(_, format) | Self::Vp9(_, format) => *format,
+            Self::Hevc(_, format) | Self::Vp9(_, format) | Self::Av1(_, format) => *format,
         }
     }
 
@@ -98,6 +112,10 @@ impl VideoProfile {
                 ptr::from_ref(hevc).cast(),
             ),
             Self::Vp9(vp9, _) => (gap::DECODE_VP9, ptr::from_ref(vp9).cast()),
+            Self::Av1(av1, _) => (
+                vk::VideoCodecOperationFlagsKHR::DECODE_AV1,
+                ptr::from_ref(av1).cast(),
+            ),
         };
         let depth = match self.pixel_format() {
             PixelFormat::Nv12 => vk::VideoComponentBitDepthFlagsKHR::TYPE_8,
@@ -148,6 +166,18 @@ pub(super) fn query_vp9_caps(
     };
     // SAFETY: `vp9` is a whole capability structure with no chain, and it outlives the call.
     unsafe { read_caps(device, profile, ptr::from_mut(&mut vp9).cast()) }
+}
+
+/// The AV1 capabilities. vidr checks each frame's size against them, so nothing reads
+/// `maxLevel`. A sequence header can state level 31, which names no limits. The query still
+/// needs its structure in the chain.
+pub(super) fn query_av1_caps(
+    device: &VulkanDevice,
+    profile: &VideoProfile,
+) -> Result<DecodeCaps, DecodeError> {
+    let mut av1 = vk::VideoDecodeAV1CapabilitiesKHR::default();
+    // SAFETY: `av1` is a whole capability structure with no chain, and it outlives the call.
+    unsafe { read_caps(device, profile, ptr::from_mut(&mut av1).cast()) }
 }
 
 /// Queries `profile`, with the codec's capability structure in `codec_caps` filled in.
@@ -678,6 +708,29 @@ mod tests {
         assert_eq!(info.p_next, ptr::from_ref(vp9).cast::<c_void>());
         assert_eq!(vp9.s_type, gap::TYPE_VP9_PROFILE_INFO);
         assert!(!profile.uses_parameters());
+    }
+
+    #[test]
+    fn an_av1_profile_chains_its_structure_and_states_film_grain() {
+        for grain in [false, true] {
+            let profile = VideoProfile::av1(grain, PixelFormat::P010);
+            let info = profile.info();
+            assert_eq!(
+                info.video_codec_operation,
+                vk::VideoCodecOperationFlagsKHR::DECODE_AV1
+            );
+            assert_eq!(
+                info.luma_bit_depth,
+                vk::VideoComponentBitDepthFlagsKHR::TYPE_10
+            );
+            let VideoProfile::Av1(av1, _) = &profile else {
+                panic!("the wrong variant");
+            };
+            assert_eq!(info.p_next, ptr::from_ref(av1).cast::<c_void>());
+            assert_eq!(av1.std_profile, 0, "STD_VIDEO_AV1_PROFILE_MAIN");
+            assert_eq!(av1.film_grain_support, vk::Bool32::from(grain));
+            assert!(profile.uses_parameters());
+        }
     }
 
     #[test]

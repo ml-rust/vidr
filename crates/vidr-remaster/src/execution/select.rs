@@ -3,7 +3,7 @@
 //! | Runtime | Decoders | Encoders |
 //! | --- | --- | --- |
 //! | CUDA | NVDEC, CPU | NVENC, CPU |
-//! | WebGPU | Vulkan Video for H.264, HEVC, and VP9, CPU | CPU |
+//! | WebGPU | Vulkan Video for H.264, HEVC, VP9, and AV1, CPU | CPU |
 //! | CPU | CPU | CPU |
 //!
 //! `auto` prefers the hardware path, then the CPU. A library check says only that
@@ -327,11 +327,7 @@ impl Selector {
     }
 
     /// The hardware decoder of `codec` that `runtime` holds, or why none fits.
-    fn hardware_decoder(
-        &self,
-        runtime: RuntimeKind,
-        codec: SourceCodec,
-    ) -> Result<DecoderBackend, String> {
+    fn hardware_decoder(&self, runtime: RuntimeKind) -> Result<DecoderBackend, String> {
         match runtime {
             RuntimeKind::Cuda => self
                 .machine
@@ -339,15 +335,12 @@ impl Selector {
                 .clone()
                 .map(|()| DecoderBackend::Nvdec)
                 .map_err(|reason| format!("NVDEC is out: {reason}")),
-            RuntimeKind::Wgpu => match (&self.machine.vulkan, codec) {
-                (Err(reason), _) => Err(format!("Vulkan Video is out: {reason}")),
-                (Ok(()), SourceCodec::H264 | SourceCodec::Hevc | SourceCodec::Vp9) => {
-                    Ok(DecoderBackend::Vulkan)
-                }
-                (Ok(()), SourceCodec::Av1) => {
-                    Err("AV1 on Vulkan Video is not supported yet".to_owned())
-                }
-            },
+            RuntimeKind::Wgpu => self
+                .machine
+                .vulkan
+                .clone()
+                .map(|()| DecoderBackend::Vulkan)
+                .map_err(|reason| format!("Vulkan Video is out: {reason}")),
             RuntimeKind::Cpu => Err("the CPU runtime has no hardware decoder".to_owned()),
         }
     }
@@ -447,9 +440,6 @@ impl Selector {
                         feature: "vulkan-video",
                     });
                 }
-                if video.codec == SourceCodec::Av1 {
-                    return Err(ExecutionError::VulkanCodec { codec: video.codec });
-                }
                 self.machine
                     .vulkan
                     .clone()
@@ -465,7 +455,7 @@ impl Selector {
                 let backend = self.cpu_decoder(video)?;
                 Ok((backend, format!("--decoder cpu: {}", cpu_reason(backend))))
             }
-            DecoderChoice::Auto => match self.hardware_decoder(runtime, video.codec) {
+            DecoderChoice::Auto => match self.hardware_decoder(runtime) {
                 Ok(backend) => Ok((
                     backend,
                     match backend {
@@ -539,8 +529,7 @@ impl Selector {
     /// NVENC writes H.264 High, which OpenH264 refuses.
     fn reads_output(&self, decoder: DecoderBackend, encoder: EncoderBackend) -> bool {
         match decoder {
-            DecoderBackend::Nvdec => true,
-            DecoderBackend::Vulkan => self.request.codec == Codec::H264,
+            DecoderBackend::Nvdec | DecoderBackend::Vulkan => true,
             DecoderBackend::Dav1d => self.request.codec == Codec::Av1,
             DecoderBackend::Hevc => self.request.codec == Codec::Hevc,
             DecoderBackend::RustyVp9 => false,
@@ -569,12 +558,7 @@ impl Selector {
         if self.reads_output(decoder, encoder) {
             return Ok((decoder, "The run's decoder reads the output.".to_owned()));
         }
-        let output = match self.request.codec {
-            Codec::Hevc => SourceCodec::Hevc,
-            Codec::H264 => SourceCodec::H264,
-            Codec::Av1 => SourceCodec::Av1,
-        };
-        let hardware = self.hardware_decoder(runtime, output).ok();
+        let hardware = self.hardware_decoder(runtime).ok();
         let cpu = self.cpu_check_decoder(encoder);
         let first = if self.request.decoder == DecoderChoice::Cpu {
             cpu.or(hardware)

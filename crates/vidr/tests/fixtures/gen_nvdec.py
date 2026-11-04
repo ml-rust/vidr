@@ -6,7 +6,8 @@ Run from any directory:
     python3 crates/vidr/tests/fixtures/gen_nvdec.py [--out DIR] [--only NAME ...]
 
 ffmpeg and ffprobe with libx264, libx265 (8 and 10 bit), libaom-av1 and
-libvpx-vp9 must be on PATH, and vpxenc for `vp9_resize`. A stream whose
+libvpx-vp9 must be on PATH, and vpxenc for `vp9_resize`. The AV1 streams
+for the Vulkan Video tests also take aomenc, libsvtav1, and librav1e. A stream whose
 encoder is missing is skipped with a notice. The default output directory is
 `crates/vidr/tests/fixtures/nvdec/`, which git ignores. Never commit its
 contents.
@@ -59,6 +60,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_av1_headers import trace_blocks  # noqa: E402
 from gen_bitstream import QUIET, extract  # noqa: E402
 from gen_hevc import Bits, escape, unescape  # noqa: E402
 
@@ -99,6 +101,38 @@ SOURCE_FILTERS = {"h264_mbaff_interlaced": "interlace=scan=tff,"}
 X265 = "keyint=5:min-keyint=5:bframes=2:log-level=error"
 AOM = ["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "5", "-row-mt", "0"]
 VPX = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-g", "5"]
+SVT = ["-c:v", "libsvtav1", "-preset", "10", "-g", "12"]
+
+# name: (aomenc arguments, size, source pix_fmt, syntax elements a frame header must set).
+AOMENC = {
+    "av1_altref": ([], "320x180", "yuv420p", ["show_existing_frame", "showable_frame"]),
+    "av1_altref_10bit": (["--bit-depth=10", "--profile=0"], "320x180", "yuv420p10le",
+                         ["show_existing_frame", "showable_frame"]),
+    "av1_forward_key": (["--enable-fwd-kf=1", "--kf-max-dist=10"], "320x180", "yuv420p",
+                        ["show_existing_frame", "showable_frame"]),
+    "av1_tiles": (["--tile-columns=1", "--tile-rows=1"], "640x360", "yuv420p",
+                  ["tile_cols_log2", "tile_rows_log2"]),
+    "av1_tile_groups": (["--tile-columns=1", "--tile-rows=1", "--num-tile-groups=3"], "640x360",
+                        "yuv420p", ["tile_cols_log2", "tile_start_and_end_present_flag"]),
+    "av1_restoration": (["--cpu-used=1", "--enable-restoration=1", "--enable-cdef=1"], "320x180",
+                        "yuv420p", ["cdef_bits", "lr_type"]),
+    "av1_superres": (["--superres-mode=1", "--superres-denominator=12"], "320x180", "yuv420p",
+                     ["use_superres"]),
+    "av1_resize": (["--resize-mode=2"], "640x360", "yuv420p",
+                   ["frame_size_override_flag", "frame_width_minus_1"]),
+    "av1_film_grain": (["--film-grain-test=1"], "320x180", "yuv420p",
+                       ["apply_grain", "show_existing_frame"]),
+    "av1_film_grain_10bit": (["--film-grain-test=2", "--bit-depth=10", "--profile=0"], "320x180",
+                             "yuv420p10le", ["apply_grain"]),
+    "av1_screen": (["--tune-content=screen", "--enable-intrabc=1", "--enable-palette=1",
+                    "--cpu-used=4"], "320x180", "yuv420p", ["allow_screen_content_tools"]),
+    "av1_sb128": (["--sb-size=128"], "320x180", "yuv420p", ["use_128x128_superblock"]),
+    "av1_segmentation": (["--aq-mode=1"], "320x180", "yuv420p", ["segmentation_enabled"]),
+    "av1_qm": (["--enable-qm=1"], "320x180", "yuv420p", ["using_qmatrix"]),
+    "av1_error_resilient": (["--error-resilient=1"], "320x180", "yuv420p",
+                            ["error_resilient_mode"]),
+    "av1_sframe": (["--sframe-dist=5", "--sframe-mode=1"], "320x180", "yuv420p", []),
+}
 
 # (name, codec, source pix_fmt, encoder args, decoded pix_fmt or None). A stream
 # in `CUSTOM_ENCODES` has no encoder args.
@@ -167,6 +201,14 @@ STREAMS = [
     ("av1_422", "av1", "yuv422p10le", AOM, None),
     ("av1_444", "av1", "yuv444p", AOM, None),
     ("av1_mono", "av1", "gray", AOM, None),
+    # What the Vulkan Video tests add. An entry of `AOMENC` states how aomenc writes each stream,
+    # and the tool the script checks it holds.
+    *[(name, "av1", stream[2], None, "p010le" if "10bit" in name else "nv12")
+      for name, stream in AOMENC.items()],
+    ("av1_svt", "av1", "yuv420p", SVT, "nv12"),
+    ("av1_svt_10bit", "av1", "yuv420p10le", SVT, "p010le"),
+    ("av1_svt_film_grain", "av1", "yuv420p", [*SVT, "-svtav1-params", "film-grain=8"], "nv12"),
+    ("av1_rav1e", "av1", "yuv420p", ["-c:v", "librav1e", "-speed", "10", "-g", "12"], "nv12"),
 ]
 
 
@@ -246,7 +288,49 @@ def encode_vp9_altref(path, out):
     return second is not None
 
 
-CUSTOM_ENCODES = {"vp9_resize": encode_vp9_resize, "vp9_altref": encode_vp9_altref}
+def encode_aomenc(name, path, out):
+    """Encodes through aomenc, checks the tools the stream must hold, and remuxes to MP4."""
+    if shutil.which("aomenc") is None:
+        return False
+    args, size, pix_fmt, required = AOMENC[name]
+    source = out / f"{name}.source.y4m"
+    obu = out / f"{name}.source.obu"
+    made = tool("ffmpeg", [*QUIET, "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25",
+                           "-frames:v", "24", "-pix_fmt", pix_fmt, "-strict", "-1", str(source)])
+    if made is None:
+        return False
+    encoded = subprocess.run(
+        ["aomenc", "--cpu-used=8", "--limit=24", "--threads=1", "--passes=1",
+         "--lag-in-frames=16", "--obu", *args, "-o", str(obu), str(source)],
+        capture_output=True, text=True)
+    source.unlink()
+    if encoded.returncode != 0:
+        print(f"aomenc failed:\n{encoded.stderr}", file=sys.stderr)
+        return False
+    check_elements(name, obu, required)
+    remuxed = tool("ffmpeg", [*QUIET, "-f", "obu", "-i", str(obu), "-c", "copy", str(path)])
+    obu.unlink()
+    return remuxed is not None
+
+
+def check_elements(name, obu, required):
+    """Exits when no frame header of `obu` sets a required syntax element."""
+    seen = set()
+    for block in trace_blocks(obu):
+        for _, elements in block:
+            for element, value, _, _ in elements:
+                if value:
+                    seen.add(element.split("[")[0])
+    missing = [element for element in required if element not in seen]
+    if missing:
+        sys.exit(f"{name}: the encoder wrote no frame with {missing}. Change its arguments.")
+
+
+CUSTOM_ENCODES = {
+    "vp9_resize": encode_vp9_resize,
+    "vp9_altref": encode_vp9_altref,
+    **{name: (lambda path, out, name=name: encode_aomenc(name, path, out)) for name in AOMENC},
+}
 
 
 def vp9_header_color(mp4, out, name):
