@@ -1,5 +1,5 @@
-//! The encoder interface every backend implements: NVENC now, and the Vulkan
-//! Video and CPU paths later.
+//! The encoder interface every backend implements: NVENC and the CPU encoder now,
+//! and Vulkan Video later.
 
 use numr::runtime::Runtime;
 

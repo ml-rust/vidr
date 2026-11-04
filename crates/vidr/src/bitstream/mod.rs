@@ -75,7 +75,7 @@ pub use avcc::{AvcConfig, AvcHighProfile, avcc_has_extension};
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use from_annexb::{FromAnnexB, NalCodec, NalConfig};
 #[cfg(feature = "h264")]
-pub use h264_vui::h264_sps_vui;
+pub use h264_vui::{H264SpsFacts, h264_sps_facts, h264_sps_vui};
 #[cfg(feature = "hevc")]
 pub use hevc_sps::hevc_sps_vui;
 #[cfg(feature = "hevc")]

@@ -53,6 +53,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - Frame timing model and output checks
 - H.264, HEVC, and AV1 bitstream filters
 - NVDEC hardware decode and NVENC hardware encode
+- CPU codecs, each with one host copy per frame: AV1 decode on dav1d, H.264 Baseline decode and encode on OpenH264. A source build of OpenH264 (`openh264`) gets no Cisco patent cover. Cisco's cover applies only to its own binary, which `openh264-cisco` loads from a path the caller supplies
 - Conversion between NV12 or P010 planes and float RGB
 - SDR colour policy
 - MP4, MOV, Matroska, and WebM input facts through containr
@@ -60,7 +61,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - Threaded decode, transform, and encode pump
 - The `vidr-remaster` command, on NVIDIA GPUs only
 
-NVDEC and NVENC are the only decode and encode paths until the vendor-neutral path lands. The rest of [Scope](#scope) does not work yet.
+`vidr-remaster` runs on NVDEC and NVENC only. No vendor-neutral hardware path exists yet. The rest of [Scope](#scope) does not work yet.
 
 ## Crates
 

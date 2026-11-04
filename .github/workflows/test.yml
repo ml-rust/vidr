@@ -26,6 +26,11 @@
 # build script needs nvcc. `wgpu` is vendor-neutral and needs no SDK to build, so
 # it has clippy rows. Its tests need an adapter, so the test job leaves it out.
 #
+# CPU codecs run in CI. `dav1d` links libdav1d through pkg-config, so a job with
+# that feature installs libdav1d-dev. `openh264` compiles OpenH264 with the
+# runner's C++ compiler. Its assembly needs nasm and falls back to C without it.
+# `openh264-cisco` loads a binary at run time, and its tests skip with no binary.
+#
 # No job runs with `--locked`. The committed Cargo.lock resolves numr and
 # boostr through local path patches, so a lock-exact build on a clean runner
 # is not possible. Cargo's MSRV-aware resolver picks the versions.
@@ -102,6 +107,10 @@ jobs:
           - { crate: vidr, features: "pipeline,mp4,mkv" }
           - { crate: vidr, features: "wgpu" }
           - { crate: vidr, features: "frame,wgpu" }
+          - { crate: vidr, features: "dav1d" }
+          - { crate: vidr, features: "openh264" }
+          - { crate: vidr, features: "openh264-cisco" }
+          - { crate: vidr, features: "dav1d,openh264,openh264-cisco" }
           - { crate: vidr-remaster, features: "" }
           - { crate: vidr-remaster, features: "mp4" }
           - { crate: vidr-remaster, features: "mkv" }
@@ -124,6 +133,10 @@ jobs:
         with:
           prefix-key: clippy-${{ matrix.crate }}
 
+      - name: Install libdav1d
+        if: contains(matrix.features, 'dav1d')
+        run: sudo apt-get update && sudo apt-get install -y libdav1d-dev
+
       - name: Clippy
         env:
           CRATE: ${{ matrix.crate }}
@@ -141,6 +154,7 @@ jobs:
       matrix:
         include:
           - { crate: vidr, features: "h264,hevc,av1,vp9,frame,mp4,mkv,pipeline" }
+          - { crate: vidr, features: "dav1d,openh264,openh264-cisco" }
           - { crate: vidr-remaster, features: "" }
           - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
     steps:
@@ -152,6 +166,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: test-${{ matrix.crate }}
+
+      - name: Install libdav1d
+        if: contains(matrix.features, 'dav1d')
+        run: sudo apt-get update && sudo apt-get install -y libdav1d-dev
 
       - name: Run tests
         env:

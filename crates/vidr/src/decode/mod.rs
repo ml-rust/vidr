@@ -6,6 +6,8 @@
 //! | Backend | Feature | Type |
 //! | --- | --- | --- |
 //! | NVDEC | `nvdec` | `nvdec::NvdecDecoder` |
+//! | dav1d, AV1 on the CPU | `dav1d` | `dav1d::Dav1dDecoder` |
+//! | OpenH264, H.264 Baseline on the CPU | `openh264`, `openh264-cisco` | `openh264::Openh264Decoder` |
 //!
 //! Frames come out as [`DecodedFrame`]: NV12 or P010 planes on the decoder's
 //! device, as samples or packed words, ready for numr's `ColorOps::yuv_to_rgb`.
@@ -15,8 +17,12 @@ mod color;
 pub(crate) mod frame;
 mod traits;
 
+#[cfg(feature = "dav1d")]
+pub mod dav1d;
 #[cfg(feature = "nvdec")]
 pub mod nvdec;
+#[cfg(any(feature = "openh264", feature = "openh264-cisco"))]
+pub mod openh264;
 
 pub use codec::{ChromaFormat, DecodeCodec, PixelFormat};
 pub use color::{

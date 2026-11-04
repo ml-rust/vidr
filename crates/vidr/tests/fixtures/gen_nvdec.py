@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the NVDEC decode fixtures for `tests/nvdec/`.
+"""Generate the decode fixtures for `tests/nvdec/`, `tests/dav1d/`, and `tests/openh264/`.
 
 Run from any directory:
 
@@ -31,8 +31,8 @@ For each stream NAME the script writes:
   (0 or 1) are what ffprobe reports for every frame. The script exits when
   frames disagree, so each stream holds one structure.
 - `NAME.yuv`: ffmpeg's software decode as `-f rawvideo` in `nv12` or
-  `p010le`, every frame in display order. Streams the tests expect NVDEC
-  to refuse have no `.yuv`.
+  `p010le`, every frame in display order. Streams the tests expect a
+  decoder to refuse have no `.yuv`.
 
 The tests read `VIDR_NVDEC_FIXTURES` first, then the default directory.
 """
@@ -95,6 +95,7 @@ STREAMS = [
      ["-c:v", "libx265", "-profile:v", "main10", "-x265-params", X265, "-tag:v", "hvc1"],
      "p010le"),
     ("av1_8bit", "av1", "yuv420p", AOM, "nv12"),
+    ("av1_10bit", "av1", "yuv420p10le", AOM, "p010le"),
     ("vp9_8bit", "vp9", "yuv420p", VPX, "nv12"),
     # VP9 states its colour in the key frame header only. These streams
     # write `color_space` 1 with full range, and `color_space` 0 with the
@@ -122,6 +123,14 @@ STREAMS = [
     # 4:4:4 has no vidr frame layout. The test expects `UnsupportedLayout`.
     ("hevc_444", "hevc", "yuv444p",
      ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1"], None),
+    # OpenH264's profile vidr passes. The other H.264 streams are its refusals.
+    ("h264_baseline", "h264", "yuv420p",
+     ["-c:v", "libx264", "-profile:v", "baseline", "-g", "5"], "nv12"),
+    # AV1 layouts with no vidr frame. dav1d's tests expect `UnsupportedLayout`.
+    ("av1_12bit", "av1", "yuv420p12le", AOM, None),
+    ("av1_422", "av1", "yuv422p10le", AOM, None),
+    ("av1_444", "av1", "yuv444p", AOM, None),
+    ("av1_mono", "av1", "gray", AOM, None),
 ]
 
 

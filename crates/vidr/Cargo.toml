@@ -67,6 +67,17 @@ pipeline = ["decode", "encode", "frame"]
 wgpu = ["numr/wgpu"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
+# AV1 software decode on libdav1d. Links libdav1d 1.3.0 or newer, found through
+# pkg-config. Each frame takes one copy through host memory.
+dav1d = ["frame", "av1", "dep:dav1d"]
+# H.264 software decode and encode on OpenH264 compiled from source, for
+# developers and CI. A source build gets no Cisco patent cover. Each frame takes
+# one copy through host memory.
+openh264 = ["frame", "h264", "dep:openh264", "openh264/source"]
+# H.264 software decode and encode on Cisco's OpenH264 binary, loaded from a path
+# the caller supplies after the crate checks its hash. For shipped builds. Cisco's
+# patent cover applies only to its own binary. No download code exists here.
+openh264-cisco = ["frame", "h264", "dep:openh264", "openh264/libloading"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
@@ -81,3 +92,5 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
   "cuda-version-from-build-system",
 ] }
 libloading = { version = "0.9", optional = true }
+dav1d = { version = "0.11", optional = true }
+openh264 = { version = "0.9", optional = true, default-features = false }

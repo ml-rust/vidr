@@ -5,6 +5,8 @@ use std::fmt;
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 use super::BitstreamError;
+#[cfg(feature = "frame")]
+use super::FrameError;
 use crate::decode::{ChromaFormat, DecodeCodec};
 
 /// An error in a decoder: loading the driver library, querying the GPU,
@@ -58,7 +60,7 @@ pub enum DecodeError {
         /// What the GPU reports.
         reason: String,
     },
-    /// The GPU decodes the stream, but vidr has no frame layout for it.
+    /// The decoder takes the stream, but vidr has no frame layout for it.
     UnsupportedLayout {
         /// The codec.
         codec: DecodeCodec,
@@ -136,6 +138,64 @@ pub enum DecodeError {
         /// numr's message.
         reason: String,
     },
+    /// A software decoder's call returns an error.
+    Software {
+        /// The decoder, for example `dav1d`.
+        decoder: &'static str,
+        /// The call that fails.
+        call: &'static str,
+        /// The inputs of the call.
+        input: String,
+        /// The library's message.
+        reason: String,
+    },
+    /// A software decoder returns a picture with no packet left to match it.
+    UnmatchedPicture {
+        /// The decoder.
+        decoder: &'static str,
+    },
+    /// Packets that hold a picture have no frame at the end of the stream.
+    MissingPictures {
+        /// The decoder.
+        decoder: &'static str,
+        /// Packets with no frame.
+        count: usize,
+        /// The lowest pts among them.
+        first_pts: i64,
+    },
+    /// An SPS states a bit depth the H.264 decoder does not decode.
+    H264BitDepth {
+        /// The decoder.
+        decoder: &'static str,
+        /// Luma bits per sample.
+        luma: u8,
+        /// Chroma bits per sample.
+        chroma: u8,
+    },
+    /// An SPS has `frame_mbs_only_flag` 0, and the H.264 decoder takes frames
+    /// only.
+    H264Interlaced {
+        /// The decoder.
+        decoder: &'static str,
+    },
+    /// An SPS states a profile vidr does not pass to the H.264 decoder.
+    H264Profile {
+        /// The decoder.
+        decoder: &'static str,
+        /// `profile_idc`.
+        profile_idc: u8,
+    },
+    /// The OpenH264 binary at the caller's path does not load, or its hash is
+    /// not on the list the `openh264` crate holds.
+    Openh264Library {
+        /// The path the caller passes.
+        path: String,
+        /// The loader's message.
+        reason: String,
+    },
+    /// A frame's planes fail the copy to the decoder's device.
+    #[cfg(feature = "frame")]
+    Frame(FrameError),
     /// The config record or a packet fails the bitstream filter.
     #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
     Bitstream(BitstreamError),
@@ -256,6 +316,66 @@ impl fmt::Display for DecodeError {
                  or take frames from the decoder sooner.",
                 shape[0], shape[1]
             ),
+            Self::Software {
+                decoder,
+                call,
+                input,
+                reason,
+            } => write!(
+                f,
+                "{decoder} call {call} fails for {input}: {reason}. Run `ffmpeg -v error -i INPUT \
+                 -f null -` on the source. Remux or re-encode the source if ffmpeg reports the \
+                 same stream as damaged, and report this as a vidr bug if it does not."
+            ),
+            Self::UnmatchedPicture { decoder } => write!(
+                f,
+                "{decoder} returns a picture with no packet left to match it, so the picture has \
+                 no pts. Pass one access unit per packet, and report this as a vidr bug if each \
+                 packet holds one."
+            ),
+            Self::MissingPictures {
+                decoder,
+                count,
+                first_pts,
+            } => write!(
+                f,
+                "{decoder} returns no frame for {count} packets at the end of the stream, the \
+                 first at pts {first_pts}. The output would lose frames. Pass one access unit \
+                 per packet, and check the source with `ffmpeg -v error -i INPUT -f null -`."
+            ),
+            Self::H264BitDepth {
+                decoder,
+                luma,
+                chroma,
+            } => write!(
+                f,
+                "the H.264 SPS states {luma}-bit luma and {chroma}-bit chroma, and {decoder} \
+                 decodes 8 bits only. Decode this stream with another decoder, or re-encode the \
+                 source at 8 bits."
+            ),
+            Self::H264Interlaced { decoder } => write!(
+                f,
+                "the H.264 SPS has frame_mbs_only_flag 0, and {decoder} decodes frames only, with \
+                 no fields or MBAFF. Decode this stream with another decoder, or re-encode the \
+                 source as progressive."
+            ),
+            Self::H264Profile {
+                decoder,
+                profile_idc,
+            } => write!(
+                f,
+                "the H.264 SPS states profile_idc {profile_idc}, and vidr passes {decoder} \
+                 Baseline only, profile_idc 66, because its B-slice output differs from the \
+                 reference decode. Decode this stream with another decoder, or re-encode the \
+                 source as Baseline."
+            ),
+            Self::Openh264Library { path, reason } => write!(
+                f,
+                "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
+                 unmodified Cisco release that the `openh264` crate's hash list names."
+            ),
+            #[cfg(feature = "frame")]
+            Self::Frame(error) => fmt::Display::fmt(error, f),
             #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
             Self::Bitstream(error) => fmt::Display::fmt(error, f),
         }
@@ -268,6 +388,10 @@ impl StdError for DecodeError {
         if let Self::Bitstream(error) = self {
             return Some(error);
         }
+        #[cfg(feature = "frame")]
+        if let Self::Frame(error) = self {
+            return Some(error);
+        }
         None
     }
 }
@@ -276,6 +400,13 @@ impl StdError for DecodeError {
 impl From<BitstreamError> for DecodeError {
     fn from(error: BitstreamError) -> Self {
         Self::Bitstream(error)
+    }
+}
+
+#[cfg(feature = "frame")]
+impl From<FrameError> for DecodeError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
     }
 }
 
@@ -308,6 +439,27 @@ mod tests {
         assert!(message.contains("driver version"));
         assert!(message.contains("updated"));
         assert!(!message.contains("before any sequence header"));
+    }
+
+    #[test]
+    fn h264_refusals_name_the_field_and_the_next_action() {
+        let depth = DecodeError::H264BitDepth {
+            decoder: "OpenH264",
+            luma: 10,
+            chroma: 10,
+        };
+        assert!(depth.to_string().contains("10-bit luma"));
+        assert!(depth.to_string().contains("re-encode"));
+        let interlaced = DecodeError::H264Interlaced {
+            decoder: "OpenH264",
+        };
+        assert!(interlaced.to_string().contains("frame_mbs_only_flag 0"));
+        let profile = DecodeError::H264Profile {
+            decoder: "OpenH264",
+            profile_idc: 100,
+        };
+        assert!(profile.to_string().contains("profile_idc 100"));
+        assert!(profile.to_string().contains("as Baseline"));
     }
 
     #[test]

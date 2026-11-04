@@ -5,6 +5,8 @@ use std::fmt;
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 use super::BitstreamError;
+#[cfg(feature = "frame")]
+use super::FrameError;
 use crate::decode::PixelFormat;
 use crate::encode::EncodeCodec;
 
@@ -178,6 +180,38 @@ pub enum EncodeError {
         /// The driver's message.
         reason: String,
     },
+    /// A software encoder's call returns an error.
+    Software {
+        /// The encoder, for example `OpenH264`.
+        encoder: &'static str,
+        /// The call that fails.
+        call: &'static str,
+        /// The inputs of the call.
+        input: String,
+        /// The library's message.
+        reason: String,
+    },
+    /// A software encoder returns no picture for a frame, so the output would
+    /// lose the frame.
+    NoPicture {
+        /// The encoder.
+        encoder: &'static str,
+        /// The frame's pts.
+        pts: i64,
+        /// The frame type the encoder reports.
+        frame_type: String,
+    },
+    /// The OpenH264 binary at the caller's path does not load, or its hash is
+    /// not on the list the `openh264` crate holds.
+    Openh264Library {
+        /// The path the caller passes.
+        path: String,
+        /// The loader's message.
+        reason: String,
+    },
+    /// A frame's planes fail the copy to host memory.
+    #[cfg(feature = "frame")]
+    Frame(FrameError),
     /// The encoder's output fails the bitstream filter.
     #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
     Bitstream(BitstreamError),
@@ -331,6 +365,33 @@ impl fmt::Display for EncodeError {
                 "an input surface of {bytes} bytes does not allocate: {reason}. Free device \
                  memory, or lower the frame size or `b_frames`."
             ),
+            Self::Software {
+                encoder,
+                call,
+                input,
+                reason,
+            } => write!(
+                f,
+                "{encoder} call {call} fails for {input}: {reason}. Check the encoder config \
+                 against {encoder}'s limits, and report this as a vidr bug if the config fits."
+            ),
+            Self::NoPicture {
+                encoder,
+                pts,
+                frame_type,
+            } => write!(
+                f,
+                "{encoder} returns frame type {frame_type} and no picture for the frame at pts \
+                 {pts}, so the output would lose it. Report this as a vidr bug, with the encoder \
+                 config."
+            ),
+            Self::Openh264Library { path, reason } => write!(
+                f,
+                "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
+                 unmodified Cisco release that the `openh264` crate's hash list names."
+            ),
+            #[cfg(feature = "frame")]
+            Self::Frame(error) => fmt::Display::fmt(error, f),
             #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
             Self::Bitstream(error) => fmt::Display::fmt(error, f),
         }
@@ -343,6 +404,10 @@ impl StdError for EncodeError {
         if let Self::Bitstream(error) = self {
             return Some(error);
         }
+        #[cfg(feature = "frame")]
+        if let Self::Frame(error) = self {
+            return Some(error);
+        }
         None
     }
 }
@@ -351,6 +416,13 @@ impl StdError for EncodeError {
 impl From<BitstreamError> for EncodeError {
     fn from(error: BitstreamError) -> Self {
         Self::Bitstream(error)
+    }
+}
+
+#[cfg(feature = "frame")]
+impl From<FrameError> for EncodeError {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
     }
 }
 

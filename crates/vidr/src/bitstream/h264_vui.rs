@@ -12,6 +12,63 @@ use crate::error::BitstreamError;
 /// `num_ref_frames_in_pic_order_cnt_cycle` is at most 255.
 const MAX_REF_FRAME_CYCLE: u32 = 255;
 
+/// What a decoder reads from an SPS to decide whether it takes the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H264SpsFacts {
+    /// `profile_idc`.
+    pub profile_idc: u8,
+    /// `constraint_set0_flag` to `constraint_set5_flag` and the two reserved
+    /// bits.
+    pub constraint_flags: u8,
+    /// `chroma_format_idc`: 0 for 4:0:0, 1 for 4:2:0, 2 for 4:2:2, 3 for 4:4:4.
+    pub chroma_format_idc: u8,
+    /// Luma bits per sample.
+    pub bit_depth_luma: u8,
+    /// Chroma bits per sample.
+    pub bit_depth_chroma: u8,
+    /// `frame_mbs_only_flag`. False means the stream can hold field pictures or
+    /// MBAFF frames.
+    pub frame_mbs_only: bool,
+}
+
+/// Reads the [`H264SpsFacts`] of an SPS NAL unit, header byte included.
+///
+/// # Errors
+///
+/// [`BitstreamError`] for a NAL unit that is not an SPS, an SPS that ends
+/// before `frame_mbs_only_flag`, or a field out of range.
+pub fn h264_sps_facts(nal: &[u8]) -> Result<H264SpsFacts, BitstreamError> {
+    let payload = h264_sps::payload(nal)?;
+    let mut reader = BitReader::new(&payload, STRUCTURE);
+    let (leading, frame_mbs_only) = read_to_frame_mbs_only(&mut reader)?;
+    Ok(H264SpsFacts {
+        profile_idc: leading.profile_idc,
+        constraint_flags: leading.constraint_flags,
+        chroma_format_idc: leading.chroma_format_idc,
+        bit_depth_luma: leading.bit_depth_luma_minus8 + 8,
+        bit_depth_chroma: leading.bit_depth_chroma_minus8 + 8,
+        frame_mbs_only,
+    })
+}
+
+/// Walks an SPS from its first byte through `frame_mbs_only_flag`.
+fn read_to_frame_mbs_only(
+    reader: &mut BitReader<'_>,
+) -> Result<(h264_sps::SpsSummary, bool), BitstreamError> {
+    let leading = h264_sps::read_leading(reader)?;
+    if h264_sps::has_chroma_fields(leading.profile_idc) {
+        skip_scaling_matrix(reader, leading.chroma_format_idc)?;
+    }
+    reader.ue("log2_max_frame_num_minus4")?;
+    skip_pic_order_count(reader)?;
+    reader.ue("max_num_ref_frames")?;
+    reader.skip(1, "gaps_in_frame_num_value_allowed_flag")?;
+    reader.ue("pic_width_in_mbs_minus1")?;
+    reader.ue("pic_height_in_map_units_minus1")?;
+    let frame_mbs_only = reader.bit("frame_mbs_only_flag")?;
+    Ok((leading, frame_mbs_only))
+}
+
 /// Reads the VUI colour fields of an SPS NAL unit, header byte included.
 ///
 /// An SPS without `vui_parameters_present_flag` gives an empty
@@ -24,17 +81,8 @@ const MAX_REF_FRAME_CYCLE: u32 = 255;
 pub fn h264_sps_vui(nal: &[u8]) -> Result<VuiSignal, BitstreamError> {
     let payload = h264_sps::payload(nal)?;
     let mut reader = BitReader::new(&payload, STRUCTURE);
-    let leading = h264_sps::read_leading(&mut reader)?;
-    if h264_sps::has_chroma_fields(leading.profile_idc) {
-        skip_scaling_matrix(&mut reader, leading.chroma_format_idc)?;
-    }
-    reader.ue("log2_max_frame_num_minus4")?;
-    skip_pic_order_count(&mut reader)?;
-    reader.ue("max_num_ref_frames")?;
-    reader.skip(1, "gaps_in_frame_num_value_allowed_flag")?;
-    reader.ue("pic_width_in_mbs_minus1")?;
-    reader.ue("pic_height_in_map_units_minus1")?;
-    if !reader.bit("frame_mbs_only_flag")? {
+    let (_, frame_mbs_only) = read_to_frame_mbs_only(&mut reader)?;
+    if !frame_mbs_only {
         reader.skip(1, "mb_adaptive_frame_field_flag")?;
     }
     reader.skip(1, "direct_8x8_inference_flag")?;
@@ -136,6 +184,53 @@ mod tests {
         let mut nal = vec![0x67, profile, 0, 30];
         nal.extend(pack_bits(body));
         nal
+    }
+
+    /// Sps id 0, frame num, poc type 2, one reference frame, one macroblock
+    /// each way, then `frame_mbs_only_flag`.
+    fn baseline_to_frame_flag(flag: &str) -> Vec<u8> {
+        sps(
+            66,
+            &["1", "1", "011", "010", "0", "1", "1", flag, "1"].concat(),
+        )
+    }
+
+    #[test]
+    fn facts_read_the_frame_flag_and_the_inferred_format() {
+        for (flag, frame_mbs_only) in [("1", true), ("0", false)] {
+            let facts = h264_sps_facts(&baseline_to_frame_flag(flag));
+            assert_eq!(
+                facts,
+                Ok(H264SpsFacts {
+                    profile_idc: 66,
+                    constraint_flags: 0,
+                    chroma_format_idc: 1,
+                    bit_depth_luma: 8,
+                    bit_depth_chroma: 8,
+                    frame_mbs_only,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn facts_read_high_10_depths() {
+        // Sps id 0, chroma 1, luma 2, chroma 2, no bypass, no scaling matrix,
+        // frame num, poc type 2, one reference frame, one macroblock each way.
+        let body = [
+            "1", "010", "011", "011", "0", "0", "1", "011", "010", "0", "1", "1", "1",
+        ];
+        let facts = h264_sps_facts(&sps(110, &body.concat()));
+        assert_eq!(
+            facts.map(|f| (f.bit_depth_luma, f.bit_depth_chroma, f.frame_mbs_only)),
+            Ok((10, 10, true))
+        );
+    }
+
+    #[test]
+    fn facts_refuse_a_short_sps() {
+        assert!(h264_sps_facts(&[0x67, 66, 0, 30]).is_err());
+        assert!(h264_sps_facts(&[0x68, 66, 0, 30, 0x80]).is_err());
     }
 
     /// A Main profile SPS with `vui` after `frame_cropping_flag`:

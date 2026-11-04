@@ -18,6 +18,61 @@ pub(crate) struct SequenceFields {
     pub(crate) subsampling_x: bool,
     pub(crate) subsampling_y: bool,
     pub(crate) chroma_sample_position: u8,
+    pub(crate) color_primaries: u8,
+    pub(crate) transfer_characteristics: u8,
+    pub(crate) matrix_coefficients: u8,
+    pub(crate) full_range: bool,
+}
+
+/// What a decoder reads from a sequence header: sample layout and colour.
+///
+/// Colour code points follow ITU-T H.273. A header without
+/// `color_description_present_flag` gives 2, unspecified, for all three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Av1SequenceFacts {
+    /// Bits per sample: 8, 10, or 12.
+    pub bit_depth: u8,
+    /// `mono_chrome`.
+    pub monochrome: bool,
+    /// `subsampling_x`.
+    pub subsampling_x: bool,
+    /// `subsampling_y`.
+    pub subsampling_y: bool,
+    /// `chroma_sample_position`, 0 to 3.
+    pub chroma_sample_position: u8,
+    /// `color_primaries`.
+    pub color_primaries: u8,
+    /// `transfer_characteristics`.
+    pub transfer_characteristics: u8,
+    /// `matrix_coefficients`.
+    pub matrix_coefficients: u8,
+    /// `color_range`: true for full range.
+    pub full_range: bool,
+}
+
+/// Reads the [`Av1SequenceFacts`] of a sequence header OBU payload.
+///
+/// # Errors
+///
+/// [`BitstreamError`] for a payload that ends early or a field out of range.
+pub fn av1_sequence_facts(payload: &[u8]) -> Result<Av1SequenceFacts, BitstreamError> {
+    let fields = parse(payload)?;
+    let bit_depth = match (fields.high_bitdepth, fields.twelve_bit) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    };
+    Ok(Av1SequenceFacts {
+        bit_depth,
+        monochrome: fields.mono_chrome,
+        subsampling_x: fields.subsampling_x,
+        subsampling_y: fields.subsampling_y,
+        chroma_sample_position: fields.chroma_sample_position,
+        color_primaries: fields.color_primaries,
+        transfer_characteristics: fields.transfer_characteristics,
+        matrix_coefficients: fields.matrix_coefficients,
+        full_range: fields.full_range,
+    })
 }
 
 /// `CP_BT_709`, `TC_SRGB`, and `MC_IDENTITY`.
@@ -136,16 +191,22 @@ fn color_config(
         subsampling_x: true,
         subsampling_y: true,
         chroma_sample_position: 0,
+        color_primaries: colors.0,
+        transfer_characteristics: colors.1,
+        matrix_coefficients: colors.2,
+        full_range: false,
     };
     if mono_chrome {
-        reader.skip(1, "color_range")?;
+        fields.full_range = reader.bit("color_range")?;
         return Ok(fields);
     }
     if colors == BT709_SRGB_IDENTITY {
+        // The specification sets `color_range` 1 for this triple and reads none.
+        fields.full_range = true;
         fields.subsampling_x = false;
         fields.subsampling_y = false;
     } else {
-        reader.skip(1, "color_range")?;
+        fields.full_range = reader.bit("color_range")?;
         (fields.subsampling_x, fields.subsampling_y) = match seq_profile {
             0 => (true, true),
             1 => (false, false),
@@ -185,6 +246,28 @@ pub(crate) mod tests {
                 subsampling_x: true,
                 subsampling_y: true,
                 chroma_sample_position: 0,
+                color_primaries: 2,
+                transfer_characteristics: 2,
+                matrix_coefficients: 2,
+                full_range: false,
+            })
+        );
+    }
+
+    #[test]
+    fn facts_name_the_depth_and_the_colour() {
+        assert_eq!(
+            av1_sequence_facts(&LIBAOM_PAYLOAD),
+            Ok(Av1SequenceFacts {
+                bit_depth: 8,
+                monochrome: false,
+                subsampling_x: true,
+                subsampling_y: true,
+                chroma_sample_position: 0,
+                color_primaries: 2,
+                transfer_characteristics: 2,
+                matrix_coefficients: 2,
+                full_range: false,
             })
         );
     }

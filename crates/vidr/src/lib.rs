@@ -12,8 +12,11 @@
 //! `pipeline::run` pumps a whole video through decode, transform, and encode on
 //! three threads. `pipeline::PumpControl` is in every build. `route::FrameRoute`
 //! states how a codec backend moves frames, and the pump counts each host copy
-//! from it. Software codecs, other hardware codecs, and the filter graph are
-//! roadmap items.
+//! from it. Behind `dav1d`, `decode::dav1d::Dav1dDecoder` decodes AV1 on the CPU.
+//! Behind `openh264` or `openh264-cisco`, `decode::openh264::Openh264Decoder`
+//! decodes H.264 Baseline on the CPU, and `encode::openh264::Openh264Encoder`
+//! encodes it. Other software codecs, other hardware codecs, and the filter graph
+//! are roadmap items.
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 pub mod bitstream;

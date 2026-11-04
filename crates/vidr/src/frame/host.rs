@@ -13,10 +13,12 @@
 //! For a display size of `W x H`, each chroma plane has `ceil(W / 2)` samples
 //! per row and `ceil(H / 2)` rows, so odd sizes round up.
 
+use std::any::TypeId;
 use std::fmt;
 
 use numr::dtype::DType;
 use numr::runtime::Runtime;
+use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
 
 use super::convert::{check_plane, numr_error, plane_shapes};
@@ -24,6 +26,7 @@ use crate::decode::{PixelFormat, PlaneForm};
 use crate::encode::EncodeFrame;
 use crate::error::FrameError;
 use crate::geometry::Dimensions;
+use crate::route::FrameRoute;
 
 /// The largest I010 sample value.
 const I010_MAX: u16 = 1023;
@@ -166,6 +169,28 @@ impl fmt::Debug for HostFrame {
             .field("height", &self.height)
             .field("format", &self.format)
             .finish()
+    }
+}
+
+/// The route of a CPU decoder whose frames go to tensors on `R`:
+/// [`FrameRoute::HostOnly`] on numr's CPU backend, else
+/// [`FrameRoute::HostUpload`].
+pub fn upload_route<R: Runtime>() -> FrameRoute {
+    if TypeId::of::<R>() == TypeId::of::<CpuRuntime>() {
+        FrameRoute::HostOnly
+    } else {
+        FrameRoute::HostUpload
+    }
+}
+
+/// The route of a CPU encoder whose frames come from tensors on `R`:
+/// [`FrameRoute::HostOnly`] on numr's CPU backend, else
+/// [`FrameRoute::HostDownload`].
+pub fn download_route<R: Runtime>() -> FrameRoute {
+    if TypeId::of::<R>() == TypeId::of::<CpuRuntime>() {
+        FrameRoute::HostOnly
+    } else {
+        FrameRoute::HostDownload
     }
 }
 
@@ -649,6 +674,21 @@ mod tests {
             width: 3,
             height: 3,
         }
+    }
+
+    #[test]
+    fn a_cpu_codec_on_the_cpu_backend_stays_on_the_host() {
+        assert_eq!(upload_route::<CpuRuntime>(), FrameRoute::HostOnly);
+        assert_eq!(download_route::<CpuRuntime>(), FrameRoute::HostOnly);
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn a_cpu_codec_on_a_device_backend_names_its_copy() {
+        use numr::runtime::wgpu::WgpuRuntime;
+
+        assert_eq!(upload_route::<WgpuRuntime>(), FrameRoute::HostUpload);
+        assert_eq!(download_route::<WgpuRuntime>(), FrameRoute::HostDownload);
     }
 
     /// The word path writes the bytes numr's packed form documents: each row

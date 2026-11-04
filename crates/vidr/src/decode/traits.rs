@@ -1,5 +1,5 @@
-//! The decoder interface every backend implements: NVDEC now, and the
-//! Vulkan Video and CPU paths later.
+//! The decoder interface every backend implements: NVDEC and the CPU decoders
+//! now, and Vulkan Video later.
 
 use numr::runtime::Runtime;
 
