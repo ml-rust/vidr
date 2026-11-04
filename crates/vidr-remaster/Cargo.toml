@@ -12,3 +12,9 @@ categories = ["multimedia::video", "command-line-utilities"]
 
 [dependencies]
 vidr = { path = "../vidr", version = "0.1.0" }
+# Reads and writes the provenance sidecar (JSON schema 1).
+serde_json = "1"
+# Hashes source and enhanced files for the provenance record.
+sha2 = "0.11"
+# Writes the sidecar atomically: temporary file in the same directory, then rename.
+tempfile = "3"

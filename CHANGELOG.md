@@ -23,5 +23,10 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `NvencEncoder` encodes H.264, HEVC, and AV1 as far as the GPU lists them, from NV12 or P010 planes on numr's CUDA context and stream. `libnvidia-encode.so.1` loads at run time, and the driver must support NVENC API 13.1.
   - Packets come out in decode order as MP4 samples, with exact pts, dts, and duration. `config_record` returns `avcC`, `hvcC`, or `av1C` after the first packet.
   - A codec, bit depth, B-frame count, or size the GPU refuses returns a named `EncodeError`. So does an odd H.264 or HEVC size, and a plane that does not match the config.
+- `vidr-remaster`: the pure logic of the Python proof of concept, as a library. The crate has no command-line interface yet.
+  - `choose_resolution` picks even output dimensions for the modes `auto`, `original`, `2x`, and the standard shorter edges 480 to 4320, with a 480-pixel minimum.
+  - `Request::validate` and `output_path` check the source, the output name and container, an existing output, the output directory, the encoder quality, and the `--from-upscaled` and `--force-ai` pair. Quality runs from 1 to 51, because NVENC refuses 0.
+  - `record_upscaled` and `check_record` write and check the `.upscale.json` sidecar, schema 1. The text equals the PoC's byte for byte. The write is atomic and the read stops at 64 KiB.
+  - `find_upscaled` selects a matching full-length upscale from the candidates beside the source, newest first. A `VideoProbe` supplies the video facts, and `check_match` compares them.
 - `vidr`: `ChromaLocation::to_h273` and `ChromaLocation::to_av1`.
 - `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.
