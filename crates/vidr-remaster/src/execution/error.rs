@@ -46,6 +46,11 @@ pub enum ExecutionError {
         /// Why the CPU path is out.
         cpu: Box<Self>,
     },
+    /// `--decoder vulkan` names a codec that has no Vulkan Video path yet.
+    VulkanCodec {
+        /// The video's codec.
+        codec: SourceCodec,
+    },
     /// OpenH264 takes Baseline only, and the source states another profile.
     H264NotBaseline {
         /// `profile_idc` of the source.
@@ -113,12 +118,19 @@ impl fmt::Display for ExecutionError {
                 f,
                 "No {side} fits this run. Hardware path: {hardware}. {cpu}"
             ),
+            Self::VulkanCodec { codec } => write!(
+                f,
+                "{} on Vulkan Video is not supported yet. --decoder vulkan decodes H.264 only in \
+                 this release. Pass --decoder auto or --decoder cpu.",
+                codec.name()
+            ),
             Self::H264NotBaseline { profile_idc } => write!(
                 f,
                 "OpenH264 decodes H.264 Baseline only, profile_idc 66, and this source states \
                  profile_idc {profile_idc}. A source with B-frames is refused, because \
                  OpenH264's B-slice output differs from the reference decode. Pass --decoder \
-                 nvdec on a cuda build, or re-encode the source as Baseline."
+                 nvdec on a cuda build, --decoder vulkan on a vulkan-video build, or re-encode \
+                 the source as Baseline."
             ),
             Self::HevcCpuEncode => f.write_str(
                 "HEVC has no CPU encoder here, by decision. Pass --codec av1 with the cpu-av1 \
@@ -140,8 +152,8 @@ impl fmt::Display for ExecutionError {
             ),
             Self::WrongRuntime { backend, runtime } => write!(
                 f,
-                "{backend} has no path on the {runtime} runtime. Pass --runtime cuda, or \
-                 --decoder cpu and --encoder cpu."
+                "{backend} has no path on the {runtime} runtime. Pass --runtime cuda for NVDEC \
+                 and NVENC, --runtime wgpu for Vulkan Video, or --decoder cpu and --encoder cpu."
             ),
         }
     }

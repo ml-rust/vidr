@@ -71,7 +71,7 @@ where
 {
     let failed = |error| decode_error(path, error);
     match backend {
-        DecoderBackend::Nvdec => Err(wrong_runtime::<R>(backend.name())),
+        DecoderBackend::Nvdec | DecoderBackend::Vulkan => Err(wrong_runtime::<R>(backend.name())),
         #[cfg(feature = "dav1d")]
         DecoderBackend::Dav1d => {
             let decoder = vidr::decode::dav1d::Dav1dDecoder::<R>::new(device, &decode.config);

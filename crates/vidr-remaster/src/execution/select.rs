@@ -3,7 +3,7 @@
 //! | Runtime | Decoders | Encoders |
 //! | --- | --- | --- |
 //! | CUDA | NVDEC, CPU | NVENC, CPU |
-//! | WebGPU | CPU | CPU |
+//! | WebGPU | Vulkan Video for H.264, CPU | CPU |
 //! | CPU | CPU | CPU |
 //!
 //! `auto` prefers the hardware path, then the CPU. A library check says only that
@@ -22,6 +22,8 @@ use super::error::ExecutionError;
 
 /// `profile_idc` of H.264 Baseline.
 const BASELINE: u8 = 66;
+/// Why Vulkan Video and another runtime do not fit.
+const VULKAN_RUNTIME: &str = "Vulkan Video frames live on WebGPU tensors";
 
 /// The part of a request that picks the execution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -171,7 +173,42 @@ impl Selector {
         })
     }
 
-    /// The flag that names a hardware path, when one does.
+    /// Whether `--decoder vulkan` holds.
+    fn wants_vulkan(&self) -> bool {
+        self.request.decoder == DecoderChoice::Vulkan
+    }
+
+    /// Refuses `--decoder vulkan` on a runtime with no path for it.
+    fn refuse_vulkan_on(&self, runtime: &str) -> Result<(), ExecutionError> {
+        if self.wants_vulkan() {
+            return Err(ExecutionError::Pair {
+                first: runtime.to_owned(),
+                second: "--decoder vulkan".to_owned(),
+                reason: VULKAN_RUNTIME,
+                working: "--runtime wgpu with that flag, or --decoder cpu",
+            });
+        }
+        Ok(())
+    }
+
+    fn require_wgpu(&self, what: &str) -> Result<(), ExecutionError> {
+        if !self.compiled.wgpu {
+            return Err(ExecutionError::NotBuilt {
+                what: what.to_owned(),
+                feature: "wgpu",
+            });
+        }
+        if let Err(reason) = &self.machine.wgpu {
+            return Err(ExecutionError::Unavailable {
+                what: what.to_owned(),
+                reason: reason.clone(),
+                next: "Install a WebGPU driver, or pass --runtime cpu.",
+            });
+        }
+        Ok(())
+    }
+
+    /// The CUDA flag that names a hardware path, when one does.
     fn hardware_flag(&self) -> Option<&'static str> {
         if self.request.decoder == DecoderChoice::Nvdec {
             Some("--decoder nvdec")
@@ -221,6 +258,7 @@ impl Selector {
         match self.request.runtime {
             RuntimeChoice::Auto => self.auto_runtime(),
             RuntimeChoice::Cuda => {
+                self.refuse_vulkan_on("--runtime cuda")?;
                 self.require_cuda("--runtime cuda")?;
                 Ok((RuntimeKind::Cuda, "--runtime cuda".to_owned()))
             }
@@ -229,19 +267,7 @@ impl Selector {
                     "--runtime wgpu",
                     "--runtime cuda with that flag, or --runtime wgpu --decoder cpu --encoder cpu",
                 )?;
-                if !self.compiled.wgpu {
-                    return Err(ExecutionError::NotBuilt {
-                        what: "--runtime wgpu".to_owned(),
-                        feature: "wgpu",
-                    });
-                }
-                if let Err(reason) = &self.machine.wgpu {
-                    return Err(ExecutionError::Unavailable {
-                        what: "--runtime wgpu".to_owned(),
-                        reason: reason.clone(),
-                        next: "Install a WebGPU driver, or pass --runtime cpu.",
-                    });
-                }
+                self.require_wgpu("--runtime wgpu")?;
                 Ok((RuntimeKind::Wgpu, "--runtime wgpu".to_owned()))
             }
             RuntimeChoice::Cpu => {
@@ -249,12 +275,28 @@ impl Selector {
                     "--runtime cpu",
                     "--runtime cuda with that flag, or --runtime cpu --decoder cpu --encoder cpu",
                 )?;
+                self.refuse_vulkan_on("--runtime cpu")?;
                 Ok((RuntimeKind::Cpu, "--runtime cpu".to_owned()))
             }
         }
     }
 
     fn auto_runtime(&self) -> Result<(RuntimeKind, String), ExecutionError> {
+        if self.wants_vulkan() {
+            if let Some(flag) = self.hardware_flag() {
+                return Err(ExecutionError::Pair {
+                    first: "--decoder vulkan".to_owned(),
+                    second: flag.to_owned(),
+                    reason: VULKAN_RUNTIME,
+                    working: "--decoder vulkan --encoder cpu",
+                });
+            }
+            self.require_wgpu("--decoder vulkan")?;
+            return Ok((
+                RuntimeKind::Wgpu,
+                "auto: --decoder vulkan runs on WebGPU.".to_owned(),
+            ));
+        }
         if let Some(flag) = self.hardware_flag() {
             self.require_cuda(flag)?;
             return Ok((RuntimeKind::Cuda, format!("auto: {flag} runs on CUDA.")));
@@ -284,8 +326,12 @@ impl Selector {
         ))
     }
 
-    /// NVDEC when `runtime` holds it, or why not.
-    fn hardware_decoder(&self, runtime: RuntimeKind) -> Result<DecoderBackend, String> {
+    /// The hardware decoder of `codec` that `runtime` holds, or why none fits.
+    fn hardware_decoder(
+        &self,
+        runtime: RuntimeKind,
+        codec: SourceCodec,
+    ) -> Result<DecoderBackend, String> {
         match runtime {
             RuntimeKind::Cuda => self
                 .machine
@@ -293,9 +339,14 @@ impl Selector {
                 .clone()
                 .map(|()| DecoderBackend::Nvdec)
                 .map_err(|reason| format!("NVDEC is out: {reason}")),
-            RuntimeKind::Wgpu => {
-                Err("the WebGPU runtime has no hardware decoder in this release".to_owned())
-            }
+            RuntimeKind::Wgpu => match (&self.machine.vulkan, codec) {
+                (Err(reason), _) => Err(format!("Vulkan Video is out: {reason}")),
+                (Ok(()), SourceCodec::H264) => Ok(DecoderBackend::Vulkan),
+                (Ok(()), other) => Err(format!(
+                    "{} on Vulkan Video is not supported yet",
+                    other.name()
+                )),
+            },
             RuntimeKind::Cpu => Err("the CPU runtime has no hardware decoder".to_owned()),
         }
     }
@@ -388,12 +439,39 @@ impl Selector {
                     reason,
                     next: "Install the NVIDIA driver, or pass --decoder cpu.",
                 }),
+            DecoderChoice::Vulkan => {
+                if !self.compiled.vulkan_video {
+                    return Err(ExecutionError::NotBuilt {
+                        what: "--decoder vulkan".to_owned(),
+                        feature: "vulkan-video",
+                    });
+                }
+                if video.codec != SourceCodec::H264 {
+                    return Err(ExecutionError::VulkanCodec { codec: video.codec });
+                }
+                self.machine
+                    .vulkan
+                    .clone()
+                    .map(|()| (DecoderBackend::Vulkan, "--decoder vulkan".to_owned()))
+                    .map_err(|reason| ExecutionError::Unavailable {
+                        what: "--decoder vulkan".to_owned(),
+                        reason,
+                        next: "Install a driver with VK_KHR_video_decode_h264, or pass --decoder \
+                               cpu.",
+                    })
+            }
             DecoderChoice::Cpu => {
                 let backend = self.cpu_decoder(video)?;
                 Ok((backend, format!("--decoder cpu: {}", cpu_reason(backend))))
             }
-            DecoderChoice::Auto => match self.hardware_decoder(runtime) {
-                Ok(backend) => Ok((backend, "auto: NVDEC is present.".to_owned())),
+            DecoderChoice::Auto => match self.hardware_decoder(runtime, video.codec) {
+                Ok(backend) => Ok((
+                    backend,
+                    match backend {
+                        DecoderBackend::Vulkan => "auto: Vulkan Video is present.".to_owned(),
+                        _ => "auto: NVDEC is present.".to_owned(),
+                    },
+                )),
                 Err(hardware) => match self.cpu_decoder(video) {
                     Ok(backend) => Ok((
                         backend,
@@ -461,6 +539,7 @@ impl Selector {
     fn reads_output(&self, decoder: DecoderBackend, encoder: EncoderBackend) -> bool {
         match decoder {
             DecoderBackend::Nvdec => true,
+            DecoderBackend::Vulkan => self.request.codec == Codec::H264,
             DecoderBackend::Dav1d => self.request.codec == Codec::Av1,
             DecoderBackend::Hevc => self.request.codec == Codec::Hevc,
             DecoderBackend::RustyVp9 => false,
@@ -489,7 +568,12 @@ impl Selector {
         if self.reads_output(decoder, encoder) {
             return Ok((decoder, "The run's decoder reads the output.".to_owned()));
         }
-        let hardware = self.hardware_decoder(runtime).ok();
+        let output = match self.request.codec {
+            Codec::Hevc => SourceCodec::Hevc,
+            Codec::H264 => SourceCodec::H264,
+            Codec::Av1 => SourceCodec::Av1,
+        };
+        let hardware = self.hardware_decoder(runtime, output).ok();
         let cpu = self.cpu_check_decoder(encoder);
         let first = if self.request.decoder == DecoderChoice::Cpu {
             cpu.or(hardware)
@@ -539,7 +623,7 @@ impl Selector {
         matches!(self.request.decoder, DecoderChoice::Auto)
     }
 
-    /// The CPU decoder of `video`, after NVDEC refused it for `reason`.
+    /// The CPU decoder of `video`, after a hardware decoder refused it for `reason`.
     ///
     /// # Errors
     ///
@@ -553,13 +637,14 @@ impl Selector {
             Ok(backend) => Ok((
                 backend,
                 format!(
-                    "auto: NVDEC refused the video: {reason} {backend} decodes {} on the CPU.",
+                    "auto: the hardware decoder refused the video: {reason} {backend} decodes {} \
+                     on the CPU.",
                     video.codec.name()
                 ),
             )),
             Err(cpu) => Err(ExecutionError::NoPath {
                 side: "decoder",
-                hardware: format!("NVDEC refused the video: {reason}"),
+                hardware: format!("the hardware decoder refused the video: {reason}"),
                 cpu: Box::new(cpu),
             }),
         }
@@ -608,6 +693,7 @@ mod tests {
             nvdec: out(),
             nvenc: out(),
             wgpu: out(),
+            vulkan: out(),
         }
     }
 

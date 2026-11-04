@@ -1,0 +1,119 @@
+//! Whole runs on the WebGPU runtime with Vulkan Video decode and a CPU encoder.
+//!
+//! Run with `cargo nextest run -p vidr-remaster --features
+//! mp4,vulkan-video,openh264,cpu-av1,dav1d --test e2e_vulkan`. No Vulkan video device, a
+//! missing ffmpeg, or a missing ffmpeg encoder skips with a printed notice.
+
+#![cfg(all(
+    feature = "vulkan-video",
+    feature = "transform",
+    feature = "mp4",
+    feature = "openh264"
+))]
+
+#[path = "e2e_cpu/harness.rs"]
+mod harness;
+
+use vidr_remaster::ResolutionMode;
+
+use harness::{Case, Run, assert_complete};
+
+const FRAMES: u32 = 5;
+/// libx264 High with B-frames, which OpenH264 refuses.
+const HIGH: [&str; 6] = ["-c:v", "libx264", "-preset", "fast", "-bf", "2"];
+
+fn start(name: &str) -> Option<Case> {
+    if let Err(error) = vidr::vulkan::vulkan_video_available() {
+        eprintln!("skipping: {error}");
+        return None;
+    }
+    let case = Case::start(name)?;
+    case.first_encoder(&["libx264"])?;
+    Some(case)
+}
+
+fn assert_vulkan_path(run: &Run, frames: u64) {
+    let path = run.frame_path();
+    assert_eq!(path["runtime"], "wgpu");
+    assert_eq!(path["decoder"]["name"], "vulkan");
+    assert_eq!(path["decoder"]["route"], "device");
+    assert_eq!(path["encoder"]["name"], "openh264");
+    assert_eq!(path["encoder"]["route"], "host download");
+    assert_eq!(path["output_check_decoder"], "vulkan");
+    assert_eq!(
+        path["host_copied_frames"], frames,
+        "the encoder's copy only"
+    );
+}
+
+fn from_upscaled(case: &mut Case, decoder: &str) -> Run {
+    let source = case.source("clip.mp4", FRAMES, &HIGH);
+    let enhanced = case.enhanced("up.mp4", FRAMES, &HIGH);
+    let output = case.path("out.mp4");
+    let run = case.run_on(
+        "wgpu",
+        &source,
+        &[
+            "--codec",
+            "h264",
+            "--decoder",
+            decoder,
+            "--encoder",
+            "cpu",
+            "--from-upscaled",
+            enhanced.to_str().expect("a UTF-8 path"),
+            "-o",
+            output.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    assert_complete(&run, &source, &output, ResolutionMode::Auto);
+    run
+}
+
+#[test]
+fn an_explicit_vulkan_decoder_keeps_frames_and_timing() {
+    let Some(mut case) = start("vulkan_explicit") else {
+        return;
+    };
+    let run = from_upscaled(&mut case, "vulkan");
+    assert_vulkan_path(&run, u64::from(FRAMES));
+}
+
+#[test]
+fn auto_on_webgpu_picks_vulkan_for_h264() {
+    let Some(mut case) = start("vulkan_auto") else {
+        return;
+    };
+    let run = from_upscaled(&mut case, "auto");
+    assert_vulkan_path(&run, u64::from(FRAMES));
+}
+
+/// An explicit request on another codec names the absence, before any work.
+#[test]
+fn an_explicit_request_on_hevc_is_not_supported_yet() {
+    let Some(mut case) = start("vulkan_hevc") else {
+        return;
+    };
+    let Some(encoder) = case.first_encoder(&["libx265"]) else {
+        return;
+    };
+    let source = case.source("clip.mp4", FRAMES, &["-c:v", encoder, "-tag:v", "hvc1"]);
+    let output = case.path("out.mp4");
+    let run = case.run_on(
+        "wgpu",
+        &source,
+        &[
+            "--codec",
+            "h264",
+            "--decoder",
+            "vulkan",
+            "--encoder",
+            "cpu",
+            "-o",
+            output.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    let error = run.error();
+    assert!(error.contains("not supported yet"), "{error}");
+    assert!(!output.exists(), "no output");
+}

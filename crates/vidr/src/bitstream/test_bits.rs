@@ -25,7 +25,7 @@ impl BitWriter {
     }
 
     /// Writes an unsigned Exp-Golomb code.
-    #[cfg(feature = "hevc")]
+    #[cfg(any(feature = "hevc", feature = "vulkan-video"))]
     pub(crate) fn ue(&mut self, value: u32) -> &mut Self {
         let code = u64::from(value) + 1;
         let length = 64 - code.leading_zeros();
@@ -33,14 +33,14 @@ impl BitWriter {
     }
 
     /// Writes a signed Exp-Golomb code.
-    #[cfg(feature = "hevc")]
+    #[cfg(any(feature = "hevc", feature = "vulkan-video"))]
     pub(crate) fn se(&mut self, value: i64) -> &mut Self {
         let code = if value > 0 { 2 * value - 1 } else { -2 * value };
         self.ue(code as u32)
     }
 
     /// Writes a stop bit, then zero bits to a byte boundary.
-    #[cfg(feature = "hevc")]
+    #[cfg(any(feature = "hevc", feature = "vulkan-video"))]
     pub(crate) fn trailing(&mut self) -> &mut Self {
         self.bits.push(true);
         self.align()
@@ -66,19 +66,27 @@ impl BitWriter {
     }
 }
 
+/// `bytes` with an emulation prevention byte before each byte that needs one.
+#[cfg(any(feature = "hevc", feature = "vulkan-video"))]
+pub(crate) fn escape(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut zeros = 0usize;
+    for &byte in bytes {
+        if zeros >= 2 && byte <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        out.push(byte);
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+    }
+    out
+}
+
 /// Builds an HEVC NAL unit with emulation prevention, at layer 0 and
 /// `TemporalId` 0.
 #[cfg(feature = "hevc")]
 pub(crate) fn hevc_nal(nal_unit_type: u8, rbsp: &[u8]) -> Vec<u8> {
     let mut nal = vec![nal_unit_type << 1, 1];
-    let mut zeros = 0usize;
-    for &byte in rbsp {
-        if zeros >= 2 && byte <= 3 {
-            nal.push(3);
-            zeros = 0;
-        }
-        nal.push(byte);
-        zeros = if byte == 0 { zeros + 1 } else { 0 };
-    }
+    nal.extend(escape(rbsp));
     nal
 }

@@ -15,8 +15,9 @@
 //! from it. Behind `dav1d`, `decode::dav1d::Dav1dDecoder` decodes AV1 on the CPU.
 //! Behind `openh264` or `openh264-cisco`, `decode::openh264::Openh264Decoder`
 //! decodes H.264 Baseline on the CPU, and `encode::openh264::Openh264Encoder`
-//! encodes it. Other software codecs, other hardware codecs, and the filter graph
-//! are roadmap items.
+//! encodes it. Behind `vulkan-video`, `vulkan::VulkanDecoder` decodes H.264 on Vulkan
+//! Video into numr WebGPU tensors. Other software codecs, other hardware codecs, and
+//! the filter graph are roadmap items.
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 pub mod bitstream;
@@ -36,6 +37,8 @@ pub mod media;
 pub mod pipeline;
 pub mod route;
 pub mod time;
+#[cfg(feature = "vulkan-video")]
+pub mod vulkan;
 
 pub use check::{
     CheckError, DURATION_TOLERANCE, Deviation, Side, StreamFacts, TrackClass, TrackFacts,

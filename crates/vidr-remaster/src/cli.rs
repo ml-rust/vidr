@@ -84,7 +84,7 @@ struct Cli {
     /// Select the decoder (default: auto, hardware then CPU).
     #[arg(
         long,
-        value_name = "auto|nvdec|cpu",
+        value_name = "auto|nvdec|vulkan|cpu",
         default_value_t = DecoderChoice::default(),
         hide_default_value = true
     )]

@@ -13,7 +13,8 @@ mod dav1d;
     feature = "openh264",
     feature = "openh264-cisco",
     feature = "cpu-vp9",
-    feature = "cpu-hevc"
+    feature = "cpu-hevc",
+    feature = "vulkan-video"
 ))]
 mod decode_fixtures;
 #[cfg(feature = "frame")]
@@ -40,3 +41,5 @@ mod rav1r;
 #[cfg(feature = "cpu-vp9")]
 mod rusty_vp9;
 mod timing;
+#[cfg(feature = "vulkan-video")]
+mod vulkan;

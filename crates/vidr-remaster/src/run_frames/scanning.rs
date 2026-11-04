@@ -95,16 +95,24 @@ pub(super) fn open_frames(path: &Path) -> Result<OpenedFrames, RemasterError> {
 pub(super) struct ChosenScan {
     pub(super) scan: ScanFacts,
     pub(super) backend: DecoderBackend,
-    /// Why NVDEC gave way to a CPU decoder, when it did.
+    /// Why a hardware decoder gave way to a CPU decoder, when it did.
     pub(super) fell_through: Option<String>,
 }
 
-/// Whether the error states what the GPU cannot do. Other errors state what the
-/// stream holds, and a CPU decoder gives nothing better for those.
+/// Whether the error states what this decoder cannot do, so another decoder can read the
+/// stream. Other errors state what the stream holds, what no vidr decoder takes, or a
+/// stalled GPU, and a CPU decoder gives nothing better for those.
 const fn refused_by_hardware(error: &DecodeError) -> bool {
     matches!(
         error,
-        DecodeError::Unsupported { .. } | DecodeError::CodedSize { .. }
+        DecodeError::Unsupported { .. }
+            | DecodeError::CodedSize { .. }
+            | DecodeError::VulkanRefused { .. }
+            | DecodeError::VulkanUnavailable { .. }
+            | DecodeError::VulkanNoMemoryType { .. }
+            | DecodeError::H264Tool { .. }
+            | DecodeError::H264Interlaced { .. }
+            | DecodeError::H264BitDepth { .. }
     )
 }
 
@@ -138,8 +146,8 @@ impl<'a, R: RunRuntime> Scanner<'a, R> {
         self.copies
     }
 
-    /// Scans `path` on `first`. Under `--decoder auto`, a video NVDEC refuses goes to
-    /// the CPU decoder of its codec.
+    /// Scans `path` on `first`. Under `--decoder auto`, a video that NVDEC or Vulkan
+    /// Video refuses goes to the CPU decoder of its codec.
     pub(super) fn scan<P: FnMut(Progress)>(
         &mut self,
         first: DecoderBackend,
@@ -148,7 +156,7 @@ impl<'a, R: RunRuntime> Scanner<'a, R> {
     ) -> Result<ChosenScan, RemasterError> {
         match self.scan_file(first, path, progress) {
             Err(RemasterError::Decode { error, .. })
-                if first == DecoderBackend::Nvdec
+                if matches!(first, DecoderBackend::Nvdec | DecoderBackend::Vulkan)
                     && self.selector.decoder_is_auto()
                     && refused_by_hardware(&error) =>
             {
@@ -341,4 +349,92 @@ pub(super) fn select_existing<R: RunRuntime, P: FnMut(Progress)>(
         progress(Progress::Skipped(candidate));
     }
     Ok(selected.and_then(|path| scanned.remove(&path)))
+}
+
+#[cfg(test)]
+mod tests {
+    use vidr::decode::ChromaFormat;
+
+    use super::*;
+
+    const DECODER: &str = "Vulkan Video";
+
+    #[test]
+    fn a_refusal_another_decoder_can_read_falls_through() {
+        let tool = DecodeError::H264Tool {
+            decoder: DECODER,
+            field: "num_slice_groups_minus1",
+            value: 1,
+            supported: "0",
+        };
+        let gap = DecodeError::H264Tool {
+            decoder: DECODER,
+            field: "a gap in frame_num at frame_num",
+            value: 9,
+            supported: "consecutive frame numbers",
+        };
+        let memory = DecodeError::VulkanNoMemoryType {
+            what: "a DPB image".to_owned(),
+            required: "DEVICE_LOCAL".to_owned(),
+            type_bits: 1,
+        };
+        for error in [
+            tool,
+            gap,
+            memory,
+            DecodeError::H264Interlaced { decoder: DECODER },
+            DecodeError::H264BitDepth {
+                decoder: DECODER,
+                luma: 10,
+                chroma: 10,
+            },
+            DecodeError::VulkanUnavailable {
+                reason: "no device".to_owned(),
+            },
+            DecodeError::VulkanRefused {
+                codec: DecodeCodec::H264,
+                what: "level_idc 99".to_owned(),
+                reason: "H.264 names no such level".to_owned(),
+            },
+        ] {
+            assert!(refused_by_hardware(&error), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_stall_a_damaged_stream_or_a_layout_no_decoder_takes_does_not_fall_through() {
+        for error in [
+            DecodeError::VulkanCopyTimeout {
+                seconds: 60,
+                reason: "Timeout".to_owned(),
+            },
+            DecodeError::VulkanDecodeRequest {
+                pts: 1,
+                reason: "DPB slot 7 does not exist".to_owned(),
+            },
+            DecodeError::VulkanDecodeStatus {
+                status: -1,
+                name: "ERROR",
+                pts: 1,
+            },
+            DecodeError::H264References {
+                decoder: DECODER,
+                pts: 1,
+                reason: "no SPS is active".to_owned(),
+            },
+            DecodeError::H264Header {
+                decoder: DECODER,
+                unit: "slice",
+                reason: "cut".to_owned(),
+            },
+            DecodeError::UnsupportedLayout {
+                codec: DecodeCodec::H264,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                chroma: ChromaFormat::Yuv422,
+            },
+        ] {
+            assert!(!refused_by_hardware(&error), "{error}");
+        }
+    }
 }

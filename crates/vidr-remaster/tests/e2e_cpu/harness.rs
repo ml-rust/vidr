@@ -163,12 +163,19 @@ impl Case {
         path
     }
 
-    /// Runs the command on `source` with `flags`, on its own state directory.
+    /// Runs the command on `source` with `flags` on the CPU runtime, on its own state
+    /// directory.
     pub fn run(&mut self, source: &Path, flags: &[&str]) -> Run {
+        self.run_on("cpu", source, flags)
+    }
+
+    /// Runs the command on `source` with `flags` on `runtime`, on its own state
+    /// directory.
+    pub fn run_on(&mut self, runtime: &str, source: &Path, flags: &[&str]) -> Run {
         self.runs += 1;
         let state = self.state.join(self.runs.to_string());
         let mut args: Vec<OsString> = vec!["vidr-remaster".into(), source.into()];
-        args.extend(["--runtime", "cpu"].iter().map(OsString::from));
+        args.extend(["--runtime", runtime].iter().map(OsString::from));
         args.extend(flags.iter().map(OsString::from));
         let request = parse_request(args).expect("the flags parse");
         let control = PumpControl::new();

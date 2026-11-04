@@ -1,9 +1,8 @@
 //! The values of `--runtime`, `--decoder`, and `--encoder`, and what `auto` and
 //! `cpu` resolve to.
 //!
-//! Vulkan Video joins as one more value of each choice and one more backend of each
-//! kind. The WebGPU runtime is its home, so `Selector` holds one match per runtime
-//! for the hardware side.
+//! The WebGPU runtime is Vulkan Video's home, and `Selector` holds one match per
+//! runtime for the hardware side.
 
 use std::fmt;
 use std::str::FromStr;
@@ -98,10 +97,12 @@ choice! {
 
 choice! {
     /// `--decoder`.
-    DecoderChoice, "--decoder", "auto, nvdec, or cpu",
+    DecoderChoice, "--decoder", "auto, nvdec, vulkan, or cpu",
     {
         /// NVDEC, on the CUDA runtime.
         Nvdec => "nvdec",
+        /// Vulkan Video, on the WebGPU runtime.
+        Vulkan => "vulkan",
         /// The CPU decoder of the source's codec.
         Cpu => "cpu",
     }
@@ -169,6 +170,8 @@ pub enum Openh264Build {
 pub enum DecoderBackend {
     /// NVDEC. Frames stay in device memory.
     Nvdec,
+    /// Vulkan Video, H.264. Frames stay in device memory.
+    Vulkan,
     /// `Dav1dDecoder`, AV1.
     Dav1d,
     /// `RustyVp9Decoder`, VP9.
@@ -184,6 +187,7 @@ impl DecoderBackend {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Nvdec => "nvdec",
+            Self::Vulkan => "vulkan",
             Self::Dav1d => "dav1d",
             Self::RustyVp9 => "rusty_vp9",
             Self::Hevc => "hevc",
@@ -195,7 +199,7 @@ impl DecoderBackend {
     /// The route the backend declares on `runtime`.
     pub const fn route_on(self, runtime: RuntimeKind) -> FrameRoute {
         match (self, runtime) {
-            (Self::Nvdec, _) => FrameRoute::Device,
+            (Self::Nvdec | Self::Vulkan, _) => FrameRoute::Device,
             (_, RuntimeKind::Cpu) => FrameRoute::HostOnly,
             (_, RuntimeKind::Cuda | RuntimeKind::Wgpu) => FrameRoute::HostUpload,
         }
@@ -265,10 +269,10 @@ mod tests {
 
     #[test]
     fn an_unknown_value_names_the_flag_and_the_choices() {
-        let error = "vulkan".parse::<DecoderChoice>().expect_err("refused");
+        let error = "vaapi".parse::<DecoderChoice>().expect_err("refused");
         assert_eq!(
             error.to_string(),
-            "Unsupported --decoder 'vulkan'. Use auto, nvdec, or cpu."
+            "Unsupported --decoder 'vaapi'. Use auto, nvdec, vulkan, or cpu."
         );
     }
 
@@ -276,6 +280,10 @@ mod tests {
     fn a_hardware_backend_stays_on_the_device_and_a_cpu_backend_copies() {
         assert_eq!(
             DecoderBackend::Nvdec.route_on(RuntimeKind::Cuda),
+            FrameRoute::Device
+        );
+        assert_eq!(
+            DecoderBackend::Vulkan.route_on(RuntimeKind::Wgpu),
             FrameRoute::Device
         );
         assert_eq!(

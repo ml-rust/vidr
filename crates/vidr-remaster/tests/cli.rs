@@ -172,7 +172,7 @@ fn unknown_values_are_refused_and_name_the_choices() {
         (["--model", "tensorrt"], "fast, realesrgan, or purevision"),
         (["--codec", "vp9"], "hevc, h264, or av1"),
         (["--runtime", "metal"], "auto, cuda, wgpu, or cpu"),
-        (["--decoder", "vulkan"], "auto, nvdec, or cpu"),
+        (["--decoder", "dxva"], "auto, nvdec, vulkan, or cpu"),
         (["--encoder", "vulkan"], "auto, nvenc, or cpu"),
         (["--resolution", "999"], "auto, original, 2x"),
     ];

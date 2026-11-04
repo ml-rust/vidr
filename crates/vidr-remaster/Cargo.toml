@@ -30,6 +30,9 @@ f16 = ["numr?/f16", "boostr?/f16"]
 cuda = ["transform", "vidr/cuda", "boostr/cuda", "numr/cuda"]
 # numr's WebGPU runtime, with CPU codecs. No hardware codec exists on it yet.
 wgpu = ["transform", "vidr/wgpu", "numr/wgpu", "boostr?/wgpu"]
+# H.264 hardware decode on Vulkan Video, on the WebGPU runtime. Frames stay on the
+# device. Other codecs on this runtime take their CPU decoders.
+vulkan-video = ["wgpu", "vidr/vulkan-video"]
 # AV1 decode on libdav1d, through pkg-config. One host copy per frame.
 dav1d = ["transform", "vidr/dav1d"]
 # VP9 decode on rusty_vp9, pure Rust. One host copy per frame. See the README on

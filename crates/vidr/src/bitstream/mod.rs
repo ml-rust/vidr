@@ -98,7 +98,7 @@ mod vp9_header;
 
 #[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
 mod header_oracle;
-#[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
+#[cfg(all(test, any(feature = "hevc", feature = "vp9", feature = "vulkan-video")))]
 pub(crate) mod test_bits;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]

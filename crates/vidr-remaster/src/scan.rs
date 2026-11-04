@@ -152,7 +152,8 @@ impl fmt::Display for ScanError {
             ScanRefusal::CountMismatch { frames, packets } => write!(
                 f,
                 "The decoder returns {frames} frame(s) from {packets} packet(s) of {path}, and \
-                 the output check needs one frame per packet. Repair or remux the source first."
+                 the output check needs one frame per packet. Repair or remux the source first. \
+                 A stream that sets `no_output_of_prior_pics_flag` needs a re-encode."
             ),
         }
     }

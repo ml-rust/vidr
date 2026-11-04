@@ -68,6 +68,17 @@ pipeline = ["decode", "encode", "frame"]
 wgpu = ["numr/wgpu"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
+# Hardware decode on Vulkan Video, H.264 for now, on numr's WebGPU device. vidr
+# opens that device through wgpu-hal with the video extensions and queue, then
+# numr adopts it. The Vulkan loader loads at run time, so the build links no driver.
+vulkan-video = [
+  "frame",
+  "h264",
+  "wgpu",
+  "dep:ash",
+  "dep:h264-reader",
+  "dep:wgpu",
+]
 # AV1 software decode on libdav1d. Links libdav1d 1.3.0 or newer, found through
 # pkg-config. Each frame takes one copy through host memory.
 dav1d = ["frame", "av1", "dep:dav1d"]
@@ -107,6 +118,12 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
   "cuda-version-from-build-system",
 ] }
 libloading = { version = "0.9", optional = true }
+# Vulkan bindings, the version wgpu-hal uses, so one copy links.
+ash = { version = "0.38", optional = true }
+# The version numr uses, so `wgpu::Device` and `wgpu::Buffer` are one type.
+wgpu = { version = "30.0", optional = true }
+# SPS, PPS, and slice headers for Vulkan's `StdVideo` structures.
+h264-reader = { version = "0.9", optional = true }
 dav1d = { version = "0.11", optional = true }
 openh264 = { version = "0.9", optional = true, default-features = false }
 rav1r = { version = "0.1", optional = true, default-features = false, features = [

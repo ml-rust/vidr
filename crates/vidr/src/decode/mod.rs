@@ -10,6 +10,7 @@
 //! | OpenH264, H.264 Baseline on the CPU | `openh264`, `openh264-cisco` | `openh264::Openh264Decoder` |
 //! | rusty_vp9, VP9 on the CPU | `cpu-vp9` | `rusty_vp9::RustyVp9Decoder` |
 //! | This crate's own HEVC core, Main and Main 10 on the CPU | `cpu-hevc` | `hevc::HevcDecoder` |
+//! | Vulkan Video, H.264 8-bit 4:2:0 on numr's WebGPU device | `vulkan-video` | `crate::vulkan::VulkanDecoder` |
 //!
 //! Frames come out as [`DecodedFrame`]: NV12 or P010 planes on the decoder's
 //! device, as samples or packed words, ready for numr's `ColorOps::yuv_to_rgb`.
@@ -37,7 +38,12 @@ pub use codec::{ChromaFormat, DecodeCodec, PixelFormat};
 pub(crate) use color::unspecified_color;
 #[cfg(any(feature = "nvdec", feature = "cpu-vp9"))]
 pub(crate) use color::vp9_matrix;
-#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+#[cfg(any(
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc",
+    feature = "vulkan-video"
+))]
 pub(crate) use color::vui_color;
 pub use color::{
     ChromaLocation, ColorFacts, MATRIX_BT470BG, MATRIX_BT709, MATRIX_FCC, MATRIX_SMPTE170M,

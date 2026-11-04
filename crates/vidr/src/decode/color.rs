@@ -5,7 +5,12 @@
 
 use numr::ops::{ChromaSiting, ColorMatrix, ColorRange, YuvSpec};
 
-#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+#[cfg(any(
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc",
+    feature = "vulkan-video"
+))]
 use crate::bitstream::VuiSignal;
 
 /// H.273 `MatrixCoefficients` 1: ITU-R BT.709.
@@ -53,7 +58,12 @@ pub(crate) const fn vp9_matrix(color_space: u8) -> u8 {
 }
 
 /// Colour before any VUI states one.
-#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+#[cfg(any(
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc",
+    feature = "vulkan-video"
+))]
 pub(crate) const fn unspecified_color() -> ColorFacts {
     ColorFacts {
         matrix_coefficients: MATRIX_UNSPECIFIED,
@@ -65,7 +75,12 @@ pub(crate) const fn unspecified_color() -> ColorFacts {
 }
 
 /// Colour from an H.264 or HEVC SPS VUI. A missing field stays unspecified.
-#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+#[cfg(any(
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc",
+    feature = "vulkan-video"
+))]
 pub(crate) fn vui_color(vui: &VuiSignal) -> ColorFacts {
     let mut color = unspecified_color();
     if let Some(signal) = vui.video_signal_type {

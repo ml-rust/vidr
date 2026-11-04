@@ -132,6 +132,21 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - The provenance sidecar adds `decoder` and `encoder` for a run off NVDEC and NVENC. A hardware run writes the same bytes as before. A candidate recorded with another encoder stops the automatic reuse, and `--from-upscaled` and `--force-ai` still apply.
   - `--notices` prints the licence and patent notices of each codec in the build, from `crates/vidr-remaster/notices/`. `--help` states that rav1r is a fork of rav1e, under BSD-2-Clause and the AOM Patent License 1.0.
 - `vidr`: a test and fixture for a VP9 superframe with two shown frames. `RustyVp9Decoder` returns the last, so the pump keeps one frame per packet. A decoder that returns two frames at one pts ends the run in `PipelineError::Timing`.
+- `vidr`: H.264 hardware decode on Vulkan Video behind `vulkan-video`, in `vulkan`.
+  - `VulkanDevice::open_shared` opens the device through wgpu-hal with the video extensions and a decode queue, and installs it as numr's WebGPU device 0. `vulkan_video_available` checks a machine and opens nothing.
+  - `VulkanDecoder` implements `Decoder<WgpuRuntime>` for 8-bit 4:2:0 Baseline, Main, and High frames, from `avcC` samples or Annex-B, with `FrameRoute::Device`. It tracks POC types 0, 1, and 2, sliding window and MMCO marking, and output order. An SPS change at IDR opens a new session when the old one does not fit.
+  - Frames hold `PlaneForm::Words` planes. Each plane reaches a numr buffer through `vkCmdCopyImageToBuffer` on wgpu's queue, with no host copy.
+  - Field and MBAFF coding, other profiles and depths, slice groups, data partitioning, and `frame_num` gaps return a named `DecodeError`. `H264Tool`, `H264Header`, `H264References`, `Vulkan`, `VulkanRefused`, `VulkanUnavailable`, `VulkanDecodeStatus`, `VulkanCopyTimeout`, `VulkanNoMemoryType`, and `VulkanDecodeRequest` are new.
+  - A new session takes its reset inside its first picture's coding scope, with session parameters bound, so no driver needs `videoMaintenance2`.
+  - Distinct DPB mode holds a barrier from the decode that writes a slot to the decode that reads it. A slot's discard holds the earlier write, in both modes.
+  - Each SPS activation checks `level_idc` and the capabilities, also for a sequence that keeps its session. A level change opens a new session. NV12 with a non-identity `componentMapping` is refused by name.
+  - The setup slot states the picture as marking leaves it: long-term for an IDR picture with `long_term_reference_flag` and for operation 6, and `frame_num` 0 with the rebased order count for operation 5.
+  - `no_output_of_prior_pics_flag` follows ITU-T H.264 C.4.4: the flag, or a new frame size or `max_dec_frame_buffering` at an IDR picture, removes each waiting frame with no output.
+  - Dropping a decoder waits for its last decode and for wgpu's queue, each for at most 60 s. After a timeout or a lost device, its Vulkan objects stay allocated for the life of the process.
+  - Slices stay in the packet until the decode, and go straight into a bitstream buffer that stays mapped. A write to non-coherent memory still ends with a flush.
+  - It depends on `ash` 0.38, `wgpu` 30, and `h264-reader` 0.9. `vulkan::gap` holds the VP9 decode `pNext` layouts `ash` lacks, for a later unit.
+- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264. The encoder stays on the CPU, and other codecs take CPU decoders.
+- `vidr-remaster`: under `--decoder auto`, the refusals `H264Tool`, `H264Interlaced`, `H264BitDepth`, and `VulkanNoMemoryType` fall through to a CPU decoder. `VulkanCopyTimeout` ends the run.
 
 ### Changed
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the decode fixtures for `tests/nvdec/`, `tests/dav1d/`, `tests/openh264/`, and `tests/rusty_vp9/`.
+"""Generate the decode fixtures for `tests/nvdec/`, `tests/dav1d/`, `tests/openh264/`, `tests/rusty_vp9/`, and `tests/vulkan/`.
 
 Run from any directory:
 
@@ -40,6 +40,12 @@ second frame of each sample, from ffmpeg's decode of the single-frame stream. li
 returns the last shown frame of a chunk, and ffmpeg splits a superframe and returns
 both. The meta file holds `codec`, `width`, `height`, and `format`.
 
+`h264_no_output_prior` is `h264_8bit`'s encode with `no_output_of_prior_pics_flag` set to 1
+on every IDR picture but the first. ffmpeg's H.264 decoder ignores the flag, so its decode
+gives the bytes of each frame, and ITU-T H.264 C.4.4 gives which frames stay. `NAME.frames`
+and `NAME.yuv` hold those frames only. Where ffmpeg has `h264_cuvid`, the script exits when
+that decoder keeps other frames. The stream has no `NAME.mp4`, which would not hold the edit.
+
 The tests read `VIDR_NVDEC_FIXTURES` first, then the default directory.
 """
 
@@ -54,6 +60,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_bitstream import QUIET, extract  # noqa: E402
+from gen_hevc import Bits, escape, unescape  # noqa: E402
 
 SIZE = "320x180"
 # An odd display size: the chroma plane is ceil(W/2) x ceil(H/2) samples.
@@ -143,6 +150,18 @@ STREAMS = [
     # OpenH264's profile vidr passes. The other H.264 streams are its refusals.
     ("h264_baseline", "h264", "yuv420p",
      ["-c:v", "libx264", "-profile:v", "baseline", "-g", "5"], "nv12"),
+    # What the Vulkan Video tests add: Main, a B pyramid, reference marking commands
+    # from a short reference list, several slices per picture, and scaling lists.
+    ("h264_main", "h264", "yuv420p",
+     ["-c:v", "libx264", "-profile:v", "main", "-g", "5", "-bf", "2"], "nv12"),
+    ("h264_bpyramid", "h264", "yuv420p",
+     ["-c:v", "libx264", "-x264-params", "bframes=3:b-pyramid=normal:ref=4:keyint=8"], "nv12"),
+    ("h264_mmco", "h264", "yuv420p",
+     ["-c:v", "libx264", "-x264-params", "bframes=3:b-pyramid=normal:ref=2:keyint=8"], "nv12"),
+    ("h264_slices", "h264", "yuv420p", [*X264, "-slices", "4"], "nv12"),
+    ("h264_cqm", "h264", "yuv420p", [*X264, "-x264-params", "cqm=jvt"], "nv12"),
+    # `h264_8bit`'s encode, then `SAMPLE_EDITS` sets a flag in its IDR pictures.
+    ("h264_no_output_prior", "h264", "yuv420p", X264, "nv12"),
     # AV1 layouts with no vidr frame. dav1d's tests expect `UnsupportedLayout`.
     ("av1_12bit", "av1", "yuv420p12le", AOM, None),
     ("av1_422", "av1", "yuv422p10le", AOM, None),
@@ -362,6 +381,192 @@ def write_vp9_two_shown(out):
     return True
 
 
+def avcc_sets(config):
+    """Returns the length field size, the SPS list and the PPS list of an `avcC` payload."""
+    size = (config[4] & 3) + 1
+    at = 6
+    lists = []
+    for count in (config[5] & 0x1F, None):
+        if count is None:
+            count = config[at]
+            at += 1
+        units = []
+        for _ in range(count):
+            length = struct.unpack_from(">H", config, at)[0]
+            units.append(config[at + 2:at + 2 + length])
+            at += 2 + length
+        lists.append(units)
+    return size, lists[0], lists[1]
+
+
+def idr_header_facts(sps, pps):
+    """Returns what an IDR I slice header needs: `frame_num` bits, POC type and LSB bits,
+    the PPS's bottom-field flag, and its redundant picture flag."""
+    reader = Bits(unescape(sps[1:]))
+    profile_idc = reader.take(8)
+    reader.take(16)  # constraint flags, level_idc
+    reader.ue()  # seq_parameter_set_id
+    if profile_idc in (100, 110, 122, 244, 44, 83, 86, 118, 128):
+        if reader.ue() == 3:  # chroma_format_idc
+            reader.take()  # separate_colour_plane_flag
+        reader.ue()  # bit_depth_luma_minus8
+        reader.ue()  # bit_depth_chroma_minus8
+        reader.take()  # qpprime_y_zero_transform_bypass_flag
+        if reader.take():  # seq_scaling_matrix_present_flag
+            sys.exit("the IDR flag edit takes a stream with no SPS scaling matrix")
+    frame_num_bits = reader.ue() + 4
+    poc_type = reader.ue()
+    if poc_type == 1:
+        sys.exit("the IDR flag edit takes POC types 0 and 2")
+    lsb_bits = reader.ue() + 4 if poc_type == 0 else 0
+
+    reader = Bits(unescape(pps[1:]))
+    reader.ue()  # pic_parameter_set_id
+    reader.ue()  # seq_parameter_set_id
+    reader.take()  # entropy_coding_mode_flag
+    bottom_field = reader.take()
+    if reader.ue():  # num_slice_groups_minus1
+        sys.exit("the IDR flag edit takes a stream with no slice groups")
+    reader.ue()  # num_ref_idx_l0_default_active_minus1
+    reader.ue()  # num_ref_idx_l1_default_active_minus1
+    reader.take(3)  # weighted_pred_flag, weighted_bipred_idc
+    reader.ue()  # pic_init_qp_minus26, in se(v) form
+    reader.ue()  # pic_init_qs_minus26, in se(v) form
+    reader.ue()  # chroma_qp_index_offset, in se(v) form
+    reader.take(2)  # deblocking_filter_control_present_flag, constrained_intra_pred_flag
+    return frame_num_bits, poc_type, lsb_bits, bottom_field, reader.take()
+
+
+def set_no_output_flag(unit, facts):
+    """Sets `no_output_of_prior_pics_flag` to 1 in an IDR I slice NAL unit (7.3.3)."""
+    frame_num_bits, poc_type, lsb_bits, bottom_field, redundant = facts
+    body = bytearray(unescape(unit[1:]))
+    reader = Bits(bytes(body))
+    reader.ue()  # first_mb_in_slice
+    if reader.ue() % 5 != 2:  # slice_type
+        sys.exit("the IDR flag edit takes I slices only")
+    reader.ue()  # pic_parameter_set_id
+    reader.take(frame_num_bits)  # frame_num
+    reader.ue()  # idr_pic_id
+    if poc_type == 0:
+        reader.take(lsb_bits)  # pic_order_cnt_lsb
+        if bottom_field:
+            reader.ue()  # delta_pic_order_cnt_bottom, in se(v) form
+    if redundant:
+        reader.ue()  # redundant_pic_cnt
+    body[reader.at // 8] |= 0x80 >> (reader.at % 8)
+    return unit[:1] + escape(bytes(body))
+
+
+def read_framed(path):
+    """Returns the samples of a NAME.samples file."""
+    data = path.read_bytes()
+    samples = []
+    at = 0
+    while at < len(data):
+        size = struct.unpack_from(">I", data, at)[0]
+        samples.append(data[at + 4:at + 4 + size])
+        at += 4 + size
+    return samples
+
+
+def sample_units(sample, size):
+    """Returns the NAL units of one length-prefixed sample."""
+    units = []
+    at = 0
+    while at < len(sample):
+        length = int.from_bytes(sample[at:at + size], "big")
+        units.append(sample[at + size:at + size + length])
+        at += size + length
+    return units
+
+
+def is_idr(unit):
+    """Whether a NAL unit is a slice of an IDR picture."""
+    return unit[0] & 0x1F == 5
+
+
+def kept_by_c44(decode_pts, flagged, reorder):
+    """Returns the pts of each frame that C.4.4 outputs, in output order.
+
+    `flagged` holds the decode-order index of each IDR picture with the flag set, and every
+    frame then waiting goes with no output. Otherwise a frame leaves once more than `reorder`
+    frames wait. `h264_8bit` never fills its DPB first, so `reorder` alone decides.
+    """
+    waiting = []
+    kept = []
+    for index, pts in enumerate(decode_pts):
+        if index in flagged:
+            waiting.clear()
+        waiting.append(pts)
+        if len(waiting) > reorder:
+            waiting.sort()
+            kept.append(waiting.pop(0))
+    return kept + sorted(waiting)
+
+
+def check_with_cuvid(annexb, out, name, expected):
+    """Exits when `h264_cuvid` keeps other bytes. A missing decoder or GPU skips the check."""
+    raw = out / f"{name}.cuvid.yuv"
+    args = [*QUIET, "-c:v", "h264_cuvid", "-i", str(annexb), "-fps_mode", "passthrough",
+            "-f", "rawvideo", "-pix_fmt", "nv12", str(raw)]
+    result = subprocess.run(["ffmpeg", *args], capture_output=True)
+    if result.returncode != 0:
+        print(f"{name}: skipped the h264_cuvid check, ffmpeg cannot run it")
+        return
+    decoded = raw.read_bytes()
+    raw.unlink()
+    if decoded != expected:
+        sys.exit(f"{name}: h264_cuvid gives {len(decoded)} bytes that differ from the "
+                 f"{len(expected)} bytes C.4.4 keeps")
+
+
+def edit_no_output_prior(out, name):
+    """Sets the flag in NAME.samples, then rewrites NAME.frames and NAME.yuv to what stays."""
+    size, sps, pps = avcc_sets((out / f"{name}.config").read_bytes())
+    facts = idr_header_facts(sps[0], pps[0])
+    decode_pts = [int(line) for line in (out / f"{name}.pts").read_text().split()]
+    frames = [int(line) for line in (out / f"{name}.frames").read_text().split()]
+    decoded = (out / f"{name}.yuv").read_bytes()
+    frame_bytes = len(decoded) // len(frames)
+
+    samples = []
+    flagged = set()
+    seen_idr = False
+    for index, sample in enumerate(read_framed(out / f"{name}.samples")):
+        units = sample_units(sample, size)
+        if any(is_idr(unit) for unit in units):
+            if seen_idr:
+                flagged.add(index)
+                units = [set_no_output_flag(unit, facts) if is_idr(unit) else unit
+                         for unit in units]
+            seen_idr = True
+        samples.append(units)
+    (out / f"{name}.samples").write_bytes(b"".join(
+        struct.pack(">I", len(sample)) + sample
+        for sample in (b"".join(len(unit).to_bytes(size, "big") + unit for unit in units)
+                       for units in samples)))
+
+    reorder = probe(out / f"{name}.mp4", "streams", "stream=has_b_frames")["streams"][0]
+    kept = kept_by_c44(decode_pts, flagged, int(reorder["has_b_frames"]))
+    if len(kept) >= len(frames):
+        sys.exit(f"{name}: the flag drops no frame, so the test proves nothing")
+    expected = b"".join(decoded[frames.index(pts) * frame_bytes:
+                                (frames.index(pts) + 1) * frame_bytes] for pts in kept)
+    annexb = out / f"{name}.h264"
+    annexb.write_bytes(b"".join(b"\x00\x00\x00\x01" + unit for unit in [
+        *sps, *pps, *(unit for units in samples for unit in units)]))
+    check_with_cuvid(annexb, out, name, expected)
+    annexb.unlink()
+    (out / f"{name}.mp4").unlink()
+    (out / f"{name}.frames").write_text("".join(f"{value}\n" for value in kept))
+    (out / f"{name}.yuv").write_bytes(expected)
+
+
+# The streams an edit changes after the script writes their files.
+SAMPLE_EDITS = {"h264_no_output_prior": edit_no_output_prior}
+
+
 def main():
     default = Path(__file__).resolve().parent / "nvdec"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -397,6 +602,8 @@ def main():
                    "center" if "-chroma_sample_location" in (codec_args or []) else None)
         if decoded is not None:
             decode(mp4, args.out, name, decoded)
+        if name in SAMPLE_EDITS:
+            SAMPLE_EDITS[name](args.out, name)
         print(f"{name}: {mp4}")
     if not args.only or "vp9_two_shown" in args.only:
         written = write_vp9_two_shown(args.out)

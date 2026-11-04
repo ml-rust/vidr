@@ -12,6 +12,8 @@ pub struct Compiled {
     pub cuda: bool,
     /// `wgpu`: the WebGPU runtime.
     pub wgpu: bool,
+    /// `vulkan-video`: H.264 decode on Vulkan Video, on the WebGPU runtime.
+    pub vulkan_video: bool,
     /// `dav1d`: AV1 decode.
     pub dav1d: bool,
     /// `cpu-vp9`: VP9 decode.
@@ -32,6 +34,7 @@ impl Compiled {
         Self {
             cuda: cfg!(feature = "cuda"),
             wgpu: cfg!(feature = "wgpu"),
+            vulkan_video: cfg!(feature = "vulkan-video"),
             dav1d: cfg!(feature = "dav1d"),
             cpu_vp9: cfg!(feature = "cpu-vp9"),
             cpu_hevc: cfg!(feature = "cpu-hevc"),
@@ -53,6 +56,8 @@ pub struct Machine {
     pub nvenc: Probe,
     /// A WebGPU adapter.
     pub wgpu: Probe,
+    /// A device with an H.264 Vulkan Video decode queue.
+    pub vulkan: Probe,
 }
 
 impl Machine {
@@ -66,6 +71,7 @@ impl Machine {
                 nvdec: skipped(),
                 nvenc: skipped(),
                 wgpu: skipped(),
+                vulkan: skipped(),
             };
         }
         let cuda = probe_cuda();
@@ -74,6 +80,7 @@ impl Machine {
             nvenc: probe_nvenc(cuda.as_ref().err()),
             cuda,
             wgpu: probe_wgpu(),
+            vulkan: probe_vulkan(),
         }
     }
 }
@@ -128,6 +135,17 @@ fn probe_wgpu() -> Probe {
     Err("the wgpu feature is off".to_owned())
 }
 
+/// This opens no device, so numr can still open its own.
+#[cfg(feature = "vulkan-video")]
+fn probe_vulkan() -> Probe {
+    vidr::vulkan::vulkan_video_available().map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "vulkan-video"))]
+fn probe_vulkan() -> Probe {
+    Err("the vulkan-video feature is off".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,12 +166,20 @@ mod tests {
                     .is_err_and(|text| text.contains("wgpu"))
             );
         }
+        if !cfg!(feature = "vulkan-video") {
+            assert!(
+                machine
+                    .vulkan
+                    .as_ref()
+                    .is_err_and(|text| text.contains("vulkan-video"))
+            );
+        }
     }
 
     #[test]
     fn the_cpu_runtime_asks_no_device() {
         let machine = Machine::probe(RuntimeChoice::Cpu);
         assert!(machine.cuda.is_err() && machine.nvdec.is_err());
-        assert!(machine.nvenc.is_err() && machine.wgpu.is_err());
+        assert!(machine.nvenc.is_err() && machine.wgpu.is_err() && machine.vulkan.is_err());
     }
 }

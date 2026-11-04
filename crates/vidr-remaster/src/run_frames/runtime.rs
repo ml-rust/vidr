@@ -105,14 +105,29 @@ impl RunRuntime for CpuRuntime {
 #[cfg(feature = "wgpu")]
 mod webgpu {
     use numr::runtime::wgpu::{WgpuDevice, WgpuRuntime, is_wgpu_available};
+    #[cfg(feature = "vulkan-video")]
+    use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanOptions};
 
+    #[cfg(feature = "vulkan-video")]
+    use super::super::backends::decode_error;
     use super::*;
 
     impl RunRuntime for WgpuRuntime {
         const BACKEND: &'static str = "boostr on numr WebGPU, F32";
         const PRECISION: &'static str = "WebGPU F32";
 
+        /// Under `vulkan-video`, the device with the video queue becomes numr's device.
+        /// A machine with no such device opens numr's own, and a run on it takes CPU
+        /// decoders.
         fn open(library: Option<&Path>) -> Result<Opened<Self>, RemasterError> {
+            #[cfg(feature = "vulkan-video")]
+            if let Ok(vulkan) = VulkanDevice::open_shared(VulkanOptions::default()) {
+                return Ok(Opened {
+                    client: vulkan.client().clone(),
+                    device: vulkan.numr_device().clone(),
+                    library: library.map(Path::to_path_buf),
+                });
+            }
             if !is_wgpu_available() {
                 return Err(RemasterError::Gpu {
                     reason: "No WebGPU adapter answers. Install a WebGPU driver, or pass \
@@ -132,6 +147,29 @@ mod webgpu {
         #[cfg(any(feature = "model-srvgg", feature = "model-rrdb"))]
         fn model_execution() -> SrExecution {
             SrExecution::new(DType::F32, ConvLayout::Nchw)
+        }
+
+        #[cfg(feature = "vulkan-video")]
+        fn open_decoder(
+            opened: &Opened<Self>,
+            backend: DecoderBackend,
+            decode: &DecodeConfig,
+            path: &Path,
+        ) -> Result<BoxDecoder<Self>, RemasterError> {
+            if backend != DecoderBackend::Vulkan {
+                return open_cpu_decoder::<Self>(
+                    &opened.device,
+                    opened.library.as_deref(),
+                    backend,
+                    decode,
+                    path,
+                );
+            }
+            let failed = |error| decode_error(path, error);
+            let device = VulkanDevice::open_shared(VulkanOptions::default()).map_err(failed)?;
+            let decoder =
+                VulkanDecoder::new(&device, decode.codec, &decode.config).map_err(failed)?;
+            Ok(Box::new(decoder))
         }
     }
 }

@@ -29,7 +29,8 @@ pub(crate) struct Stream {
             feature = "dav1d",
             feature = "openh264",
             feature = "openh264-cisco",
-            feature = "cpu-hevc"
+            feature = "cpu-hevc",
+            feature = "vulkan-video"
         )),
         allow(dead_code)
     )]

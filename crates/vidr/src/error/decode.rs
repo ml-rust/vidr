@@ -217,6 +217,92 @@ pub enum DecodeError {
         /// The loader's message.
         reason: String,
     },
+    /// A Vulkan call returns an error.
+    Vulkan {
+        /// The function called.
+        call: &'static str,
+        /// The `VkResult` code.
+        code: i32,
+        /// The code's name.
+        name: String,
+        /// The inputs of the call.
+        input: String,
+    },
+    /// No device on this machine runs Vulkan Video decode, or the device does not open.
+    VulkanUnavailable {
+        /// What each device lacks.
+        reason: String,
+    },
+    /// The Vulkan driver refuses what this stream needs, or vidr has no path for it.
+    VulkanRefused {
+        /// The codec.
+        codec: DecodeCodec,
+        /// What the stream needs.
+        what: String,
+        /// Why it is out.
+        reason: String,
+    },
+    /// The query of one decode reports a status other than complete.
+    VulkanDecodeStatus {
+        /// The `VkQueryResultStatusKHR` value.
+        status: i32,
+        /// The status's name.
+        name: &'static str,
+        /// The picture's pts.
+        pts: i64,
+    },
+    /// A plane copy on wgpu's queue does not finish in time.
+    VulkanCopyTimeout {
+        /// How long the copy ran, in seconds.
+        seconds: u64,
+        /// What wgpu reports.
+        reason: String,
+    },
+    /// No memory type of the device holds what a Vulkan object needs.
+    VulkanNoMemoryType {
+        /// The object.
+        what: String,
+        /// The memory property flags it needs.
+        required: String,
+        /// The memory types the object allows, as a bit mask.
+        type_bits: u32,
+    },
+    /// A codec hands the Vulkan core a picture it cannot run.
+    VulkanDecodeRequest {
+        /// The picture's pts.
+        pts: i64,
+        /// What the request lacks.
+        reason: String,
+    },
+    /// An H.264 NAL unit does not parse.
+    H264Header {
+        /// The decoder.
+        decoder: &'static str,
+        /// The unit: `SPS`, `PPS`, or `slice`.
+        unit: &'static str,
+        /// The parser's message.
+        reason: String,
+    },
+    /// An H.264 stream uses a tool the decoder does not decode.
+    H264Tool {
+        /// The decoder.
+        decoder: &'static str,
+        /// The syntax element that names the tool.
+        field: &'static str,
+        /// The value the stream holds.
+        value: u64,
+        /// The values the decoder takes.
+        supported: &'static str,
+    },
+    /// The reference state of an H.264 stream does not hold together.
+    H264References {
+        /// The decoder.
+        decoder: &'static str,
+        /// The picture's pts.
+        pts: i64,
+        /// What does not hold.
+        reason: String,
+    },
     /// A frame's planes fail the copy to the decoder's device.
     #[cfg(feature = "frame")]
     Frame(FrameError),
@@ -428,6 +514,85 @@ impl fmt::Display for DecodeError {
                 "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
                  unmodified Cisco release that the `openh264` crate's hash list names."
             ),
+            Self::Vulkan {
+                call,
+                code,
+                name,
+                input,
+            } => write!(
+                f,
+                "{call} returns VkResult {code} ({name}) for {input}. Update the GPU driver, \
+                 free device memory, and retry. Report a repeat as a vidr bug."
+            ),
+            Self::VulkanUnavailable { reason } => write!(
+                f,
+                "Vulkan Video decode is unavailable: {reason}. Install a driver with \
+                 VK_KHR_video_decode_h264, or pass --decoder cpu."
+            ),
+            Self::VulkanRefused {
+                codec,
+                what,
+                reason,
+            } => write!(
+                f,
+                "Vulkan Video does not decode {what} of this {codec} stream: {reason}. Decode \
+                 this stream with another decoder, or re-encode it within that limit."
+            ),
+            Self::VulkanDecodeStatus { status, name, pts } => write!(
+                f,
+                "the decode of the picture at pts {pts} ends with status {status} ({name}). The \
+                 stream is damaged, or the driver refuses it. Run `ffmpeg -v error -i INPUT -f \
+                 null -` on the source, and decode it with another decoder if ffmpeg passes."
+            ),
+            Self::VulkanCopyTimeout { seconds, reason } => write!(
+                f,
+                "the plane copy of a Vulkan Video frame does not finish in {seconds} s: {reason}. \
+                 The GPU queue stalls, so vidr keeps the images it uses allocated. Check the GPU \
+                 and the kernel log, then rerun."
+            ),
+            Self::VulkanNoMemoryType {
+                what,
+                required,
+                type_bits,
+            } => write!(
+                f,
+                "no Vulkan memory type holds {required} for {what}, in type bits {type_bits:#x}. \
+                 Decode this stream with another decoder, or update the GPU driver."
+            ),
+            Self::VulkanDecodeRequest { pts, reason } => write!(
+                f,
+                "the Vulkan core cannot run the picture at pts {pts}: {reason}. Report this as a \
+                 vidr bug, with the stream that triggers it."
+            ),
+            Self::H264Header {
+                decoder,
+                unit,
+                reason,
+            } => write!(
+                f,
+                "{decoder} cannot parse an H.264 {unit}: {reason}. The stream is damaged. Run \
+                 `ffmpeg -v error -i INPUT -f null -` on the source, and re-encode it if ffmpeg \
+                 reports the same unit."
+            ),
+            Self::H264Tool {
+                decoder,
+                field,
+                value,
+                supported,
+            } => write!(
+                f,
+                "the H.264 stream holds {field} equal to {value}, and {decoder} takes {supported}. \
+                 Decode this stream with another decoder, or re-encode it without that tool."
+            ),
+            Self::H264References {
+                decoder,
+                pts,
+                reason,
+            } => write!(
+                f,
+                "{decoder} cannot track the references of the picture at pts {pts}: {reason}. \
+                 Start the stream at an IDR picture, or re-encode the source."
+            ),
             #[cfg(feature = "frame")]
             Self::Frame(error) => fmt::Display::fmt(error, f),
             #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
@@ -514,6 +679,78 @@ mod tests {
         };
         assert!(profile.to_string().contains("profile_idc 100"));
         assert!(profile.to_string().contains("as Baseline"));
+    }
+
+    #[test]
+    fn vulkan_errors_name_the_input_and_the_next_action() {
+        let call = DecodeError::Vulkan {
+            call: "vkCreateImage",
+            code: -2,
+            name: "ERROR_OUT_OF_DEVICE_MEMORY".to_owned(),
+            input: "a 320x192 NV12 image".to_owned(),
+        };
+        let text = call.to_string();
+        assert!(text.contains("vkCreateImage"));
+        assert!(text.contains("ERROR_OUT_OF_DEVICE_MEMORY"));
+        assert!(text.contains("a 320x192 NV12 image"));
+        assert!(text.contains("retry"));
+
+        let refused = DecodeError::VulkanRefused {
+            codec: DecodeCodec::H264,
+            what: "a coded size of 8192x8192".to_owned(),
+            reason: "the driver lists at most 4096x4096".to_owned(),
+        };
+        let text = refused.to_string();
+        assert!(text.contains("8192x8192"));
+        assert!(text.contains("at most 4096x4096"));
+        assert!(text.contains("another decoder"));
+
+        let timeout = DecodeError::VulkanCopyTimeout {
+            seconds: 60,
+            reason: "Timeout".to_owned(),
+        };
+        let text = timeout.to_string();
+        assert!(text.contains("60 s"));
+        assert!(text.contains("rerun"));
+        assert!(!text.contains("Install"));
+
+        let memory = DecodeError::VulkanNoMemoryType {
+            what: "a DPB image".to_owned(),
+            required: "DEVICE_LOCAL".to_owned(),
+            type_bits: 0b101,
+        };
+        let text = memory.to_string();
+        assert!(text.contains("a DPB image"));
+        assert!(text.contains("0x5"));
+        assert!(text.contains("another decoder"));
+        assert!(!text.contains("H.264"));
+
+        let request = DecodeError::VulkanDecodeRequest {
+            pts: 9,
+            reason: "DPB slot 7 does not exist".to_owned(),
+        };
+        let text = request.to_string();
+        assert!(text.contains("pts 9"));
+        assert!(text.contains("DPB slot 7"));
+        assert!(text.contains("vidr bug"));
+
+        let status = DecodeError::VulkanDecodeStatus {
+            status: -1,
+            name: "ERROR",
+            pts: 512,
+        };
+        assert!(status.to_string().contains("pts 512"));
+
+        let tool = DecodeError::H264Tool {
+            decoder: "Vulkan Video",
+            field: "num_slice_groups_minus1",
+            value: 3,
+            supported: "0",
+        };
+        assert!(
+            tool.to_string()
+                .contains("num_slice_groups_minus1 equal to 3")
+        );
     }
 
     #[test]
