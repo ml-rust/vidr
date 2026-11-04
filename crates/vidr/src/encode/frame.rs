@@ -5,7 +5,8 @@ use std::fmt;
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
-use crate::decode::DecodedFrame;
+use crate::decode::{DecodedFrame, PixelFormat, PlaneForm};
+use crate::geometry::Dimensions;
 
 /// One 4:2:0 frame to encode.
 ///
@@ -20,15 +21,47 @@ use crate::decode::DecodedFrame;
 /// of at least the row width. `Tensor::narrow` of a wider surface gives this
 /// form. These are the planes numr's `ColorOps::rgb_to_yuv_into` writes and
 /// [`DecodedFrame`] holds.
+///
+/// A frame in [`PlaneForm::Words`] holds those planes as U32 words, in the
+/// shapes [`DecodedFrame`] documents. Words record neither sample size nor
+/// row width, so the frame states its format and display size.
 pub struct EncodeFrame<'a, R: Runtime> {
     y: &'a Tensor<R>,
     uv: &'a Tensor<R>,
+    words: Option<(PixelFormat, Dimensions)>,
 }
 
 impl<'a, R: Runtime> EncodeFrame<'a, R> {
-    /// Creates a frame from its planes. The encoder checks them in `send`.
+    /// Creates a frame from U8 or U16 planes. The encoder checks them in `send`.
     pub const fn new(y: &'a Tensor<R>, uv: &'a Tensor<R>) -> Self {
-        Self { y, uv }
+        Self { y, uv, words: None }
+    }
+
+    /// Creates a frame from packed U32 planes. The encoder checks them in `send`.
+    pub const fn from_packed_planes(
+        y: &'a Tensor<R>,
+        uv: &'a Tensor<R>,
+        format: PixelFormat,
+        display: Dimensions,
+    ) -> Self {
+        Self {
+            y,
+            uv,
+            words: Some((format, display)),
+        }
+    }
+
+    /// How the planes hold their samples.
+    pub const fn plane_form(&self) -> PlaneForm {
+        match self.words {
+            Some(_) => PlaneForm::Words,
+            None => PlaneForm::Samples,
+        }
+    }
+
+    /// The format and display size of a word-form frame, or `None` for samples.
+    pub const fn word_layout(&self) -> Option<(PixelFormat, Dimensions)> {
+        self.words
     }
 
     /// The luma plane.
@@ -44,7 +77,12 @@ impl<'a, R: Runtime> EncodeFrame<'a, R> {
 
 impl<'a, R: Runtime> From<&'a DecodedFrame<R>> for EncodeFrame<'a, R> {
     fn from(frame: &'a DecodedFrame<R>) -> Self {
-        Self::new(frame.y(), frame.uv())
+        match frame.plane_form() {
+            PlaneForm::Samples => Self::new(frame.y(), frame.uv()),
+            PlaneForm::Words => {
+                Self::from_packed_planes(frame.y(), frame.uv(), frame.format(), frame.display())
+            }
+        }
     }
 }
 
@@ -54,6 +92,8 @@ impl<R: Runtime> fmt::Debug for EncodeFrame<'_, R> {
         f.debug_struct("EncodeFrame")
             .field("y", self.y)
             .field("uv", self.uv)
+            .field("form", &self.plane_form())
+            .field("words", &self.words)
             .finish()
     }
 }

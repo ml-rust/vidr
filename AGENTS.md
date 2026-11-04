@@ -18,7 +18,8 @@ The PoC model set (Real-ESRGAN, PureVision) is the first use case, NOT the scope
 - Library first. The CLI is a thin layer over the public API. NEVER put logic in a binary.
 - Every codec, container, hardware API, and model is a Cargo feature. The default build is minimal.
 - No vendor lock-in. Hardware APIs sit behind their own features: `cuda`, `vulkan-video`, `vaapi`. A vendor-neutral path exists for each operation.
-- Frames are numr tensors. Frames stay in GPU memory from decode to encode. A host round trip on the frame path is a defect.
+- Frames are numr tensors. On a hardware path they stay in GPU memory from decode to encode, and a device-to-device copy is fine. A host round trip there is a defect.
+- A CPU codec is the one exception: it copies each frame through host memory. It declares this through `FrameRoute`, and the run states it in its output and report. A silent host copy is a defect.
 - CI has no GPU. Hardware features stay out of CI. Both crates build and test without them.
 - Model weights load from a directory at run time. NEVER compile in or commit weights or media.
 - Output keeps the source's frame count, frame timing, last-frame duration, and aspect ratio. A mismatch is an error, never a warning.
@@ -42,6 +43,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Media input (`mp4`, `mkv`): open by file bytes through containr, first video track, edit timeline, rotation, container sample aspect ratio, colour tags, decoder config | Implemented |
 | Media output (`mp4`, `mkv`): one-pass `.mp4` faststart or `.mkv`, encoded H.264, HEVC, or AV1 with audio, text subtitles, chapters, and metadata copied, MKV attachments, named refusals before GPU work, bounded mux buffer | Implemented |
 | Copied-track checks: `read_stream_facts`, `read_track_facts`, `check_tracks` | Implemented |
+| Plane forms, frame routes, host planes: `PlaneForm::Words` frames through `to_rgb` and `from_rgb` on numr's WebGPU backend (`wgpu`), `FrameRoute` on every `Decoder` and `Encoder` with host copies in `PumpReport`, `upload_planes` and `download_planes` for I420 and I010. No codec uses the host routes yet | Implemented |
 | Threaded pump (`pipeline`): demux and decode, edit window and transform, encode and mux on three threads with bounded channels, first-error and panic handling, stop requests, last-frame duration, frame count check. `InputSource` and `MuxSink` behind `mp4` or `mkv`. No test has run it on a GPU yet | Implemented |
 | `vidr-remaster` run and command (`cuda` with `mp4` or `mkv`, models behind `model-srvgg` and `model-rrdb`): validation, copy plan, NVDEC pre-scan, reuse, encode pass into a temporary directory, output check, publish, provenance sidecar, `report.json`, exit codes 0, 1, and 130. NVIDIA only: NVDEC and NVENC are its only paths, so the vendor-neutral rule has a gap for decode and encode until another path lands. A real run on the development RTX 3060 covers `fast`, `realesrgan`, and `purevision` on a real clip | Implemented |
 | Everything else | Roadmap |

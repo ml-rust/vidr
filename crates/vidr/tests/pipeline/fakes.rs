@@ -22,7 +22,7 @@ use vidr::pipeline::{
     FrameTransform, PacketSink, PacketSource, PipelineError, PumpControl, PumpReport, PumpStage,
     PumpTiming, SourcePacket, run,
 };
-use vidr::{DecodeError, Dimensions, EncodeError, Rational};
+use vidr::{DecodeError, Dimensions, EncodeError, FrameRoute, Rational};
 
 const WATCHDOG: Duration = Duration::from_secs(120);
 
@@ -133,6 +133,13 @@ pub(crate) struct Script {
     pub(crate) sink_gate: Option<Arc<Gate>>,
     /// The sink asks for a stop before this write.
     pub(crate) stop_at_write: Option<(Arc<PumpControl>, u64)>,
+    /// The decoder's route. `None` means `FrameRoute::Device`.
+    pub(crate) decoder_route: Option<FrameRoute>,
+    /// The encoder's route. `None` means `FrameRoute::Device`.
+    pub(crate) encoder_route: Option<FrameRoute>,
+    /// The transform returns planes of `[4, 4]` and `[2, 4]`, not `[2, 2]` and
+    /// `[1, 2]`.
+    pub(crate) transform_doubles: bool,
 }
 
 /// What the fakes measure.
@@ -225,6 +232,7 @@ struct FakeDecoder {
     reorder: usize,
     returns_nothing: bool,
     sends: u64,
+    route: FrameRoute,
     faults: Faults,
     probe: Arc<Probe>,
 }
@@ -295,10 +303,15 @@ impl Decoder<CpuRuntime> for FakeDecoder {
         self.probe.high_water.fetch_max(in_flight, Ordering::SeqCst);
         Some(frame(pts))
     }
+
+    fn route(&self) -> FrameRoute {
+        self.route
+    }
 }
 
 struct FakeTransform {
     calls: u64,
+    doubles: bool,
     faults: Faults,
     probe: Arc<Probe>,
 }
@@ -312,8 +325,11 @@ impl FrameTransform<CpuRuntime> for FakeTransform {
         self.calls += 1;
         self.probe.applied_pts.lock().unwrap().push(frame.pts());
         Probe::add(&self.probe.applied);
+        if self.doubles {
+            return Ok(OutputPlanes::new(plane(&[4, 4]), plane(&[2, 4])));
+        }
         let (y, uv) = frame.into_planes();
-        Ok(OutputPlanes { y, uv })
+        Ok(OutputPlanes::new(y, uv))
     }
 }
 
@@ -322,6 +338,8 @@ struct FakeEncoder {
     sends: u64,
     loses: Option<u64>,
     no_config_record: bool,
+    luma: [usize; 2],
+    route: FrameRoute,
     faults: Faults,
     probe: Arc<Probe>,
 }
@@ -342,7 +360,11 @@ impl Encoder<CpuRuntime> for FakeEncoder {
         pts: i64,
         duration: i64,
     ) -> Result<(), EncodeError> {
-        assert_eq!(frame.y().shape(), &[2, 2], "luma of the frame at pts {pts}");
+        assert_eq!(
+            frame.y().shape(),
+            self.luma,
+            "luma of the frame at pts {pts}"
+        );
         self.faults
             .check(Point::EncoderSend, self.sends)
             .map_err(Self::fail)?;
@@ -376,6 +398,10 @@ impl Encoder<CpuRuntime> for FakeEncoder {
 
     fn config_record(&self) -> Option<&[u8]> {
         (!self.no_config_record).then_some(b"record".as_slice())
+    }
+
+    fn route(&self) -> FrameRoute {
+        self.route
     }
 }
 
@@ -473,12 +499,17 @@ pub(crate) fn watched<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stat
 
 pub(crate) type RunResult = Result<PumpReport<u64>, PipelineError>;
 
-/// Starts a run of `script`.
-pub(crate) fn launch(
-    script: Script,
-    timing: PumpTiming,
-    control: &Arc<PumpControl>,
-) -> (Arc<Probe>, Watched<RunResult>) {
+/// The five fakes of one run.
+struct Fakes {
+    source: FakeSource,
+    decoder: FakeDecoder,
+    transform: FakeTransform,
+    encoder: FakeEncoder,
+    sink: FakeSink,
+    probe: Arc<Probe>,
+}
+
+fn fakes(script: Script) -> Fakes {
     let probe = Arc::new(Probe::default());
     let faults = Faults(script.fault);
     let source = FakeSource {
@@ -492,11 +523,13 @@ pub(crate) fn launch(
         reorder: script.reorder,
         returns_nothing: script.decoder_returns_nothing,
         sends: 0,
+        route: script.decoder_route.unwrap_or(FrameRoute::Device),
         faults,
         probe: Arc::clone(&probe),
     };
     let transform = FakeTransform {
         calls: 0,
+        doubles: script.transform_doubles,
         faults,
         probe: Arc::clone(&probe),
     };
@@ -505,6 +538,12 @@ pub(crate) fn launch(
         sends: 0,
         loses: script.encoder_loses,
         no_config_record: script.no_config_record,
+        luma: if script.transform_doubles {
+            [4, 4]
+        } else {
+            [2, 2]
+        },
+        route: script.encoder_route.unwrap_or(FrameRoute::Device),
         faults,
         probe: Arc::clone(&probe),
     };
@@ -516,6 +555,30 @@ pub(crate) fn launch(
         faults,
         probe: Arc::clone(&probe),
     };
+    Fakes {
+        source,
+        decoder,
+        transform,
+        encoder,
+        sink,
+        probe,
+    }
+}
+
+/// Starts a run of `script`.
+pub(crate) fn launch(
+    script: Script,
+    timing: PumpTiming,
+    control: &Arc<PumpControl>,
+) -> (Arc<Probe>, Watched<RunResult>) {
+    let Fakes {
+        source,
+        decoder,
+        transform,
+        encoder,
+        sink,
+        probe,
+    } = fakes(script);
     let control = Arc::clone(control);
     let result = watched(move || {
         run::<CpuRuntime, _, _, _, _, _>(
@@ -523,6 +586,27 @@ pub(crate) fn launch(
         )
     });
     (probe, result)
+}
+
+/// Runs `script` to its end with the decoder and encoder as boxed trait objects.
+pub(crate) fn pump_boxed(script: Script, timing: PumpTiming) -> RunResult {
+    let Fakes {
+        source,
+        decoder,
+        transform,
+        encoder,
+        sink,
+        probe: _,
+    } = fakes(script);
+    let decoder: Box<dyn Decoder<CpuRuntime> + Send> = Box::new(decoder);
+    let encoder: Box<dyn Encoder<CpuRuntime> + Send> = Box::new(encoder);
+    let control = PumpControl::new();
+    watched(move || {
+        run::<CpuRuntime, _, _, _, _, _>(
+            source, decoder, transform, encoder, sink, timing, &control,
+        )
+    })
+    .wait()
 }
 
 /// Runs `script` to its end.

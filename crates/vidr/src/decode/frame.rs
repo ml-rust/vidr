@@ -1,9 +1,9 @@
-//! A decoded frame: two dense planes in device memory, its pts, and its
+//! A decoded frame: two planes in device memory, its pts, and its
 //! colour facts.
 
 use std::fmt;
 
-use numr::ops::YuvPlanes;
+use numr::ops::{PackedPlane, YuvPlanes};
 use numr::runtime::Runtime;
 use numr::tensor::Tensor;
 
@@ -17,6 +17,16 @@ use crate::geometry::Dimensions;
 pub(crate) struct PictureStructure {
     pub(crate) progressive: bool,
     pub(crate) top_field_first: bool,
+}
+
+/// How a frame's planes hold their samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlaneForm {
+    /// U8 samples for `Nv12`, U16 samples for `P010`. CPU and CUDA take this.
+    Samples,
+    /// U32 words holding the bytes of each row from the start of its first
+    /// word. WebGPU takes only this. CPU and CUDA also take it.
+    Words,
 }
 
 /// One decoded 4:2:0 frame in display order.
@@ -34,9 +44,18 @@ pub(crate) struct PictureStructure {
 /// AV1 or VP9 frame has a chroma plane of 91 rows and 322 columns. H.264 and
 /// HEVC cannot produce an odd 4:2:0 size, because their cropping works in
 /// units of two samples.
+///
+/// A frame in [`PlaneForm::Words`] holds the same bytes in numr's packed form,
+/// with `s` the bytes per sample:
+///
+/// | Plane | Shape | Dtype |
+/// | --- | --- | --- |
+/// | `y` | `[H, ceil(W * s / 4)]` | U32 |
+/// | `uv` | `[Hc, ceil(Wc * s / 4)]` | U32 |
 pub struct DecodedFrame<R: Runtime> {
     y: Tensor<R>,
     uv: Tensor<R>,
+    form: PlaneForm,
     format: PixelFormat,
     pts: i64,
     display: Dimensions,
@@ -62,6 +81,7 @@ impl<R: Runtime> DecodedFrame<R> {
         Self {
             y,
             uv,
+            form: PlaneForm::Samples,
             format,
             pts,
             display,
@@ -89,6 +109,29 @@ impl<R: Runtime> DecodedFrame<R> {
             top_field_first: false,
         };
         Self::new(y, uv, format, pts, display, color, structure)
+    }
+
+    /// Assembles a progressive frame from packed U32 planes the caller holds,
+    /// in the shapes this type documents.
+    ///
+    /// This function checks nothing, as [`DecodedFrame::from_planes`] does.
+    pub fn from_packed_planes(
+        y: Tensor<R>,
+        uv: Tensor<R>,
+        format: PixelFormat,
+        pts: i64,
+        display: Dimensions,
+        color: ColorFacts,
+    ) -> Self {
+        Self {
+            form: PlaneForm::Words,
+            ..Self::from_planes(y, uv, format, pts, display, color)
+        }
+    }
+
+    /// How the planes hold their samples.
+    pub fn plane_form(&self) -> PlaneForm {
+        self.form
     }
 
     /// The luma plane.
@@ -140,23 +183,28 @@ impl<R: Runtime> DecodedFrame<R> {
         self.top_field_first
     }
 
-    /// The planes as numr's `ColorOps::yuv_to_rgb` takes them: `Nv12` or
-    /// `P010`.
+    /// The planes as numr's `ColorOps::yuv_to_rgb` takes them: `Nv12` or `P010`
+    /// for samples, `Nv12Packed` or `P010Packed` for words.
     ///
     /// numr converts even sizes only. A frame with an odd display width or
     /// height holds ffmpeg's plane layout, and `yuv_to_rgb` returns
     /// `Error::InvalidArgument` for the `planes` argument. `vidr::frame::to_rgb`
     /// converts every size.
     pub fn planes(&self) -> YuvPlanes<'_, R> {
-        match self.format {
-            PixelFormat::Nv12 => YuvPlanes::Nv12 {
+        let (width, height) = (self.display.width(), self.display.height());
+        let y = PackedPlane::new(&self.y, width as usize);
+        let uv = PackedPlane::new(&self.uv, chroma_shape(width, height)[1]);
+        match (self.form, self.format) {
+            (PlaneForm::Samples, PixelFormat::Nv12) => YuvPlanes::Nv12 {
                 y: &self.y,
                 uv: &self.uv,
             },
-            PixelFormat::P010 => YuvPlanes::P010 {
+            (PlaneForm::Samples, PixelFormat::P010) => YuvPlanes::P010 {
                 y: &self.y,
                 uv: &self.uv,
             },
+            (PlaneForm::Words, PixelFormat::Nv12) => YuvPlanes::Nv12Packed { y, uv },
+            (PlaneForm::Words, PixelFormat::P010) => YuvPlanes::P010Packed { y, uv },
         }
     }
 
@@ -172,6 +220,7 @@ impl<R: Runtime> Clone for DecodedFrame<R> {
         Self {
             y: self.y.clone(),
             uv: self.uv.clone(),
+            form: self.form,
             format: self.format,
             pts: self.pts,
             display: self.display,
@@ -187,6 +236,7 @@ impl<R: Runtime> fmt::Debug for DecodedFrame<R> {
         f.debug_struct("DecodedFrame")
             .field("y", &self.y)
             .field("uv", &self.uv)
+            .field("form", &self.form)
             .field("format", &self.format)
             .field("pts", &self.pts)
             .field("display", &self.display)
@@ -198,7 +248,6 @@ impl<R: Runtime> fmt::Debug for DecodedFrame<R> {
 }
 
 /// Shape `[rows, columns]` of the chroma plane for a display size.
-#[cfg_attr(not(feature = "nvdec"), allow(dead_code))]
 pub(crate) const fn chroma_shape(width: u32, height: u32) -> [usize; 2] {
     [
         height.div_ceil(2) as usize,

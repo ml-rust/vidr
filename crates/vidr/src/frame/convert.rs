@@ -3,14 +3,15 @@
 use std::fmt;
 
 use numr::dtype::DType;
-use numr::ops::{ColorOps, ConvLayout, PadMode, ShapeOps, YuvPlanes, YuvSpec};
+use numr::ops::{ColorOps, ConvLayout, PackedPlane, PadMode, ShapeOps, YuvPlanes, YuvSpec};
 use numr::runtime::{Device, Runtime};
 use numr::tensor::Tensor;
 
 use crate::decode::frame::chroma_shape;
-use crate::decode::{DecodedFrame, PixelFormat};
+use crate::decode::{DecodedFrame, PixelFormat, PlaneForm};
 use crate::encode::EncodeFrame;
 use crate::error::FrameError;
+use crate::geometry::Dimensions;
 
 /// Converts a decoded frame to float RGB on the frame's device.
 ///
@@ -18,13 +19,14 @@ use crate::error::FrameError;
 /// `[1, H, W, 3]` for `ConvLayout::Nhwc`, where `W x H` is the display size.
 /// Values are R, G, B in `[0, 1]`. `dtype` takes what the backend's
 /// `ColorOps` writes: F32, F64, F16, and BF16 on CPU and CUDA, F32 on WebGPU.
+/// A frame's [`PlaneForm`] selects the numr form of each call.
 ///
 /// numr converts even sizes only, and only AV1 and VP9 give odd ones. The
 /// chroma plane of an odd frame already has the even-frame shape. So an odd
 /// frame takes these steps, all on the device:
 ///
-/// 1. `pad_mode(PadMode::Replicate)` adds one luma row, one luma column, or
-///    both, on the odd side only.
+/// 1. `pad_mode(PadMode::Replicate)` for samples, or `pad_packed_luma` for words,
+///    adds one luma row, one luma column, or both, on the odd side only.
 /// 2. `yuv_to_rgb` converts the even frame.
 /// 3. `narrow` and `contiguous` cut the RGB back to `[H, W]`.
 ///
@@ -36,7 +38,7 @@ use crate::error::FrameError;
 /// - [`FrameError::PlaneMismatch`] when a plane's shape or dtype does not
 ///   match the frame's format and display size.
 /// - [`FrameError::Numr`] when numr refuses the call, for example for an
-///   integer `dtype` or for U8 planes on WebGPU.
+///   integer `dtype` or for sample-form planes on WebGPU.
 pub fn to_rgb<R, C>(
     client: &C,
     frame: &DecodedFrame<R>,
@@ -49,26 +51,16 @@ where
     C: ColorOps<R> + ShapeOps<R>,
 {
     let [height, width] = check_planes(frame)?;
-    let padding = [0, width % 2, 0, height % 2];
-    let padded = if padding == [0; 4] {
-        None
-    } else {
-        let padded = client
-            .pad_mode(frame.y(), &padding, PadMode::Replicate)
-            .map_err(|error| {
-                numr_error(
-                    "ShapeOps::pad_mode",
-                    format!(
-                        "luma of shape {:?} with padding {padding:?}",
-                        frame.y().shape()
-                    ),
-                    &error,
-                )
-            })?;
-        Some(padded)
-    };
+    let padded = pad_luma(client, frame, height, width)?;
     let y = padded.as_ref().unwrap_or(frame.y());
-    let planes = yuv_planes(frame.format(), y, frame.uv());
+    let even_width = width + width % 2;
+    let planes = yuv_planes(
+        frame.plane_form(),
+        frame.format(),
+        y,
+        frame.uv(),
+        even_width,
+    );
     let rgb = client
         .yuv_to_rgb(planes, spec, dtype, layout)
         .map_err(|error| {
@@ -126,9 +118,8 @@ where
             &error,
         )
     })?;
-    let planes = yuv_planes(frame.format(), frame.y(), frame.uv());
     client
-        .yuv_to_rgb_into(&rgb, planes, spec, layout)
+        .yuv_to_rgb_into(&rgb, frame.planes(), spec, layout)
         .map_err(|error| {
             numr_error(
                 "ColorOps::yuv_to_rgb_into",
@@ -177,18 +168,61 @@ where
 /// Y and UV planes that [`from_rgb`] writes, on the device of its RGB input.
 ///
 /// Both planes are dense. For a frame of `W x H`, `y` has shape `[H, W]` and
-/// `uv` has shape `[H / 2, W]`, in U8 for `Nv12` and U16 for `P010`.
-/// `EncodeFrame::from(&planes)` borrows both for an encoder without a copy.
+/// `uv` has shape `[H / 2, W]`, in U8 for `Nv12` and U16 for `P010`. In
+/// [`PlaneForm::Words`] both hold U32 words of the same bytes, in the shapes
+/// `DecodedFrame` documents. `EncodeFrame::from(&planes)` borrows both for an
+/// encoder without a copy.
 pub struct OutputPlanes<R: Runtime> {
     /// The luma plane.
     pub y: Tensor<R>,
     /// The interleaved chroma plane.
     pub uv: Tensor<R>,
+    words: Option<(PixelFormat, Dimensions)>,
+}
+
+impl<R: Runtime> OutputPlanes<R> {
+    /// Planes of U8 or U16 samples.
+    pub fn new(y: Tensor<R>, uv: Tensor<R>) -> Self {
+        Self { y, uv, words: None }
+    }
+
+    /// Planes of packed U32 words. Words record neither sample size nor row
+    /// width, so this states the format and display size.
+    pub fn from_packed_planes(
+        y: Tensor<R>,
+        uv: Tensor<R>,
+        format: PixelFormat,
+        display: Dimensions,
+    ) -> Self {
+        Self {
+            y,
+            uv,
+            words: Some((format, display)),
+        }
+    }
+
+    /// How the planes hold their samples.
+    pub fn plane_form(&self) -> PlaneForm {
+        match self.words {
+            Some(_) => PlaneForm::Words,
+            None => PlaneForm::Samples,
+        }
+    }
+
+    /// The format and display size of word-form planes, or `None` for samples.
+    pub fn word_layout(&self) -> Option<(PixelFormat, Dimensions)> {
+        self.words
+    }
 }
 
 impl<'a, R: Runtime> From<&'a OutputPlanes<R>> for EncodeFrame<'a, R> {
     fn from(planes: &'a OutputPlanes<R>) -> Self {
-        Self::new(&planes.y, &planes.uv)
+        match planes.words {
+            Some((format, display)) => {
+                Self::from_packed_planes(&planes.y, &planes.uv, format, display)
+            }
+            None => Self::new(&planes.y, &planes.uv),
+        }
     }
 }
 
@@ -199,6 +233,7 @@ impl<R: Runtime> Clone for OutputPlanes<R> {
         Self {
             y: self.y.clone(),
             uv: self.uv.clone(),
+            words: self.words,
         }
     }
 }
@@ -208,6 +243,7 @@ impl<R: Runtime> fmt::Debug for OutputPlanes<R> {
         f.debug_struct("OutputPlanes")
             .field("y", &self.y)
             .field("uv", &self.uv)
+            .field("words", &self.words)
             .finish()
     }
 }
@@ -215,14 +251,15 @@ impl<R: Runtime> fmt::Debug for OutputPlanes<R> {
 /// Converts float RGB to new 4:2:0 planes on the device of `rgb`.
 ///
 /// `rgb` holds one frame: `[1, 3, H, W]` for `ConvLayout::Nchw` and
-/// `[1, H, W, 3]` for `ConvLayout::Nhwc`. Values outside `[0, 1]` clamp.
+/// `[1, H, W, 3]` for `ConvLayout::Nhwc`. Values outside `[0, 1]` clamp. The
+/// planes hold U32 words when [`Runtime::packed_color_planes`] is true.
 ///
 /// # Errors
 ///
 /// - [`FrameError::RgbShape`] when `rgb` is not one frame in `layout`.
 /// - [`FrameError::OddRgbSize`] when `W` or `H` is odd.
 /// - [`FrameError::Numr`] when numr refuses the call, for example for a dtype
-///   the backend does not read or for U8 planes on WebGPU.
+///   the backend does not read.
 pub fn from_rgb<R, C>(
     client: &C,
     rgb: &Tensor<R>,
@@ -238,7 +275,20 @@ where
     if !height.is_multiple_of(2) || !width.is_multiple_of(2) {
         return Err(FrameError::OddRgbSize { width, height });
     }
-    let dtype = format.sample_dtype();
+    let display = u32::try_from(width)
+        .ok()
+        .zip(u32::try_from(height).ok())
+        .and_then(|(columns, rows)| Dimensions::new(columns, rows).ok())
+        .ok_or_else(|| FrameError::RgbShape {
+            shape: rgb.shape().to_vec(),
+            layout,
+        })?;
+    let form = if R::packed_color_planes() {
+        PlaneForm::Words
+    } else {
+        PlaneForm::Samples
+    };
+    let (luma, chroma, dtype) = plane_shapes::<R>(form, format, display);
     let empty = |shape: [usize; 2]| {
         Tensor::<R>::empty(&shape, dtype, rgb.device()).map_err(|error| {
             numr_error(
@@ -248,10 +298,10 @@ where
             )
         })
     };
-    let y = empty([height, width])?;
-    let uv = empty([height / 2, width])?;
+    let y = empty(luma)?;
+    let uv = empty(chroma)?;
     client
-        .rgb_to_yuv_into(rgb, yuv_planes(format, &y, &uv), spec, layout)
+        .rgb_to_yuv_into(rgb, yuv_planes(form, format, &y, &uv, width), spec, layout)
         .map_err(|error| {
             numr_error(
                 "ColorOps::rgb_to_yuv_into",
@@ -263,7 +313,77 @@ where
                 &error,
             )
         })?;
-    Ok(OutputPlanes { y, uv })
+    Ok(match form {
+        PlaneForm::Samples => OutputPlanes::new(y, uv),
+        PlaneForm::Words => OutputPlanes::from_packed_planes(y, uv, format, display),
+    })
+}
+
+/// Pads the luma of an odd frame to the next even size on the device, or returns
+/// `None` for an even frame.
+fn pad_luma<R, C>(
+    client: &C,
+    frame: &DecodedFrame<R>,
+    height: usize,
+    width: usize,
+) -> Result<Option<Tensor<R>>, FrameError>
+where
+    R: Runtime<DType = DType>,
+    C: ColorOps<R> + ShapeOps<R>,
+{
+    let padding = [0, width % 2, 0, height % 2];
+    if padding == [0; 4] {
+        return Ok(None);
+    }
+    let shape = frame.y().shape();
+    let padded = match frame.plane_form() {
+        PlaneForm::Samples => client
+            .pad_mode(frame.y(), &padding, PadMode::Replicate)
+            .map_err(|error| {
+                numr_error(
+                    "ShapeOps::pad_mode",
+                    format!("luma of shape {shape:?} with padding {padding:?}"),
+                    &error,
+                )
+            })?,
+        PlaneForm::Words => {
+            let (rows, columns) = (height + height % 2, width + width % 2);
+            let sample = frame.format().sample_dtype();
+            client
+                .pad_packed_luma(PackedPlane::new(frame.y(), width), rows, columns, sample)
+                .map_err(|error| {
+                    numr_error(
+                        "ColorOps::pad_packed_luma",
+                        format!(
+                            "luma words of shape {shape:?}, width {width}, to \
+                             {rows}x{columns} in {sample:?}"
+                        ),
+                        &error,
+                    )
+                })?
+        }
+    };
+    Ok(Some(padded))
+}
+
+/// The `(luma, chroma, dtype)` shapes `[rows, columns]` of a frame's planes.
+pub(super) fn plane_shapes<R: Runtime>(
+    form: PlaneForm,
+    format: PixelFormat,
+    display: Dimensions,
+) -> ([usize; 2], [usize; 2], DType) {
+    let (width, height) = (display.width(), display.height());
+    let luma = [height as usize, width as usize];
+    let chroma = chroma_shape(width, height);
+    match form {
+        PlaneForm::Samples => (luma, chroma, format.sample_dtype()),
+        PlaneForm::Words => {
+            let sample = format.bytes_per_sample();
+            let words =
+                |[rows, columns]: [usize; 2]| [rows, PackedPlane::<R>::row_words(columns * sample)];
+            (words(luma), words(chroma), DType::U32)
+        }
+    }
 }
 
 /// Checks both planes against the format and display size, and returns the
@@ -272,15 +392,14 @@ fn check_planes<R>(frame: &DecodedFrame<R>) -> Result<[usize; 2], FrameError>
 where
     R: Runtime<DType = DType>,
 {
-    let (width, height) = (frame.display().width(), frame.display().height());
-    let luma = [height as usize, width as usize];
-    let dtype = frame.format().sample_dtype();
+    let display = frame.display();
+    let (luma, chroma, dtype) = plane_shapes::<R>(frame.plane_form(), frame.format(), display);
     check_plane("luma", frame.y(), luma, dtype)?;
-    check_plane("chroma", frame.uv(), chroma_shape(width, height), dtype)?;
-    Ok(luma)
+    check_plane("chroma", frame.uv(), chroma, dtype)?;
+    Ok([display.height() as usize, display.width() as usize])
 }
 
-fn check_plane<R>(
+pub(super) fn check_plane<R>(
     plane: &'static str,
     tensor: &Tensor<R>,
     expected: [usize; 2],
@@ -314,15 +433,27 @@ fn rgb_size<R: Runtime>(rgb: &Tensor<R>, layout: ConvLayout) -> Result<[usize; 2
     }
 }
 
-/// The planes in numr's form for `format`.
+/// The planes of an even frame `width` columns wide, in numr's form for `form`
+/// and `format`.
 fn yuv_planes<'a, R: Runtime>(
+    form: PlaneForm,
     format: PixelFormat,
     y: &'a Tensor<R>,
     uv: &'a Tensor<R>,
+    width: usize,
 ) -> YuvPlanes<'a, R> {
-    match format {
-        PixelFormat::Nv12 => YuvPlanes::Nv12 { y, uv },
-        PixelFormat::P010 => YuvPlanes::P010 { y, uv },
+    let words = |plane| PackedPlane::new(plane, width);
+    match (form, format) {
+        (PlaneForm::Samples, PixelFormat::Nv12) => YuvPlanes::Nv12 { y, uv },
+        (PlaneForm::Samples, PixelFormat::P010) => YuvPlanes::P010 { y, uv },
+        (PlaneForm::Words, PixelFormat::Nv12) => YuvPlanes::Nv12Packed {
+            y: words(y),
+            uv: words(uv),
+        },
+        (PlaneForm::Words, PixelFormat::P010) => YuvPlanes::P010Packed {
+            y: words(y),
+            uv: words(uv),
+        },
     }
 }
 
@@ -349,7 +480,11 @@ fn crop<R: Runtime>(
         })
 }
 
-fn numr_error(operation: &'static str, input: String, error: &numr::error::Error) -> FrameError {
+pub(super) fn numr_error(
+    operation: &'static str,
+    input: String,
+    error: &numr::error::Error,
+) -> FrameError {
     let reason = error.to_string();
     if error.is_out_of_memory() {
         FrameError::OutOfMemory {

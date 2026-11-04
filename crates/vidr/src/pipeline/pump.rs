@@ -40,10 +40,10 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Mutex, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 
+use numr::dtype::DataType;
 use numr::runtime::Runtime;
 #[cfg(any(feature = "nvdec", feature = "nvenc"))]
 use numr::runtime::cuda::CudaRuntime;
-#[cfg(any(feature = "nvdec", feature = "nvenc"))]
 use numr::tensor::Tensor;
 
 use super::control::{PumpControl, PumpReport, count};
@@ -148,6 +148,12 @@ impl Shared<'_> {
 /// a tensor for no frame and copies no frame to the host. Per frame it
 /// allocates nothing itself. `EncodedPacket::data` allocates in the encoder.
 ///
+/// # Host copies
+///
+/// A decoder or encoder whose [`FrameRoute`](crate::route::FrameRoute) is not
+/// `Device` copies each frame through host memory. [`PumpReport`] counts those
+/// copies from each route and the frame sizes.
+///
 /// # Errors
 ///
 /// - The first error of any stage, its root cause. The other stages stop, and
@@ -226,6 +232,8 @@ where
             frames_dropped: progress.frames_dropped,
             frames_out: progress.frames_out,
             packets: progress.packets,
+            host_copied_frames: progress.host_copied_frames,
+            host_copied_bytes: progress.host_copied_bytes,
             output,
         }),
         None if control.stop_requested() => Err(PipelineError::Stopped {
@@ -308,6 +316,12 @@ fn panic_error(stage: PumpStage, payload: &(dyn Any + Send)) -> PipelineError {
     PipelineError::Panic { stage, message }
 }
 
+/// The bytes of both plane tensors of one frame.
+fn frame_bytes<R: Runtime>(y: &Tensor<R>, uv: &Tensor<R>) -> u64 {
+    let plane = |tensor: &Tensor<R>| tensor.numel() as u64 * tensor.dtype().size_in_bytes() as u64;
+    plane(y) + plane(uv)
+}
+
 /// The durations of packets whose frames the decoder has not returned yet.
 ///
 /// A decoder returns only a frame's pts, and reorders frames. The list holds
@@ -387,8 +401,10 @@ where
     R: Runtime,
     D: Decoder<R>,
 {
+    let route = decoder.route();
     while let Some(frame) = decoder.receive() {
         count(&control.frames_in);
+        control.count_host_copy(route, frame_bytes(frame.y(), frame.uv()));
         let packet_duration = durations.take(frame.pts());
         let item = DecodedItem {
             frame,
@@ -494,6 +510,7 @@ where
 {
     let control = shared.control;
     let mut started = false;
+    let route = encoder.route();
     loop {
         // A closed channel means T2 stopped early, and T2 or T1 reports the cause.
         let Ok(item) = planes.recv() else {
@@ -508,6 +525,7 @@ where
         // The planes stay alive until `send` returns, past the copy that reads them.
         encoder.send(&EncodeFrame::from(&item.planes), item.pts, item.duration)?;
         count(&control.frames_out);
+        control.count_host_copy(route, frame_bytes(&item.planes.y, &item.planes.uv));
         drop(item);
         write_packets(&mut encoder, &mut sink, &mut started, control)?;
     }

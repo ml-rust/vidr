@@ -4,7 +4,6 @@
 //! library and a machine without the driver gets
 //! [`EncodeError::LibraryMissing`](crate::error::EncodeError::LibraryMissing).
 
-mod dts;
 mod encoder;
 mod ffi;
 mod lock;

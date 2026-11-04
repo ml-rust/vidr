@@ -29,7 +29,7 @@ use vidr::pipeline::{
     FrameTransform, MAX_IN_FLIGHT_FRAMES, PacketSource, PipelineError, PumpControl, run,
 };
 use vidr::{
-    DecodeError, Dimensions, EncodeError, Rational, Rounding, StartOffset, TrackTiming,
+    DecodeError, Dimensions, EncodeError, FrameRoute, Rational, Rounding, StartOffset, TrackTiming,
     check_output, check_tracks,
 };
 
@@ -198,6 +198,10 @@ impl Decoder<CudaRuntime> for CountingDecoder {
             .fetch_max(in_flight, Ordering::SeqCst);
         Some(frame)
     }
+
+    fn route(&self) -> FrameRoute {
+        Decoder::route(&self.inner)
+    }
 }
 
 struct CountingEncoder {
@@ -227,6 +231,10 @@ impl Encoder<CudaRuntime> for CountingEncoder {
 
     fn config_record(&self) -> Option<&[u8]> {
         self.inner.config_record()
+    }
+
+    fn route(&self) -> FrameRoute {
+        Encoder::route(&self.inner)
     }
 }
 
@@ -394,6 +402,8 @@ fn round_trip(kind: OutputKind) {
     assert_eq!(report.frames_dropped, 0, "{name}: frames dropped");
     assert_eq!(report.frames_out, FRAMES, "{name}: frames out");
     assert_eq!(report.packets, FRAMES, "{name}: packets");
+    assert_eq!(report.host_copied_frames, 0, "{name}: host copied frames");
+    assert_eq!(report.host_copied_bytes, 0, "{name}: host copied bytes");
 
     // Frame count, pts, and total duration, the last-frame duration included.
     let output = Input::open(&output_path).unwrap_or_else(|error| panic!("{name}: {error}"));

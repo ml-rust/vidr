@@ -1,11 +1,12 @@
-//! Errors in frame conversion.
+//! Errors in frame conversion and host plane copies.
 
 use std::error::Error as StdError;
 use std::fmt;
 
 use numr::ops::ConvLayout;
 
-/// An error in a conversion between 4:2:0 planes and float RGB.
+/// An error in a conversion between 4:2:0 planes and float RGB, or in a copy of
+/// planes between host memory and tensors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FrameError {
@@ -32,6 +33,42 @@ pub enum FrameError {
         width: usize,
         /// Height in pixels.
         height: usize,
+    },
+    /// A host frame's display size is zero or too large to address.
+    HostFrameSize {
+        /// Width in pixels.
+        width: usize,
+        /// Height in pixels.
+        height: usize,
+    },
+    /// A host plane's stride is below its row width.
+    HostStride {
+        /// The plane: `y`, `u`, or `v`.
+        plane: &'static str,
+        /// The stride in bytes.
+        stride: usize,
+        /// The row width in bytes.
+        row_bytes: usize,
+    },
+    /// A host plane ends before its last row does.
+    HostPlaneShort {
+        /// The plane: `y`, `u`, or `v`.
+        plane: &'static str,
+        /// The bytes its rows and stride need.
+        needed: usize,
+        /// The bytes it holds.
+        found: usize,
+    },
+    /// An I010 sample holds a value above 1023.
+    HostSampleRange {
+        /// The plane: `y`, `u`, or `v`.
+        plane: &'static str,
+        /// The sample's row.
+        row: usize,
+        /// The sample's column.
+        column: usize,
+        /// The value.
+        value: u16,
     },
     /// A numr call cannot allocate its memory.
     OutOfMemory {
@@ -81,6 +118,39 @@ impl fmt::Display for FrameError {
                 f,
                 "RGB of size {width}x{height} cannot become 4:2:0 planes, because `from_rgb` \
                  needs an even width and height. Crop or pad the RGB to an even size."
+            ),
+            Self::HostFrameSize { width, height } => write!(
+                f,
+                "a host frame of size {width}x{height} has no valid plane layout, because each \
+                 side must be above zero and fit 32 bits. Pass the frame's display size."
+            ),
+            Self::HostStride {
+                plane,
+                stride,
+                row_bytes,
+            } => write!(
+                f,
+                "host plane {plane} has a stride of {stride} bytes, below its row width of \
+                 {row_bytes} bytes. Pass the stride in bytes, and the plane's display size."
+            ),
+            Self::HostPlaneShort {
+                plane,
+                needed,
+                found,
+            } => write!(
+                f,
+                "host plane {plane} holds {found} bytes, and its rows and stride need {needed}. \
+                 Pass the whole plane, or correct the size and stride."
+            ),
+            Self::HostSampleRange {
+                plane,
+                row,
+                column,
+                value,
+            } => write!(
+                f,
+                "host plane {plane} holds {value} at row {row}, column {column}, above the \
+                 10-bit maximum of 1023. Pass I010 samples in the low 10 bits."
             ),
             Self::OutOfMemory {
                 operation,

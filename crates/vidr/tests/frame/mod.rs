@@ -8,9 +8,13 @@ mod analytic;
 mod encode_loop;
 #[cfg(feature = "nvdec")]
 mod gpu;
+mod host;
 mod odd;
 mod refusals;
 mod reuse;
 mod roundtrip;
 mod support;
 mod swscale;
+#[cfg(feature = "wgpu")]
+mod wgpu;
+mod words;

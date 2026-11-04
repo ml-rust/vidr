@@ -1,5 +1,5 @@
-//! The threaded pump: demux and decode, transform, then encode and mux, with
-//! frames in device memory throughout.
+//! The threaded pump: demux and decode, transform, then encode and mux. Frames
+//! stay in device memory unless a codec's route says otherwise.
 //!
 //! The pump is the `pipeline` feature. It needs no GPU, and runs over the
 //! `Decoder` and `Encoder` traits on any numr backend. `PumpControl` is in every

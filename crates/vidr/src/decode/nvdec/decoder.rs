@@ -17,6 +17,7 @@ use super::sequence::cuvid_codec;
 use super::session::Session;
 use crate::decode::{DecodeCodec, DecodedFrame, Decoder};
 use crate::error::DecodeError;
+use crate::route::FrameRoute;
 
 /// Hardware decode on NVDEC, into numr CUDA tensors.
 ///
@@ -299,6 +300,10 @@ impl Decoder<CudaRuntime> for NvdecDecoder {
 
     fn receive(&mut self) -> Option<DecodedFrame<CudaRuntime>> {
         Self::receive(self)
+    }
+
+    fn route(&self) -> FrameRoute {
+        FrameRoute::Device
     }
 }
 

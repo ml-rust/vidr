@@ -1,7 +1,7 @@
 //! Decode timestamps for packets that come out in decode order.
 //!
-//! NVENC reports the pts of each picture and no dts. With `b` consecutive
-//! B-frames, the `k`th picture in decode order has at most `b` pictures before
+//! An encoder such as NVENC reports the pts of each picture and no dts. With `b`
+//! consecutive B-frames, the `k`th picture in decode order has at most `b` pictures before
 //! it that display after it. So its display index is at least `k - b`, and the
 //! `(k - b)`th input pts never exceeds its pts. That value is its dts. The first
 //! `b` packets have no such input, so they count back from the first pts in

@@ -167,12 +167,87 @@ impl Samples {
         plane.unwrap_or_else(|error| panic!("plane upload: {error}"))
     }
 
+    /// One plane's samples as stored bytes: `sample << 6` for P010.
+    pub(crate) fn stored_bytes(&self, samples: &[u16]) -> Vec<u8> {
+        match self.format {
+            PixelFormat::Nv12 => samples.iter().map(|&sample| sample as u8).collect(),
+            _ => samples
+                .iter()
+                .flat_map(|&sample| (sample << 6).to_le_bytes())
+                .collect(),
+        }
+    }
+
+    /// The samples as a word-form frame on `device`.
+    pub(crate) fn words_frame<R: Runtime<DType = DType>>(
+        &self,
+        device: &R::Device,
+    ) -> DecodedFrame<R> {
+        let sample = self.format.bytes_per_sample();
+        let [chroma_rows, chroma_columns] = self.chroma_shape();
+        let y = words_plane(
+            &self.stored_bytes(&self.y),
+            self.height,
+            self.width * sample,
+            device,
+        );
+        let uv = words_plane(
+            &self.stored_bytes(&self.uv),
+            chroma_rows,
+            chroma_columns * sample,
+            device,
+        );
+        let color = planes_frame(y.clone(), uv.clone(), self.format, self.width, self.height);
+        DecodedFrame::from_packed_planes(
+            y,
+            uv,
+            self.format,
+            color.pts(),
+            color.display(),
+            *color.color(),
+        )
+    }
+
     /// The samples as a decoded frame on `device`.
     pub(crate) fn frame<R: Runtime<DType = DType>>(&self, device: &R::Device) -> DecodedFrame<R> {
         let y = self.plane(&self.y, [self.height, self.width], device);
         let uv = self.plane(&self.uv, self.chroma_shape(), device);
         planes_frame(y, uv, self.format, self.width, self.height)
     }
+}
+
+/// Bytes every word starts as past a row's data, so a read past it shows.
+pub(crate) const SENTINEL_BYTE: u8 = 0xA5;
+
+/// Tight rows of `row_bytes` bytes as U32 words `[rows, ceil(row_bytes / 4)]`.
+pub(crate) fn words_plane<R: Runtime<DType = DType>>(
+    bytes: &[u8],
+    rows: usize,
+    row_bytes: usize,
+    device: &R::Device,
+) -> Tensor<R> {
+    let pitch = row_bytes.div_ceil(4) * 4;
+    let mut words = vec![SENTINEL_BYTE; rows * pitch];
+    for (target, source) in words
+        .chunks_exact_mut(pitch)
+        .zip(bytes.chunks_exact(row_bytes))
+    {
+        target[..row_bytes].copy_from_slice(source);
+    }
+    Tensor::<R>::from_bytes(&words, &[rows, pitch / 4], DType::U32, device)
+        .unwrap_or_else(|error| panic!("word plane upload: {error}"))
+}
+
+/// The `row_bytes` data bytes of each row of a dense word plane.
+#[cfg(feature = "wgpu")]
+pub(crate) fn word_rows<R: Runtime<DType = DType>>(plane: &Tensor<R>, row_bytes: usize) -> Vec<u8> {
+    let bytes = plane
+        .to_bytes()
+        .unwrap_or_else(|error| panic!("reading a word plane: {error}"));
+    bytes
+        .chunks_exact(plane.shape()[1] * 4)
+        .flat_map(|row| row[..row_bytes].iter().copied())
+        .collect()
 }
 
 /// A frame from planes the test built, with unspecified colour facts.

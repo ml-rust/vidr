@@ -5,6 +5,7 @@ use numr::runtime::Runtime;
 
 use super::frame::DecodedFrame;
 use crate::error::DecodeError;
+use crate::route::FrameRoute;
 
 /// A video decoder that takes packets in decode order and returns frames in
 /// display order.
@@ -36,4 +37,25 @@ pub trait Decoder<R: Runtime> {
 
     /// The next frame in display order, or `None` when no frame is ready.
     fn receive(&mut self) -> Option<DecodedFrame<R>>;
+
+    /// How this decoder moves each frame. The pump counts a host copy from it.
+    fn route(&self) -> FrameRoute;
+}
+
+impl<R: Runtime, T: Decoder<R> + ?Sized> Decoder<R> for Box<T> {
+    fn send(&mut self, packet: &[u8], pts: i64) -> Result<(), DecodeError> {
+        (**self).send(packet, pts)
+    }
+
+    fn flush(&mut self) -> Result<(), DecodeError> {
+        (**self).flush()
+    }
+
+    fn receive(&mut self) -> Option<DecodedFrame<R>> {
+        (**self).receive()
+    }
+
+    fn route(&self) -> FrameRoute {
+        (**self).route()
+    }
 }

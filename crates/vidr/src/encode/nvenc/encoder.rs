@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 
 use numr::runtime::cuda::{CudaClient, CudaRuntime};
 
-use super::dts::DtsClock;
 use super::ffi::{
     NEED_MORE_INPUT, NvEncInputPtr, NvEncPicParams, PIC_FLAG_EOS, PIC_PARAMS_VER, PIC_STRUCT_FRAME,
     nvenc,
@@ -15,8 +14,10 @@ use super::params;
 use super::session::Session;
 use super::surface::{Slot, unmap};
 use super::surface_layout::{PlanePitches, SurfaceLayout};
+use crate::encode::dts::DtsClock;
 use crate::encode::{EncodeCodec, EncodeConfig, EncodeFrame, EncodedPacket, Encoder};
 use crate::error::EncodeError;
+use crate::route::FrameRoute;
 use crate::time::Rational;
 
 /// A picture the encoder holds: its slot and its mapped surface.
@@ -365,6 +366,10 @@ impl Encoder<CudaRuntime> for NvencEncoder {
 
     fn config_record(&self) -> Option<&[u8]> {
         Self::config_record(self)
+    }
+
+    fn route(&self) -> FrameRoute {
+        FrameRoute::Device
     }
 }
 

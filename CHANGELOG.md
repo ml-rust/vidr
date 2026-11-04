@@ -77,9 +77,19 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 - `vidr-remaster`: end-to-end tests in `tests/e2e/` with `tests/e2e.rs` as the root, behind `cuda`, `mp4`, `mkv`, `model-srvgg`, and `model-rrdb`. The nextest `nvenc` group caps them. A missing GPU, model, or ffmpeg skips with a notice.
 - `vidr-remaster`: `RunOutcome::OutputWithoutSidecar`, `ReportStatus::OutputWithoutSidecar`, `MissingSidecar`, `Published`, `TempOutput::publish_with_sidecar`, and `remove_temp_directories`.
 - README: a `vidr-remaster` usage section.
+- `vidr`: plane forms. `PlaneForm::Samples` holds U8 or U16 planes and `PlaneForm::Words` holds numr's packed U32 words, the only form numr's WebGPU kernels take.
+  - `DecodedFrame::from_packed_planes`, `EncodeFrame::from_packed_planes`, and `OutputPlanes::from_packed_planes` build a word-form frame. `plane_form` reads the form on each type.
+  - `to_rgb`, `to_rgb_reusing`, `DecodedFrame::planes`, and the plane checks follow the form. An odd word frame pads luma with `ColorOps::pad_packed_luma`. `from_rgb` allocates words when `Runtime::packed_color_planes` is true.
+  - The `wgpu` feature passes through to `numr/wgpu`. Tests in `tests/frame/wgpu.rs` compare the WebGPU path with the CPU path bit for bit, and skip with a notice without an adapter.
+- `vidr`: `FrameRoute` states how a decoder or encoder moves each frame: `Device`, `HostUpload`, `HostDownload`, or `HostOnly`. `PumpReport` and `PumpProgress` gain `host_copied_frames` and `host_copied_bytes`, which the pump computes from each route and the frame sizes.
+- `vidr`: `Decoder` and `Encoder` impls for `Box<T>`, with `T` unsized, so a run takes `Box<dyn Decoder<R> + Send>`.
+- `vidr`: host plane copies in `frame`, for a CPU codec. `upload_planes` interleaves I420 to NV12, writes I010 as `value << 6`, and packs to words on a word-form backend. `download_planes` reverses it into a `HostFrame`, whose buffers a same-size frame reuses. `HostPlanes` takes pitched sources, odd sizes round chroma up, and `FrameError` gains `HostFrameSize`, `HostStride`, `HostPlaneShort`, and `HostSampleRange`.
 
 ### Changed
 
+- `vidr`: `Decoder::route` and `Encoder::route` are required methods with no default, so every implementor adds them.
+- `vidr`: `OutputPlanes` has a private field. Build one with `OutputPlanes::new` in place of a struct literal. `y` and `uv` stay public.
+- `vidr`: `DtsClock` moves from `encode::nvenc` to `encode`, behind `encode`, so another encoder can reuse it.
 - `vidr-remaster`: `RunOutcome::Complete::report` is now `Option<PathBuf>`. `None` means the report did not write.
 
 ### Fixed

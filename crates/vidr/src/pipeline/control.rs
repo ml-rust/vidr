@@ -5,6 +5,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(feature = "pipeline")]
+use crate::route::FrameRoute;
+
 /// A stop flag and progress counters. Create one per run.
 ///
 /// The counters only increase. The first error of a run also sets the flag.
@@ -16,6 +19,8 @@ pub struct PumpControl {
     pub(super) frames_dropped: AtomicU64,
     pub(super) frames_out: AtomicU64,
     pub(super) packets: AtomicU64,
+    host_copied_frames: AtomicU64,
+    host_copied_bytes: AtomicU64,
 }
 
 /// A reading of the counters of a [`PumpControl`].
@@ -31,6 +36,10 @@ pub struct PumpProgress {
     pub frames_out: u64,
     /// Packets the sink took.
     pub packets: u64,
+    /// Frame copies through host memory so far. See [`PumpReport`].
+    pub host_copied_frames: u64,
+    /// Bytes of those copies so far. See [`PumpReport`].
+    pub host_copied_bytes: u64,
 }
 
 /// The result of a complete run.
@@ -44,6 +53,15 @@ pub struct PumpReport<O> {
     pub frames_out: u64,
     /// Packets the sink took.
     pub packets: u64,
+    /// Frame copies through host memory: one per frame for each of the decoder
+    /// and the encoder whose route is not `FrameRoute::Device`. A frame through
+    /// a host decoder and a host encoder counts twice. A frame the edit window
+    /// drops still counts its decoder copy. A hardware path gives 0.
+    pub host_copied_frames: u64,
+    /// Bytes of those copies: the size of both plane tensors at each copy. The
+    /// decoder's copies count its frame size and the encoder's copies count the
+    /// transform's output size. Word planes count their whole words.
+    pub host_copied_bytes: u64,
     /// What `PacketSink::finish` returned.
     pub output: O,
 }
@@ -76,6 +94,17 @@ impl PumpControl {
             frames_dropped: self.frames_dropped.load(Ordering::Relaxed),
             frames_out: self.frames_out.load(Ordering::Relaxed),
             packets: self.packets.load(Ordering::Relaxed),
+            host_copied_frames: self.host_copied_frames.load(Ordering::Relaxed),
+            host_copied_bytes: self.host_copied_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Counts one frame's copy through host memory when `route` makes one.
+    #[cfg(feature = "pipeline")]
+    pub(super) fn count_host_copy(&self, route: FrameRoute, bytes: u64) {
+        if route.copies_through_host() {
+            count(&self.host_copied_frames);
+            self.host_copied_bytes.fetch_add(bytes, Ordering::Relaxed);
         }
     }
 }

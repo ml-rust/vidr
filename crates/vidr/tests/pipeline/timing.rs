@@ -49,6 +49,8 @@ fn order_and_pts_survive_decoder_reordering() {
             frames_dropped: 0,
             frames_out: 7,
             packets: 7,
+            host_copied_frames: 0,
+            host_copied_bytes: 0,
             output: 7,
         })
     );

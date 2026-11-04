@@ -8,18 +8,21 @@
 //! | NVENC | `nvenc` | `nvenc::NvencEncoder` |
 //!
 //! Frames go in as [`EncodeFrame`]: Y and UV planes in NV12 or P010, dense or
-//! with a row pitch. Packets come out as [`EncodedPacket`]: MP4 and Matroska
-//! samples in decode order, with exact timestamps.
+//! with a row pitch, as samples or packed words. Packets come out as
+//! [`EncodedPacket`]: MP4 and Matroska samples in decode order, with exact
+//! timestamps.
 
 mod codec;
 mod config;
+#[cfg_attr(not(feature = "nvenc"), allow(dead_code))]
+mod dts;
 mod frame;
 mod traits;
 
 #[cfg(feature = "nvenc")]
 pub mod nvenc;
 
-pub use crate::decode::{ChromaLocation, ColorFacts, PixelFormat};
+pub use crate::decode::{ChromaLocation, ColorFacts, PixelFormat, PlaneForm};
 pub use codec::{EncodeCodec, Preset, RateControl, Tuning};
 pub use config::EncodeConfig;
 pub use frame::{EncodeFrame, EncodedPacket};

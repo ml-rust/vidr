@@ -10,8 +10,10 @@
 //! through containr and reads its track facts, and `media::OutputMux` writes an
 //! encoded video with every other stream copied. Behind `pipeline`,
 //! `pipeline::run` pumps a whole video through decode, transform, and encode on
-//! three threads. `pipeline::PumpControl` is in every build. Software codecs,
-//! other hardware codecs, and the filter graph are roadmap items.
+//! three threads. `pipeline::PumpControl` is in every build. `route::FrameRoute`
+//! states how a codec backend moves frames, and the pump counts each host copy
+//! from it. Software codecs, other hardware codecs, and the filter graph are
+//! roadmap items.
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 pub mod bitstream;
@@ -29,6 +31,7 @@ pub mod geometry;
 #[cfg(any(feature = "mp4", feature = "mkv"))]
 pub mod media;
 pub mod pipeline;
+pub mod route;
 pub mod time;
 
 pub use check::{
@@ -49,6 +52,7 @@ pub use error::{EditListError, Error, GeometryError, Operation, TimeError, Timin
 #[cfg(feature = "pipeline")]
 pub use error::{PipelineError, PumpStage};
 pub use geometry::{Dimensions, Geometry, Rotation, SampleAspectRatio};
+pub use route::FrameRoute;
 pub use time::{
     DurationHints, EditEntry, EditTimeline, FrameTiming, LastDurationSource, OrderViolation,
     Rational, Rounding, StartOffset, TrackTiming, presentation_order_violations, rescale,

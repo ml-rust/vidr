@@ -62,6 +62,9 @@ mkv = ["decode", "encode", "dep:containr", "containr/mkv"]
 # The threaded decode, transform, and encode pump over the `Decoder` and
 # `Encoder` traits. Needs no GPU.
 pipeline = ["decode", "encode", "frame"]
+# numr's WebGPU backend, for code and tests that name `WgpuRuntime`. vidr's own
+# code runs on it through the `Runtime` trait, so this enables nothing in vidr.
+wgpu = ["numr/wgpu"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 

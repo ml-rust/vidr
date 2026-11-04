@@ -5,6 +5,7 @@ use numr::runtime::Runtime;
 
 use super::frame::{EncodeFrame, EncodedPacket};
 use crate::error::EncodeError;
+use crate::route::FrameRoute;
 
 /// A video encoder that takes frames in display order and returns packets in
 /// decode order.
@@ -43,4 +44,34 @@ pub trait Encoder<R: Runtime> {
     /// The `avcC`, `hvcC`, or `av1C` box payload, or `None` before the first
     /// packet exists.
     fn config_record(&self) -> Option<&[u8]>;
+
+    /// How this encoder moves each frame. The pump counts a host copy from it.
+    fn route(&self) -> FrameRoute;
+}
+
+impl<R: Runtime, T: Encoder<R> + ?Sized> Encoder<R> for Box<T> {
+    fn send(
+        &mut self,
+        frame: &EncodeFrame<'_, R>,
+        pts: i64,
+        duration: i64,
+    ) -> Result<(), EncodeError> {
+        (**self).send(frame, pts, duration)
+    }
+
+    fn flush(&mut self) -> Result<(), EncodeError> {
+        (**self).flush()
+    }
+
+    fn receive(&mut self) -> Option<EncodedPacket> {
+        (**self).receive()
+    }
+
+    fn config_record(&self) -> Option<&[u8]> {
+        (**self).config_record()
+    }
+
+    fn route(&self) -> FrameRoute {
+        (**self).route()
+    }
 }

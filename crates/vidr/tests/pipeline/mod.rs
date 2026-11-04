@@ -6,4 +6,5 @@ mod faults;
 #[cfg(all(feature = "nvdec", feature = "nvenc", feature = "mp4", feature = "mkv"))]
 mod gpu;
 mod pressure;
+mod routes;
 mod timing;

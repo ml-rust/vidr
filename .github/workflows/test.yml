@@ -23,7 +23,8 @@
 # of every feature set, so every hardware path sits behind its gate and the rest
 # compiles without it. `nvdec` loads libnvcuvid and `nvenc` loads
 # libnvidia-encode at run time, but both enable numr's `cuda` feature, whose
-# build script needs nvcc.
+# build script needs nvcc. `wgpu` is vendor-neutral and needs no SDK to build, so
+# it has clippy rows. Its tests need an adapter, so the test job leaves it out.
 #
 # No job runs with `--locked`. The committed Cargo.lock resolves numr and
 # boostr through local path patches, so a lock-exact build on a clean runner
@@ -99,6 +100,8 @@ jobs:
           - { crate: vidr, features: "mkv" }
           - { crate: vidr, features: "pipeline" }
           - { crate: vidr, features: "pipeline,mp4,mkv" }
+          - { crate: vidr, features: "wgpu" }
+          - { crate: vidr, features: "frame,wgpu" }
           - { crate: vidr-remaster, features: "" }
           - { crate: vidr-remaster, features: "mp4" }
           - { crate: vidr-remaster, features: "mkv" }
