@@ -56,7 +56,7 @@ impl CtuParser<'_, '_> {
             })?;
         } else if !inter_slice || self.cabac.decision(ctx::PRED_MODE) {
             record.pred_mode = PredMode::Intra;
-            self.intra_coding_unit(&mut record, depth)?;
+            self.intra_coding_unit(&mut record)?;
         } else {
             record.pred_mode = PredMode::Inter;
             self.inter_coding_unit(&mut record, depth)?;
@@ -81,7 +81,7 @@ impl CtuParser<'_, '_> {
     }
 
     /// The intra branch of 7.3.8.5.
-    fn intra_coding_unit(&mut self, record: &mut CuRecord, depth: u32) -> Result<(), HevcError> {
+    fn intra_coding_unit(&mut self, record: &mut CuRecord) -> Result<(), HevcError> {
         let (x0, y0, log2_size) = (record.x, record.y, record.log2_size);
         let is_min_size = log2_size == self.params.min_cb_log2;
         // Table 9-45: at the minimum size one bin selects 2Nx2N or NxN.
@@ -97,8 +97,6 @@ impl CtuParser<'_, '_> {
         let intra_split = record.part_mode == PartMode::NxN;
         let cu = CuContext {
             index: self.records.cus.len(),
-            log2_size,
-            depth,
             intra: true,
             part_mode: record.part_mode,
             transquant_bypass: record.transquant_bypass,
@@ -202,8 +200,6 @@ impl CtuParser<'_, '_> {
         }
         let cu = CuContext {
             index: self.records.cus.len(),
-            log2_size,
-            depth,
             intra: false,
             part_mode: record.part_mode,
             transquant_bypass: record.transquant_bypass,

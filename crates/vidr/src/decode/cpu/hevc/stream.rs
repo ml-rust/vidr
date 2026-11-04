@@ -2,16 +2,16 @@
 //! segments, access unit boundaries, hash SEI messages, picture order, and output.
 //!
 //! This core decodes Main and Main 10 pictures of every slice type, and returns them
-//! in output order (C.5.2). A later unit adds a `Decoder` adapter.
+//! in output order (C.5.2). `decode::hevc::HevcDecoder` adapts it to the `Decoder` trait.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::bitstream::HevcNalType;
 use crate::bitstream::hevc_pps::PicParameterSet;
 use crate::bitstream::hevc_slice::{SliceSegmentHeader, slice_pic_parameter_set_id};
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::rbsp::unescape;
+use crate::bitstream::{HevcNalType, VuiSignal};
 
 use super::dpb::buffer::Frame;
 use super::dpb::poc::{PictureFacts, PictureStart, SequenceState, is_cra};
@@ -43,6 +43,21 @@ pub(crate) enum DecodedPicture {
     Ten(Arc<Frame<u16>>),
 }
 
+/// The facts of a picture at its first slice segment, for a caller that labels each
+/// output picture with what it knew when the picture went in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartedPicture {
+    /// The value [`Frame::decode_order`] holds.
+    pub(crate) decode_order: u64,
+    /// `PicOutputFlag`. A picture with 0 never leaves as output.
+    pub(crate) output: bool,
+    /// True for an IRAP picture with `NoRaslOutputFlag` 1. Each earlier picture has
+    /// already left as output or left with no output, as C.5.2.2 states.
+    pub(crate) irap_no_rasl: bool,
+    /// The colour fields of the active SPS's VUI.
+    pub(crate) signal: VuiSignal,
+}
+
 /// Takes NAL units in decoding order. [`Self::next_output`] returns the pictures in
 /// output order.
 #[derive(Debug)]
@@ -58,6 +73,10 @@ pub(crate) struct StreamDecoder {
     /// True through the slice segments of a skipped RASL picture.
     skip_picture: bool,
     output: VecDeque<DecodedPicture>,
+    /// Pictures that have started decoding.
+    pictures_started: u64,
+    /// The picture the latest NAL unit started.
+    started: Option<StartedPicture>,
 }
 
 impl StreamDecoder {
@@ -73,6 +92,8 @@ impl StreamDecoder {
             sequence: SequenceState::new(),
             skip_picture: false,
             output: VecDeque::new(),
+            pictures_started: 0,
+            started: None,
         }
     }
 
@@ -108,6 +129,11 @@ impl StreamDecoder {
     /// The next picture in output order, when one is ready.
     pub(crate) fn next_output(&mut self) -> Option<DecodedPicture> {
         self.output.pop_front()
+    }
+
+    /// The picture that [`Self::decode_nal`] started since the last call, if any.
+    pub(crate) fn take_started(&mut self) -> Option<StartedPicture> {
+        self.started.take()
     }
 
     /// Moves output pictures from the sample type decoders into the queue.
@@ -219,7 +245,12 @@ impl StreamDecoder {
             });
             self.skip_picture = start == PictureStart::Skip;
             if let PictureStart::Decode { poc, irap_no_rasl } = start {
-                let begin = PictureBegin { poc, irap_no_rasl };
+                let decode_order = self.pictures_started;
+                let begin = PictureBegin {
+                    poc,
+                    irap_no_rasl,
+                    decode_order,
+                };
                 let discard = is_cra(header.nal_unit_type) || header.no_output_of_prior_pics_flag;
                 if sps.bit_depth_y() == 8 {
                     self.ten.close_sequence(discard);
@@ -228,6 +259,13 @@ impl StreamDecoder {
                     self.eight.close_sequence(discard);
                     self.ten.begin(sps, pps, &header, begin)?;
                 }
+                self.pictures_started += 1;
+                self.started = Some(StartedPicture {
+                    decode_order,
+                    output: header.pic_output_flag,
+                    irap_no_rasl,
+                    signal: sps.vui.map_or_else(VuiSignal::default, |vui| vui.signal),
+                });
             }
         } else if !self.skip_picture && !self.eight.is_active() && !self.ten.is_active() {
             return Err(HevcError::InvalidSyntax {

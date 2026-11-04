@@ -1,11 +1,16 @@
 //! CPU decoders on numr's CPU backend against ffmpeg's decode, byte for byte.
 //!
-//! H.264, AV1, and VP9 decoding is bit-exact by specification, film grain aside, and
+//! H.264, HEVC, AV1, and VP9 decoding is bit-exact by specification, film grain aside, and
 //! no fixture has film grain. A mismatch is a defect, never a tolerance to widen.
 
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
-#[cfg(any(feature = "dav1d", feature = "openh264", feature = "openh264-cisco"))]
+#[cfg(any(
+    feature = "dav1d",
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc"
+))]
 use vidr::decode::ChromaLocation;
 use vidr::decode::{DecodedFrame, Decoder, PixelFormat};
 
@@ -82,7 +87,12 @@ pub(crate) fn check_bytes(stream: &Stream, frames: &[DecodedFrame<CpuRuntime>]) 
 }
 
 /// Checks pts, size, format, colour, and every plane byte against the fixture.
-#[cfg(any(feature = "dav1d", feature = "openh264", feature = "openh264-cisco"))]
+#[cfg(any(
+    feature = "dav1d",
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-hevc"
+))]
 pub(crate) fn check_frames(
     stream: &Stream,
     frames: &[DecodedFrame<CpuRuntime>],

@@ -56,7 +56,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - H.264, HEVC, and AV1 bitstream filters
 - NVDEC hardware decode and NVENC hardware encode
 - CPU codecs, each with one host copy per frame: AV1 decode on dav1d, H.264 Baseline decode and encode on OpenH264. A source build of OpenH264 (`openh264`) gets no Cisco patent cover. Cisco's cover applies only to its own binary, which `openh264-cisco` loads from a path the caller supplies
-- AV1 encode on rav1r and VP9 decode on `rusty_vp9`, each with one host copy per frame. See [CPU codecs](#cpu-codecs)
+- AV1 encode on rav1r, VP9 decode on `rusty_vp9`, and HEVC Main and Main 10 decode on this crate's own core, each with one host copy per frame. HEVC conformance status is pending. See [CPU codecs](#cpu-codecs)
 - Conversion between NV12 or P010 planes and float RGB
 - SDR colour policy
 - MP4, MOV, Matroska, and WebM input facts through containr
@@ -166,13 +166,14 @@ A CPU codec works in host memory, so each frame takes one copy through it. The c
 | AV1 | `dav1d` | Decode | 8, 10, 4:2:0 | libdav1d through `dav1d` | BSD-2-Clause | AV1: see below |
 | AV1 | `cpu-av1`, `cpu-av1-asm` | Encode | 8, 10, 4:2:0 | `rav1r` | BSD-2-Clause | AOM Patent License 1.0: see below |
 | VP9 | `cpu-vp9` | Decode | 8, 10, 4:2:0 | `rusty_vp9` | Apache-2.0 | VP9 has a patent pool: see below |
+| HEVC | `cpu-hevc` | Decode | 8, 10, 4:2:0 | This crate | Apache-2.0 | HEVC has patent pools: see below |
 | H.264 | `openh264`, `openh264-cisco` | Decode, encode | 8, 4:2:0 | OpenH264 through `openh264` | BSD-2-Clause | Cisco's cover applies only to its own binary, which `openh264-cisco` loads |
 
 These notes state what a binary distribution needs. They are not legal advice.
 
 - **AV1.** A binary built with `cpu-av1` must reproduce the Alliance for Open Media Patent License 1.0 in its documentation, legal notices, or other written materials, with the BSD licence text. rav1r's `PATENTS` file holds the patent licence. Section 1.3 of that licence ends it for a licensee that sues over an Implementation, with two stated exceptions.
 - **VP9.** VP9 has a patent pool. Shipping a binary with `cpu-vp9` on needs legal review.
-- **HEVC.** HEVC has patent pools. No HEVC CPU decoder exists yet. Shipping a binary with one on will need legal review.
+- **HEVC.** HEVC has patent pools. Shipping a binary with `cpu-hevc` on needs legal review.
 
 `rav1r` is not on crates.io yet. Until it is, `cpu-av1` builds only through the `[patch.crates-io]` path in `.cargo/config.toml`.
 
@@ -189,7 +190,12 @@ VIDR_VP9_VECTORS=DIR cargo test -p vidr --features cpu-vp9,mkv libvpx_vectors --
 
 The test compares every frame with libvpx's `.md5` file, prints a pass and fail table by vector, and names each failure. `VIDR_VP9_FILTER` picks vectors by name, and `VIDR_CONFORMANCE_JOBS` sets how many run at once. ffmpeg remuxes the `.ivf` vectors.
 
-`scripts/conformance/fetch_hevc.sh DIR` and `VIDR_HEVC_CONFORMANCE=DIR` read each HEVC_v1 zip's bitstream and hash. That test decodes nothing, because no HEVC CPU decoder exists yet. It needs `unzip`.
+```
+scripts/conformance/fetch_hevc.sh DIR
+VIDR_HEVC_CONFORMANCE=DIR cargo test -p vidr --release --features cpu-hevc hevc_zips_decode -- --nocapture
+```
+
+The test decodes each HEVC_v1 zip through `HevcDecoder`. It checks each picture's hash SEI message and the zip's MD5 of the whole decoded stream, keeps no frame, and needs `unzip`. It prints a table by vector and names each failure. `VIDR_HEVC_ONLY` picks zips by name, and `VIDR_HEVC_REPORT` names a file for one line per vector. Without `cpu-hevc`, the same variable reads each zip's layout and decodes nothing.
 
 ## Scope
 

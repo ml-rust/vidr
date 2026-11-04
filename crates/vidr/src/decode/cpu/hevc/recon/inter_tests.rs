@@ -91,6 +91,7 @@ fn frame(poc: i32, luma: impl Fn(usize, usize) -> u8) -> Arc<Frame<u8>> {
         picture,
         col: ColMotion::new(),
         poc,
+        decode_order: 0,
     })
 }
 

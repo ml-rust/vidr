@@ -14,7 +14,8 @@ use crate::framing::unframe;
     feature = "dav1d",
     feature = "openh264",
     feature = "openh264-cisco",
-    feature = "cpu-vp9"
+    feature = "cpu-vp9",
+    feature = "cpu-hevc"
 ))]
 pub(crate) mod cpu;
 
@@ -27,7 +28,8 @@ pub(crate) struct Stream {
             feature = "nvdec",
             feature = "dav1d",
             feature = "openh264",
-            feature = "openh264-cisco"
+            feature = "openh264-cisco",
+            feature = "cpu-hevc"
         )),
         allow(dead_code)
     )]

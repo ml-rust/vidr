@@ -24,9 +24,6 @@ use std::ffi::OsStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 use containr::TrackKind;
 use containr::mkv::Demuxer;
@@ -36,6 +33,7 @@ use vidr::decode::rusty_vp9::RustyVp9Decoder;
 use vidr::decode::{DecodedFrame, Decoder, PixelFormat};
 
 use super::md5::hex_digest;
+use super::runner::{panic_text, run_each};
 
 /// What one vector did.
 enum Outcome {
@@ -224,16 +222,9 @@ fn run_vector(vector: &Path, work: &Path) -> Outcome {
     let outcome = match decoded {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(reason)) => Outcome::Fail { reason },
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| panic.downcast_ref::<&str>().copied())
-                .unwrap_or("no message");
-            Outcome::Fail {
-                reason: format!("panic: {message}"),
-            }
-        }
+        Err(panic) => Outcome::Fail {
+            reason: format!("panic: {}", panic_text(&*panic)),
+        },
     };
     match outcome {
         Outcome::Refused { reason } if !refusal_expected(&name) => Outcome::Fail {
@@ -244,38 +235,6 @@ fn run_vector(vector: &Path, work: &Path) -> Outcome {
         },
         other => other,
     }
-}
-
-fn job_count() -> usize {
-    let half = thread::available_parallelism().map_or(1, |count| count.get() / 2);
-    std::env::var("VIDR_CONFORMANCE_JOBS")
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(half)
-        .max(1)
-}
-
-/// Runs every vector, each worker taking the next one, and keeps the input order.
-fn run_all(vectors: &[PathBuf], work: &Path) -> Vec<Outcome> {
-    let next = AtomicUsize::new(0);
-    let results = Mutex::new(Vec::with_capacity(vectors.len()));
-    thread::scope(|scope| {
-        for _ in 0..job_count() {
-            scope.spawn(|| {
-                while let Some(vector) = vectors.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let outcome = run_vector(vector, work);
-                    if let Ok(mut results) = results.lock() {
-                        results.push((vector.clone(), outcome));
-                    }
-                }
-            });
-        }
-    });
-    let mut results = results
-        .into_inner()
-        .unwrap_or_else(|error| error.into_inner());
-    results.sort_by(|left, right| left.0.cmp(&right.0));
-    results.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
 #[test]
@@ -298,7 +257,7 @@ fn libvpx_vectors_match_frame_by_frame() {
         directory.display()
     );
     let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("conformance_vp9");
-    let outcomes = run_all(&vectors, &work);
+    let outcomes = run_each(&vectors, |vector| run_vector(vector, &work));
 
     println!("| Vector | Result | Detail |");
     println!("| --- | --- | --- |");

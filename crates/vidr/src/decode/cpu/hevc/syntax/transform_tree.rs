@@ -14,10 +14,6 @@ use super::residual::TbArgs;
 pub(super) struct CuContext {
     /// Index the coding unit takes in `CtuRecords::cus`.
     pub(super) index: usize,
-    /// `log2CbSize`.
-    pub(super) log2_size: u32,
-    /// `CtDepth`.
-    pub(super) depth: u32,
     /// True when `CuPredMode` is `MODE_INTRA`.
     pub(super) intra: bool,
     /// `PartMode`.

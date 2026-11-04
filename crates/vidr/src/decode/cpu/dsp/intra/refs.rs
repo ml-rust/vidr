@@ -218,6 +218,7 @@ impl PredBlock {
     }
 
     /// The sample at row `y`, column `x`, of a block of `size` samples.
+    #[cfg(test)]
     pub(crate) fn get(&self, size: usize, x: usize, y: usize) -> u16 {
         self.samples.get(y * size + x).copied().unwrap_or(0)
     }

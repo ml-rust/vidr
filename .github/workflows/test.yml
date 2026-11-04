@@ -121,6 +121,7 @@ jobs:
           - { crate: vidr, features: "cpu-av1-asm" }
           - { crate: vidr, features: "cpu-vp9" }
           - { crate: vidr, features: "cpu-hevc" }
+          - { crate: vidr, features: "cpu-hevc,cpu-vp9,mkv" }
           - { crate: vidr, features: "cpu-av1,cpu-vp9,dav1d,mkv" }
           - { crate: vidr-remaster, features: "" }
           - { crate: vidr-remaster, features: "mp4" }

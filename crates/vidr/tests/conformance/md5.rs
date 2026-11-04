@@ -1,4 +1,4 @@
-//! MD5 (RFC 1321), for libvpx's per-frame hashes.
+//! MD5 (RFC 1321), for libvpx's per-frame hashes and JCT-VC's whole-stream hashes.
 
 /// Each round's left rotation.
 const SHIFTS: [u32; 64] = [
@@ -12,13 +12,11 @@ fn constant(index: usize) -> u32 {
     (((index + 1) as f64).sin().abs() * 4_294_967_296.0) as u32
 }
 
-fn block(state: &mut [u32; 4], bytes: &[u8; 64]) {
-    let words: Vec<u32> = bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|word| u32::from_le_bytes(*word))
-        .collect();
+fn block(state: &mut [u32; 4], constants: &[u32; 64], bytes: &[u8; 64]) {
+    let mut words = [0_u32; 16];
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(*chunk);
+    }
     let [mut a, mut b, mut c, mut d] = *state;
     for (index, shift) in SHIFTS.into_iter().enumerate() {
         let (mix, word) = match index / 16 {
@@ -29,7 +27,7 @@ fn block(state: &mut [u32; 4], bytes: &[u8; 64]) {
         };
         let sum = a
             .wrapping_add(mix)
-            .wrapping_add(constant(index))
+            .wrapping_add(constants[index])
             .wrapping_add(words[word]);
         (a, d, c) = (d, c, b);
         b = b.wrapping_add(sum.rotate_left(shift));
@@ -39,45 +37,73 @@ fn block(state: &mut [u32; 4], bytes: &[u8; 64]) {
     }
 }
 
-/// The MD5 of `parts` in order, in lowercase hexadecimal.
-pub(super) fn hex_digest(parts: &[&[u8]]) -> String {
-    let mut state = [0x6745_2301_u32, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
-    let mut pending = Vec::with_capacity(128);
-    let mut total = 0_u64;
-    for part in parts {
-        total += part.len() as u64;
-        let mut rest = *part;
-        if !pending.is_empty() {
-            let taken = rest.len().min(64 - pending.len());
-            pending.extend_from_slice(&rest[..taken]);
+/// An MD5 that takes its input in parts, and holds at most one block of it.
+pub(super) struct Md5 {
+    state: [u32; 4],
+    constants: [u32; 64],
+    pending: Vec<u8>,
+    total: u64,
+}
+
+impl Md5 {
+    pub(super) fn new() -> Self {
+        Self {
+            state: [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476],
+            constants: std::array::from_fn(constant),
+            pending: Vec::with_capacity(128),
+            total: 0,
+        }
+    }
+
+    /// Adds the next part of the input.
+    pub(super) fn update(&mut self, part: &[u8]) {
+        self.total = self.total.wrapping_add(part.len() as u64);
+        let mut rest = part;
+        if !self.pending.is_empty() {
+            let taken = rest.len().min(64 - self.pending.len());
+            self.pending.extend_from_slice(&rest[..taken]);
             rest = &rest[taken..];
-            if pending.len() < 64 {
-                continue;
+            if self.pending.len() < 64 {
+                return;
             }
-            if let Some(bytes) = pending.first_chunk::<64>() {
-                block(&mut state, bytes);
+            if let Some(bytes) = self.pending.first_chunk::<64>() {
+                block(&mut self.state, &self.constants, bytes);
             }
-            pending.clear();
+            self.pending.clear();
         }
         let (blocks, tail) = rest.as_chunks::<64>();
         for bytes in blocks {
-            block(&mut state, bytes);
+            block(&mut self.state, &self.constants, bytes);
         }
-        pending.extend_from_slice(tail);
+        self.pending.extend_from_slice(tail);
     }
-    pending.push(0x80);
-    while pending.len() % 64 != 56 {
-        pending.push(0);
+
+    /// The digest in lowercase hexadecimal.
+    pub(super) fn finish(mut self) -> String {
+        self.pending.push(0x80);
+        while self.pending.len() % 64 != 56 {
+            self.pending.push(0);
+        }
+        self.pending
+            .extend_from_slice(&self.total.wrapping_mul(8).to_le_bytes());
+        for bytes in self.pending.as_chunks::<64>().0 {
+            block(&mut self.state, &self.constants, bytes);
+        }
+        self.state
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
-    pending.extend_from_slice(&(total.wrapping_mul(8)).to_le_bytes());
-    for bytes in pending.as_chunks::<64>().0 {
-        block(&mut state, bytes);
+}
+
+/// The MD5 of `parts` in order, in lowercase hexadecimal.
+pub(super) fn hex_digest(parts: &[&[u8]]) -> String {
+    let mut md5 = Md5::new();
+    for part in parts {
+        md5.update(part);
     }
-    state
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    md5.finish()
 }
 
 #[test]
@@ -113,5 +139,18 @@ fn parts_join_at_any_boundary() {
     for split in [0, 1, 55, 63, 64, 65, 128, 199, 200] {
         let (left, right) = text.split_at(split);
         assert_eq!(hex_digest(&[left, right]), whole, "split at {split}");
+    }
+}
+
+/// A long input in small parts equals its one-part digest.
+#[test]
+fn updates_of_any_size_equal_one_update() {
+    let text: Vec<u8> = (0..1000_u32).map(|value| value as u8).collect();
+    for size in [1, 7, 63, 64, 65, 999] {
+        let mut md5 = Md5::new();
+        for part in text.chunks(size) {
+            md5.update(part);
+        }
+        assert_eq!(md5.finish(), hex_digest(&[&text]), "parts of {size}");
     }
 }

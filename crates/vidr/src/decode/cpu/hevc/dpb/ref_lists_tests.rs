@@ -13,6 +13,7 @@ fn entry(poc: i32, long_term: bool) -> RefEntry<u8> {
             picture: Picture::new(8, 8).unwrap(),
             col: ColMotion::new(),
             poc,
+            decode_order: 0,
         })),
         poc,
         long_term,

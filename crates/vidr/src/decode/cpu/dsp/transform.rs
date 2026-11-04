@@ -33,6 +33,7 @@ impl TbBlock {
     }
 
     /// The sample at row `y`, column `x` of a block of `Log2( nTbS )` `log2_size`.
+    #[cfg(test)]
     pub(crate) fn get(&self, log2_size: u32, x: usize, y: usize) -> i32 {
         self.samples.get((y << log2_size) + x).copied().unwrap_or(0)
     }
@@ -182,33 +183,6 @@ pub(crate) fn round_residual(log2_size: u32, bit_depth: u32, block: &mut TbBlock
     let round = 1 << (bd_shift - 1);
     for sample in block.samples.iter_mut().take(1 << (2 * log2_size.min(5))) {
         *sample = (*sample + round) >> bd_shift;
-    }
-}
-
-/// The residual modification of 8.6.5: each sample adds the sample before it, to
-/// the left when `vertical` is false and above when it is true.
-///
-/// Main and Main 10 streams never reach this, because the range extension tools
-/// that invoke it are refused.
-pub(crate) fn accumulate_residual(log2_size: u32, vertical: bool, block: &mut TbBlock) {
-    let log2_size = log2_size.min(5);
-    let size = 1usize << log2_size;
-    if vertical {
-        for y in 1..size {
-            for x in 0..size {
-                let previous = block.get(log2_size, x, y - 1);
-                let current = block.get(log2_size, x, y);
-                block.set(log2_size, x, y, current + previous);
-            }
-        }
-    } else {
-        for y in 0..size {
-            for x in 1..size {
-                let previous = block.get(log2_size, x - 1, y);
-                let current = block.get(log2_size, x, y);
-                block.set(log2_size, x, y, current + previous);
-            }
-        }
     }
 }
 
@@ -542,23 +516,6 @@ mod tests {
         assert_eq!(ten_bit.get(2, 1, 2), 0);
         round_residual(2, 8, &mut block);
         assert_eq!(block.get(2, 3, 3), 0);
-    }
-
-    #[test]
-    fn accumulate_adds_along_each_direction() {
-        let values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let mut block = block_from(2, &values);
-        accumulate_residual(2, false, &mut block);
-        assert_eq!(
-            block_rows(2, &block),
-            [1, 3, 6, 10, 5, 11, 18, 26, 9, 19, 30, 42, 13, 27, 42, 58]
-        );
-        let mut block = block_from(2, &values);
-        accumulate_residual(2, true, &mut block);
-        assert_eq!(
-            block_rows(2, &block),
-            [1, 2, 3, 4, 6, 8, 10, 12, 15, 18, 21, 24, 28, 32, 36, 40]
-        );
     }
 
     #[test]

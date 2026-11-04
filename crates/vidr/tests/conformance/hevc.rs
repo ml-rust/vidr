@@ -1,22 +1,26 @@
 //! The layout of the JCT-VC HEVC_v1 zips: which member is the bitstream, and which
 //! hash goes with it.
 //!
-//! No HEVC software decoder exists in vidr yet, so nothing here decodes. The test
-//! needs no decoder, so it compiles with no features. It reads each zip through the
-//! `unzip` tool, and prints what it finds. The decoder's unit adds the comparison.
+//! The test here needs no decoder, so it compiles with no features. It reads each zip
+//! through the `unzip` tool, and prints what it finds. `hevc_decode` decodes each
+//! stream with the `cpu-hevc` feature, and reads the zips through this module.
 //!
 //! `scripts/conformance/fetch_hevc.sh` fetches the zips. Set
-//! `VIDR_HEVC_CONFORMANCE` to that directory.
+//! `VIDR_HEVC_CONFORMANCE` to that directory, and `VIDR_HEVC_ONLY` to run the zips
+//! whose name holds that text.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The file name endings of a bitstream member, in lowercase.
-const BITSTREAMS: [&str; 6] = [".bit", ".bin", ".hevc", ".265", ".h265", ".hvc"];
+pub(super) const BITSTREAMS: [&str; 6] = [".bit", ".bin", ".hevc", ".265", ".h265", ".hvc"];
+
+/// The file name endings of a hash member, in lowercase.
+const HASHES: [&str; 2] = [".md5", "_md5.txt"];
 
 /// What a hash member covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HashKind {
+pub(super) enum HashKind {
     /// The decoded picture file.
     Yuv,
     /// The bitstream file.
@@ -27,35 +31,53 @@ enum HashKind {
 
 /// One zip's lookup.
 #[derive(Debug, PartialEq, Eq)]
-struct Layout {
-    bitstream: Option<String>,
-    hash: Option<(String, HashKind)>,
+pub(super) struct Layout {
+    pub(super) bitstream: Option<String>,
+    pub(super) hash: Option<(String, HashKind)>,
 }
 
 fn hash_kind(lower: &str) -> HashKind {
-    let stem = lower.trim_end_matches(".md5");
+    let stem = HASHES
+        .iter()
+        .find_map(|ending| lower.strip_suffix(ending))
+        .unwrap_or(lower);
     if stem.contains("yuv") {
         HashKind::Yuv
-    } else if BITSTREAMS.iter().any(|ending| stem.ends_with(ending)) {
+    } else if stem.ends_with("_bit")
+        || stem.ends_with("_bin")
+        || BITSTREAMS.iter().any(|ending| stem.ends_with(ending))
+    {
         HashKind::Bitstream
     } else {
         HashKind::Unnamed
     }
 }
 
+/// True for the resource fork copies that macOS adds to a zip.
+fn is_resource_fork(lower: &str) -> bool {
+    lower.starts_with("__macosx/")
+        || lower
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("._"))
+}
+
 /// Picks the bitstream and the hash from a zip's member names. A hash of the
 /// decoded pictures wins over any other.
-fn lookup<'a>(members: impl Iterator<Item = &'a str>) -> Layout {
+pub(super) fn lookup<'a>(members: impl Iterator<Item = &'a str>) -> Layout {
     let mut layout = Layout {
         bitstream: None,
         hash: None,
     };
     for member in members {
         let lower = member.to_ascii_lowercase();
+        if is_resource_fork(&lower) {
+            continue;
+        }
         if BITSTREAMS.iter().any(|ending| lower.ends_with(ending)) {
             layout.bitstream.get_or_insert_with(|| member.to_owned());
         }
-        if lower.ends_with(".md5") {
+        if HASHES.iter().any(|ending| lower.ends_with(ending)) {
             let kind = hash_kind(&lower);
             let better = match &layout.hash {
                 None => true,
@@ -70,26 +92,38 @@ fn lookup<'a>(members: impl Iterator<Item = &'a str>) -> Layout {
 }
 
 /// The first run of 32 hexadecimal digits in a hash file, in lowercase.
-fn md5_token(text: &str) -> Option<String> {
+pub(super) fn md5_token(text: &str) -> Option<String> {
     text.split(|letter: char| !letter.is_ascii_hexdigit())
         .find(|word| word.len() == 32)
         .map(str::to_ascii_lowercase)
 }
 
-fn zips(directory: &Path) -> Vec<PathBuf> {
+/// The zip's name without `.zip`.
+pub(super) fn zip_name(zip: &Path) -> String {
+    zip.file_stem()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+}
+
+/// The zips in `directory` whose name holds `VIDR_HEVC_ONLY`, by name.
+pub(super) fn zips(directory: &Path) -> Vec<PathBuf> {
+    let only = std::env::var("VIDR_HEVC_ONLY").ok();
     let entries = std::fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("reading {}: {error}", directory.display()));
     let mut found: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ending| ending == "zip"))
+        .filter(|path| {
+            only.as_deref()
+                .is_none_or(|text| zip_name(path).contains(text))
+        })
         .collect();
     found.sort();
     found
 }
 
-/// Runs `unzip FLAG ZIP [MEMBER]`, and returns its output. A failed call is an
-/// error that names the zip.
-fn unzip(flag: &str, zip: &Path, member: Option<&str>) -> Result<String, String> {
+/// Runs `unzip FLAG ZIP [MEMBER]`, and returns its bytes. A failed call is an error
+/// that names the zip.
+pub(super) fn unzip_bytes(flag: &str, zip: &Path, member: Option<&str>) -> Result<Vec<u8>, String> {
     let output = Command::new("unzip")
         .arg(flag)
         .arg(zip)
@@ -103,7 +137,13 @@ fn unzip(flag: &str, zip: &Path, member: Option<&str>) -> Result<String, String>
             output.status
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
+}
+
+/// [`unzip_bytes`] as text.
+pub(super) fn unzip(flag: &str, zip: &Path, member: Option<&str>) -> Result<String, String> {
+    let bytes = unzip_bytes(flag, zip, member)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[test]
@@ -119,7 +159,7 @@ fn hevc_zips_hold_a_bitstream_and_a_hash() {
     let zips = zips(&directory);
     assert!(
         !zips.is_empty(),
-        "{} holds no zip. Run `scripts/conformance/fetch_hevc.sh {}`.",
+        "{} holds no zip for VIDR_HEVC_ONLY. Run `scripts/conformance/fetch_hevc.sh {}`.",
         directory.display(),
         directory.display()
     );
@@ -186,6 +226,46 @@ fn a_zip_with_only_a_plain_hash_keeps_it() {
     assert_eq!(layout.bitstream.as_deref(), Some("X.bin"));
     assert_eq!(layout.hash, Some(("X.md5".to_owned(), HashKind::Unnamed)));
     assert_eq!(hash_kind("x.bit.md5"), HashKind::Bitstream);
+}
+
+#[test]
+fn every_hash_name_in_the_set_has_its_kind() {
+    for (name, kind) in [
+        ("x.yuv.md5", HashKind::Yuv),
+        ("x_yuv.md5", HashKind::Yuv),
+        ("x.bit.md5", HashKind::Bitstream),
+        ("x_bit.md5", HashKind::Bitstream),
+        ("x_bin.md5", HashKind::Bitstream),
+        ("x.md5", HashKind::Unnamed),
+        ("x_md5.txt", HashKind::Unnamed),
+    ] {
+        assert_eq!(hash_kind(name), kind, "`{name}`");
+    }
+}
+
+#[test]
+fn resource_forks_are_not_members() {
+    let layout = lookup(
+        [
+            "__MACOSX/X/._X_yuv.md5",
+            "__MACOSX/X/._X.bit",
+            "X/._Y.bit",
+            "X/X.bit",
+            "X/X_yuv.md5",
+        ]
+        .into_iter(),
+    );
+    assert_eq!(layout.bitstream.as_deref(), Some("X/X.bit"));
+    assert_eq!(layout.hash, Some(("X/X_yuv.md5".to_owned(), HashKind::Yuv)));
+}
+
+#[test]
+fn a_text_hash_member_counts() {
+    let layout = lookup(["X/X.bin", "X/X.txt", "X/X_md5.txt"].into_iter());
+    assert_eq!(
+        layout.hash,
+        Some(("X/X_md5.txt".to_owned(), HashKind::Unnamed))
+    );
 }
 
 #[test]

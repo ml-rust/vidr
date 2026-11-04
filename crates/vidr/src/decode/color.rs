@@ -5,6 +5,9 @@
 
 use numr::ops::{ChromaSiting, ColorMatrix, ColorRange, YuvSpec};
 
+#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+use crate::bitstream::VuiSignal;
+
 /// H.273 `MatrixCoefficients` 1: ITU-R BT.709.
 pub const MATRIX_BT709: u8 = 1;
 /// H.273 `MatrixCoefficients` 2: unspecified.
@@ -47,6 +50,36 @@ pub(crate) const fn vp9_matrix(color_space: u8) -> u8 {
         7 => 0,
         _ => MATRIX_UNSPECIFIED,
     }
+}
+
+/// Colour before any VUI states one.
+#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+pub(crate) const fn unspecified_color() -> ColorFacts {
+    ColorFacts {
+        matrix_coefficients: MATRIX_UNSPECIFIED,
+        transfer_characteristics: TRANSFER_UNSPECIFIED,
+        colour_primaries: PRIMARIES_UNSPECIFIED,
+        full_range: false,
+        chroma_location: None,
+    }
+}
+
+/// Colour from an H.264 or HEVC SPS VUI. A missing field stays unspecified.
+#[cfg(any(feature = "openh264", feature = "openh264-cisco", feature = "cpu-hevc"))]
+pub(crate) fn vui_color(vui: &VuiSignal) -> ColorFacts {
+    let mut color = unspecified_color();
+    if let Some(signal) = vui.video_signal_type {
+        color.full_range = signal.full_range;
+        if let Some(description) = signal.colour {
+            color.matrix_coefficients = description.matrix_coefficients;
+            color.transfer_characteristics = description.transfer_characteristics;
+            color.colour_primaries = description.colour_primaries;
+        }
+    }
+    color.chroma_location = vui
+        .chroma_sample_loc
+        .and_then(|location| ChromaLocation::from_h273(location.top_field));
+    color
 }
 
 /// Position of a 4:2:0 chroma sample relative to the luma samples.

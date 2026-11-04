@@ -28,6 +28,9 @@ pub(crate) struct Frame<S> {
     pub(crate) col: ColMotion,
     /// `PicOrderCntVal`.
     pub(crate) poc: i32,
+    /// How many pictures started decoding before this one. A generated picture
+    /// never leaves as output, so its value holds no meaning.
+    pub(crate) decode_order: u64,
 }
 
 /// The reference marking of a picture (8.3.2).
@@ -426,6 +429,7 @@ impl<S: Sample> Dpb<S> {
                     picture: Picture::new(format.width, format.height)?,
                     col: ColMotion::new(),
                     poc: 0,
+                    decode_order: 0,
                 }
             }
         };

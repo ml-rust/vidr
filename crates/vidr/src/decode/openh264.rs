@@ -29,11 +29,11 @@ use numr::dtype::DType;
 use numr::runtime::Runtime;
 
 use super::{
-    ChromaFormat, ChromaLocation, ColorFacts, DecodeCodec, DecodedFrame, Decoder,
-    MATRIX_UNSPECIFIED, PRIMARIES_UNSPECIFIED, PixelFormat, TRANSFER_UNSPECIFIED,
+    ChromaFormat, ColorFacts, DecodeCodec, DecodedFrame, Decoder, PixelFormat, unspecified_color,
+    vui_color,
 };
 use crate::bitstream::{
-    AvcConfig, H264NalType, H264SpsFacts, ToAnnexB, VuiSignal, annexb, h264_sps_facts, h264_sps_vui,
+    AvcConfig, H264NalType, H264SpsFacts, ToAnnexB, annexb, h264_sps_facts, h264_sps_vui,
 };
 use crate::error::DecodeError;
 use crate::frame::{HostPlanes, upload_planes, upload_route};
@@ -170,7 +170,7 @@ where
                 check_sps(&h264_sps_facts(sps)?)?;
             }
             if let Some(first) = parsed.sps.first() {
-                color = sps_color(&h264_sps_vui(first)?);
+                color = vui_color(&h264_sps_vui(first)?);
             }
             Some(ToAnnexB::h264(&parsed))
         };
@@ -222,7 +222,7 @@ where
             holds_picture |= kind.is_vcl();
             if kind == H264NalType::SPS {
                 check_sps(&h264_sps_facts(nal)?)?;
-                self.color = sps_color(&h264_sps_vui(nal)?);
+                self.color = vui_color(&h264_sps_vui(nal)?);
             }
         }
         Ok(holds_picture)
@@ -291,33 +291,6 @@ fn check_sps(sps: &H264SpsFacts) -> Result<(), DecodeError> {
         });
     }
     Ok(())
-}
-
-const fn unspecified_color() -> ColorFacts {
-    ColorFacts {
-        matrix_coefficients: MATRIX_UNSPECIFIED,
-        transfer_characteristics: TRANSFER_UNSPECIFIED,
-        colour_primaries: PRIMARIES_UNSPECIFIED,
-        full_range: false,
-        chroma_location: None,
-    }
-}
-
-/// Colour from an SPS VUI. A missing field stays unspecified.
-fn sps_color(vui: &VuiSignal) -> ColorFacts {
-    let mut color = unspecified_color();
-    if let Some(signal) = vui.video_signal_type {
-        color.full_range = signal.full_range;
-        if let Some(description) = signal.colour {
-            color.matrix_coefficients = description.matrix_coefficients;
-            color.transfer_characteristics = description.transfer_characteristics;
-            color.colour_primaries = description.colour_primaries;
-        }
-    }
-    color.chroma_location = vui
-        .chroma_sample_loc
-        .and_then(|location| ChromaLocation::from_h273(location.top_field));
-    color
 }
 
 fn software(call: &'static str, input: String, error: &::openh264::Error) -> DecodeError {

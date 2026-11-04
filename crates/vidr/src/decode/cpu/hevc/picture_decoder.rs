@@ -88,6 +88,8 @@ pub(crate) struct PictureBegin {
     pub(crate) poc: i32,
     /// True for an IRAP picture with `NoRaslOutputFlag` 1.
     pub(crate) irap_no_rasl: bool,
+    /// How many pictures started decoding before this one.
+    pub(crate) decode_order: u64,
 }
 
 /// Decodes pictures of one sample type. Allocations reuse between pictures of one
@@ -168,6 +170,7 @@ impl<S: Sample> PictureDecoder<S> {
         }
         let mut frame = self.dpb.take_frame(&format)?;
         frame.poc = begin.poc;
+        frame.decode_order = begin.decode_order;
         self.active = Some(ActivePicture {
             frame,
             carry: EntropyCarry::default(),

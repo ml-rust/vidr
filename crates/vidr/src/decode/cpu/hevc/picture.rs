@@ -213,11 +213,13 @@ impl<S: Sample> Picture<S> {
     }
 
     /// The Cb plane.
+    #[cfg(test)]
     pub(crate) const fn cb(&self) -> &Plane<S> {
         &self.cb
     }
 
     /// The Cr plane.
+    #[cfg(test)]
     pub(crate) const fn cr(&self) -> &Plane<S> {
         &self.cr
     }

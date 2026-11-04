@@ -3,6 +3,8 @@
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 mod bitstream;
 mod conformance;
+#[cfg(feature = "cpu-hevc")]
+mod cpu_hevc;
 #[cfg(feature = "dav1d")]
 mod dav1d;
 #[cfg(any(
@@ -10,7 +12,8 @@ mod dav1d;
     feature = "dav1d",
     feature = "openh264",
     feature = "openh264-cisco",
-    feature = "cpu-vp9"
+    feature = "cpu-vp9",
+    feature = "cpu-hevc"
 ))]
 mod decode_fixtures;
 #[cfg(feature = "frame")]

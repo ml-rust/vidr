@@ -198,6 +198,17 @@ pub enum DecodeError {
         /// `subsampling_y`.
         subsampling_y: bool,
     },
+    /// An HEVC stream uses a tool the CPU HEVC decoder does not decode.
+    HevcTool {
+        /// The decoder.
+        decoder: &'static str,
+        /// The syntax element that names the tool.
+        field: &'static str,
+        /// The value the stream holds.
+        value: u64,
+        /// The values the decoder takes.
+        supported: &'static str,
+    },
     /// The OpenH264 binary at the caller's path does not load, or its hash is
     /// not on the list the `openh264` crate holds.
     Openh264Library {
@@ -402,6 +413,16 @@ impl fmt::Display for DecodeError {
                      stream with another decoder, or convert the source to 4:2:0 at 8 or 10 bits."
                 )
             }
+            Self::HevcTool {
+                decoder,
+                field,
+                value,
+                supported,
+            } => write!(
+                f,
+                "the HEVC stream holds {field} equal to {value}, and {decoder} takes {supported}. \
+                 Decode this stream with another decoder, or transcode it to Main or Main 10."
+            ),
             Self::Openh264Library { path, reason } => write!(
                 f,
                 "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
@@ -508,6 +529,20 @@ mod tests {
         assert!(message.contains("profile 3, 4:4:0, 12 bits"));
         assert!(message.contains("rusty_vp9 takes profiles 0 and 2"));
         assert!(message.contains("convert the source"));
+    }
+
+    #[test]
+    fn hevc_tool_names_the_field_the_value_and_the_next_action() {
+        let error = DecodeError::HevcTool {
+            decoder: "HevcDecoder",
+            field: "chroma_format_idc",
+            value: 3,
+            supported: "1, which is 4:2:0",
+        };
+        let message = error.to_string();
+        assert!(message.contains("chroma_format_idc equal to 3"));
+        assert!(message.contains("HevcDecoder takes 1, which is 4:2:0"));
+        assert!(message.contains("transcode"));
     }
 
     #[test]
