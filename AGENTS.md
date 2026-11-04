@@ -42,6 +42,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Media input (`mp4`, `mkv`): open by file bytes through containr, first video track, edit timeline, rotation, container sample aspect ratio, colour tags, decoder config | Implemented |
 | Media output (`mp4`, `mkv`): one-pass `.mp4` faststart or `.mkv`, encoded H.264, HEVC, or AV1 with audio, text subtitles, chapters, and metadata copied, MKV attachments, named refusals before GPU work, bounded mux buffer | Implemented |
 | Copied-track checks: `read_stream_facts`, `read_track_facts`, `check_tracks` | Implemented |
+| Threaded pump (`pipeline`): demux and decode, edit window and transform, encode and mux on three threads with bounded channels, first-error and panic handling, stop requests, last-frame duration, frame count check. `InputSource` and `MuxSink` behind `mp4` or `mkv`. No test has run it on a GPU yet | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.

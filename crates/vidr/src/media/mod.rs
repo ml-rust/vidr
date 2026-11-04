@@ -17,6 +17,8 @@ mod output_mkv;
 #[cfg(feature = "mp4")]
 mod output_mp4;
 mod plan;
+#[cfg(feature = "pipeline")]
+mod pump;
 mod video;
 
 pub use containr::{ContainerColour, Language, Track, TrackKind};
@@ -24,4 +26,6 @@ pub use facts::{DecodeConfig, read_stream_facts, read_track_facts};
 pub use input::Input;
 pub use output::OutputMux;
 pub use plan::{CopyPlan, DroppedTrack, OutputKind, plan_copy};
+#[cfg(feature = "pipeline")]
+pub use pump::{InputSource, MuxSink};
 pub use video::VideoOutput;

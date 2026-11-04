@@ -59,6 +59,9 @@ mp4 = ["decode", "encode", "dep:containr", "containr/mp4"]
 # Matroska and WebM input and Matroska output through containr, the decoder's
 # codec names included. Needs no GPU.
 mkv = ["decode", "encode", "dep:containr", "containr/mkv"]
+# The threaded decode, transform, and encode pump over the `Decoder` and
+# `Encoder` traits. Needs no GPU.
+pipeline = ["decode", "encode", "frame"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 

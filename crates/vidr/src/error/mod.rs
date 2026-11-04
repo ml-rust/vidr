@@ -16,6 +16,8 @@ mod frame;
 mod geometry;
 #[cfg(any(feature = "mp4", feature = "mkv"))]
 mod media;
+#[cfg(feature = "pipeline")]
+mod pipeline;
 mod support;
 mod time;
 mod timing;
@@ -34,5 +36,7 @@ pub use frame::FrameError;
 pub use geometry::GeometryError;
 #[cfg(any(feature = "mp4", feature = "mkv"))]
 pub use media::MediaError;
+#[cfg(feature = "pipeline")]
+pub use pipeline::{PipelineError, PumpStage};
 pub use time::{Operation, TimeError};
 pub use timing::{EditListError, TimingError};

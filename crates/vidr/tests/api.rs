@@ -10,4 +10,6 @@ mod media;
 mod nvdec;
 #[cfg(feature = "nvenc")]
 mod nvenc;
+#[cfg(feature = "pipeline")]
+mod pipeline;
 mod timing;

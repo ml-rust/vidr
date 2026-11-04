@@ -15,6 +15,8 @@ use super::EncodeError;
 use super::FrameError;
 #[cfg(any(feature = "mp4", feature = "mkv"))]
 use super::MediaError;
+#[cfg(feature = "pipeline")]
+use super::PipelineError;
 use super::{EditListError, GeometryError, TimeError, TimingError};
 use crate::check::CheckError;
 
@@ -49,6 +51,9 @@ pub enum Error {
     /// Media input.
     #[cfg(any(feature = "mp4", feature = "mkv"))]
     Media(MediaError),
+    /// The threaded pump.
+    #[cfg(feature = "pipeline")]
+    Pipeline(PipelineError),
 }
 
 impl fmt::Display for Error {
@@ -71,6 +76,8 @@ impl fmt::Display for Error {
             Self::Color(error) => fmt::Display::fmt(error, f),
             #[cfg(any(feature = "mp4", feature = "mkv"))]
             Self::Media(error) => fmt::Display::fmt(error, f),
+            #[cfg(feature = "pipeline")]
+            Self::Pipeline(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -95,6 +102,8 @@ impl StdError for Error {
             Self::Color(error) => Some(error),
             #[cfg(any(feature = "mp4", feature = "mkv"))]
             Self::Media(error) => Some(error),
+            #[cfg(feature = "pipeline")]
+            Self::Pipeline(error) => Some(error),
         }
     }
 }
@@ -168,6 +177,13 @@ impl From<ColorError> for Error {
 impl From<MediaError> for Error {
     fn from(error: MediaError) -> Self {
         Self::Media(error)
+    }
+}
+
+#[cfg(feature = "pipeline")]
+impl From<PipelineError> for Error {
+    fn from(error: PipelineError) -> Self {
+        Self::Pipeline(error)
     }
 }
 
