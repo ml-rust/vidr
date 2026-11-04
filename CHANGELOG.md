@@ -74,9 +74,20 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - The command takes the proof of concept's flags without `--backend`, and `--models-dir`. It exits 0, 1, or 130. Ctrl-C, SIGTERM, and SIGHUP ask the run to stop, which removes the temporary output. A second signal ends the process at once.
 - `vidr`: `Input::bitstream_sample_aspect_ratio` reads the VUI of the first SPS in an H.264 or HEVC config record. `read_stream_facts` falls back to it when the container states no ratio.
 - `vidr`: `pipeline::PumpControl`, `PumpProgress`, and `PumpReport` are in every build, so a caller holds a stop request with no `pipeline` feature.
+- `vidr-remaster`: end-to-end tests in `tests/e2e/` with `tests/e2e.rs` as the root, behind `cuda`, `mp4`, `mkv`, `model-srvgg`, and `model-rrdb`. The nextest `nvenc` group caps them. A missing GPU, model, or ffmpeg skips with a notice.
+- `vidr-remaster`: `RunOutcome::OutputWithoutSidecar`, `ReportStatus::OutputWithoutSidecar`, `MissingSidecar`, `Published`, `TempOutput::publish_with_sidecar`, and `remove_temp_directories`.
+- README: a `vidr-remaster` usage section.
+
+### Changed
+
+- `vidr-remaster`: `RunOutcome::Complete::report` is now `Option<PathBuf>`. `None` means the report did not write.
 
 ### Fixed
 
+- `vidr-remaster`: a second signal removes the temporary directory before `process::exit`. `TempOutput` registers its directory, and `remove_temp_directories` removes every registered one. `ctrlc` calls the handler on its own thread, outside signal context, so the removal runs there.
+- `vidr-remaster`: the provenance sidecar is written beside the temporary output before the publish, and renames into place after it. A failure to hash or write it now leaves no output. Only the rename can fail after the publish, and that gives `RunOutcome::OutputWithoutSidecar`, report status `output_without_sidecar`, exit code 1, and an error that names both paths. The sidecar bytes are unchanged, since a record holds no output path.
+- `vidr-remaster`: a report that does not write after the publish keeps the run complete. The command prints a warning with the report path and the cause, and exits 0.
+- `vidr-remaster`: `report.json` is written atomically: a temporary file in the same directory, a sync, then a rename. It keeps the mode a plain write gives, and so does the sidecar, which was owner-only before.
 - `vidr`: NVDEC decode of VP9 reported matrix coefficients 0 (identity) and limited range for every stream, because NVDEC returns an all-zero video signal description for VP9. `ColorFacts::yuv_spec` returned `None`, so frame conversion refused a BT.709 VP9 stream. `NvdecDecoder` now reads `color_space` and `color_range` from the latest key frame header, maps `color_space` to H.273 `MatrixCoefficients`, and reports transfer and primaries as unspecified, because VP9 carries neither. A stream with no key frame header yet reports matrix 2, never 0.
 - `vidr`: `frame::to_rgb_reusing` writes an even frame into a buffer the caller keeps, and `frame::reuse_tensor` keeps such a buffer. `FrameError::OutOfMemory` separates an allocation failure from other numr errors.
 - `vidr-remaster`: the model catalog in `catalog`, in the default build, with no network code.
