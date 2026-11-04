@@ -44,7 +44,7 @@ use vidr::decode::hevc::HevcDecoder;
 use vidr::decode::{DecodedFrame, Decoder, PixelFormat};
 use vidr::{BitstreamError, DecodeError};
 
-use super::hevc::{BITSTREAMS, HashKind, lookup, md5_token, unzip, unzip_bytes, zip_name, zips};
+use super::hevc::{BITSTREAMS, HashKind, md5_token, read_stream, selected_zips, unzip, zip_name};
 use super::md5::{Md5, hex_digest};
 use super::runner::{panic_text, run_each};
 use crate::cpu_hevc::packets::nal_packets;
@@ -243,13 +243,8 @@ fn feed(stream: &[u8], sink: &mut FrameSink) -> Result<(), Stop> {
 type ZipStream = (Vec<u8>, Option<(String, String)>);
 
 fn read_zip(zip: &Path) -> Result<ZipStream, String> {
-    let listing = unzip("-Z1", zip, None)?;
-    let layout = lookup(listing.lines());
-    let member = layout
-        .bitstream
-        .ok_or_else(|| format!("{}: the zip holds no bitstream member", zip.display()))?;
-    let stream = unzip_bytes("-p", zip, Some(&member))?;
-    let Some((hash, kind)) = layout.hash else {
+    let (stream, hash) = read_stream(zip)?;
+    let Some((hash, kind)) = hash else {
         return Ok((stream, None));
     };
     let text = unzip("-p", zip, Some(&hash))?;
@@ -317,21 +312,9 @@ fn run_zip(zip: &Path, report: Option<&Mutex<File>>) -> Row {
 
 #[test]
 fn hevc_zips_decode_and_match() {
-    let Some(directory) = std::env::var_os("VIDR_HEVC_CONFORMANCE") else {
-        eprintln!(
-            "skipping: VIDR_HEVC_CONFORMANCE is unset. Run \
-             `scripts/conformance/fetch_hevc.sh DIR`, then set it to DIR."
-        );
+    let Some(zips) = selected_zips() else {
         return;
     };
-    let directory = PathBuf::from(directory);
-    let zips = zips(&directory);
-    assert!(
-        !zips.is_empty(),
-        "{} holds no zip for VIDR_HEVC_ONLY. Run `scripts/conformance/fetch_hevc.sh {}`.",
-        directory.display(),
-        directory.display()
-    );
     let report_path = std::env::var_os("VIDR_HEVC_REPORT").map(PathBuf::from);
     let report = report_path.as_ref().map(|path| {
         let file = File::create(path).unwrap_or_else(|error| {

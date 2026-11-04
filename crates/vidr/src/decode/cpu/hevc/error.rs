@@ -5,6 +5,27 @@ use std::fmt;
 
 use crate::error::BitstreamError;
 
+/// The picture format a coded video sequence holds to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SequenceFormat {
+    /// `pic_width_in_luma_samples`.
+    pub(crate) width: u32,
+    /// `pic_height_in_luma_samples`.
+    pub(crate) height: u32,
+    /// `BitDepthY`.
+    pub(crate) bit_depth: u32,
+}
+
+impl fmt::Display for SequenceFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}x{} at {} bits",
+            self.width, self.height, self.bit_depth
+        )
+    }
+}
+
 /// An error while checking a stream or parsing its slice data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HevcError {
@@ -25,6 +46,24 @@ pub(crate) enum HevcError {
         width: u32,
         /// `pic_height_in_luma_samples`.
         height: u32,
+    },
+    /// The stream asks for more pictures than `MaxDpbSize` allows at this size (A-2).
+    DpbTooLarge {
+        /// Pictures the SPS or the reference picture set asks for.
+        count: usize,
+        /// `MaxDpbSize` at level 6.2.
+        limit: usize,
+        /// `pic_width_in_luma_samples`.
+        width: u32,
+        /// `pic_height_in_luma_samples`.
+        height: u32,
+    },
+    /// A picture changes the format inside a coded video sequence (7.4.2.4.2).
+    SequenceFormatChange {
+        /// The format of the picture before.
+        previous: SequenceFormat,
+        /// The format of this picture.
+        current: SequenceFormat,
     },
     /// A buffer does not fit in memory.
     Allocation {
@@ -109,6 +148,23 @@ impl fmt::Display for HevcError {
                 f,
                 "The picture size {width}x{height} exceeds level 6.2: 35651584 luma samples and \
                  16888 samples per side. Transcode the stream to a smaller size."
+            ),
+            Self::DpbTooLarge {
+                count,
+                limit,
+                width,
+                height,
+            } => write!(
+                f,
+                "The HEVC stream asks for {count} pictures in the decoded picture buffer at \
+                 {width}x{height}. Level 6.2 allows {limit} at this size. The input is corrupt or \
+                 above level 6.2. Remux the source, or transcode it to a smaller size."
+            ),
+            Self::SequenceFormatChange { previous, current } => write!(
+                f,
+                "An HEVC picture changes the format from {previous} to {current}. Only an IRAP \
+                 picture with NoRaslOutputFlag 1 can change it. The input is cut or corrupt. \
+                 Start from a random access point, or remux the source."
             ),
             Self::Allocation { what, count } => write!(
                 f,

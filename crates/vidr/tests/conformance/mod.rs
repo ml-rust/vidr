@@ -4,6 +4,8 @@
 mod hevc;
 #[cfg(feature = "cpu-hevc")]
 mod hevc_decode;
+#[cfg(feature = "cpu-hevc")]
+mod hevc_robust;
 #[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 mod md5;
 #[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]

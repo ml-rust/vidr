@@ -5,9 +5,18 @@
 use std::path::PathBuf;
 
 use crate::bitstream::annexb::split;
+use crate::bitstream::hevc_pps::tests as pps_tests;
+use crate::bitstream::hevc_rps::ShortTermRefPicSet;
+use crate::bitstream::hevc_slice::SliceSegmentHeader;
+use crate::bitstream::hevc_sps_full::tests as sps_tests;
+use crate::bitstream::test_bits::{BitWriter, hevc_nal};
 use crate::decode::cpu::dsp::sample::Sample;
 
-use super::error::HevcError;
+use super::cabac::context::{self as ctx, ContextTable};
+use super::cabac::test_encoder::CabacEncoder;
+use super::dpb::rps::RpsPocs;
+use super::error::{HevcError, SequenceFormat};
+use super::params::{check_dpb_count, max_dpb_size};
 use super::picture::{Picture, Plane};
 use super::stream::{DecodeOptions, DecodedPicture, StreamDecoder};
 
@@ -521,4 +530,317 @@ fn other_layers_and_short_units_are_dropped() {
     assert_eq!(decoder.decode_nal(&[0x42, 0x09]), Ok(()));
     assert_eq!(decoder.flush(), Ok(()));
     assert_eq!(decoder.next_output(), None);
+}
+
+const TRAIL_R: u8 = 1;
+const IDR_W_RADL: u8 = 19;
+
+/// An SPS of 16x16 CTBs and coding blocks with no SAO and no reference sets.
+fn small_sps(width: u32, height: u32, depth_minus8: u32) -> Vec<u8> {
+    sps_tests::build(&sps_tests::Spec {
+        width,
+        height,
+        bit_depth_luma_minus8: depth_minus8,
+        bit_depth_chroma_minus8: depth_minus8,
+        dec_pic_buffering: [1, 1],
+        num_reorder: [0, 0],
+        min_cb_minus3: 1,
+        diff_cb: 0,
+        diff_tb: 2,
+        depth_inter: 0,
+        depth_intra: 0,
+        sao: false,
+        sets: Vec::new(),
+        temporal_mvp: false,
+        ..sps_tests::Spec::default()
+    })
+}
+
+fn small_pps(pps_id: u32) -> Vec<u8> {
+    pps_tests::build(&pps_tests::Spec {
+        pps_id,
+        ..pps_tests::Spec::default()
+    })
+}
+
+/// One I slice segment of `small_sps` under `small_pps`.
+#[derive(Clone, Copy)]
+struct SmallSlice {
+    nal_unit_type: u8,
+    pps_id: u32,
+    /// `slice_segment_address` in `address_bits` bits, with `first_slice_segment_in_pic_flag`
+    /// 0. `None` for the first slice segment of a picture.
+    address: Option<(u32, u64)>,
+}
+
+impl SmallSlice {
+    const fn first(nal_unit_type: u8) -> Self {
+        Self {
+            nal_unit_type,
+            pps_id: 0,
+            address: None,
+        }
+    }
+
+    /// The NAL unit with `data` as its slice data.
+    fn nal(&self, data: &[u8]) -> Vec<u8> {
+        let mut header = BitWriter::new();
+        header.flag(self.address.is_none());
+        if self.nal_unit_type >= 16 {
+            // no_output_of_prior_pics_flag.
+            header.flag(false);
+        }
+        header.ue(self.pps_id);
+        if let Some((bits, address)) = self.address {
+            header.u(bits, address);
+        }
+        // slice_type I.
+        header.ue(2);
+        if self.nal_unit_type != IDR_W_RADL {
+            // slice_pic_order_cnt_lsb, short_term_ref_pic_set_sps_flag 0, and an empty set.
+            header.u(8, 1).flag(false).ue(0).ue(0);
+        }
+        // slice_qp_delta, then slice_loop_filter_across_slices_enabled_flag.
+        header.se(0).flag(true).trailing();
+        let mut rbsp = header.bytes();
+        rbsp.extend_from_slice(data);
+        hevc_nal(self.nal_unit_type, &rbsp)
+    }
+}
+
+/// The slice data of `count` 16x16 intra CTUs with DC prediction and no residual.
+fn intra_ctus(count: usize) -> Vec<u8> {
+    let mut contexts = ContextTable::new(0, 26);
+    let mut encoder = CabacEncoder::new();
+    for index in 1..=count {
+        // part_mode 2Nx2N, prev_intra_luma_pred_flag, mpm_idx 1, intra_chroma_pred_mode
+        // 4, and no coded block flags.
+        encoder.encode_decision(contexts.state_mut(ctx::PART_MODE), true);
+        encoder.encode_decision(contexts.state_mut(ctx::PREV_INTRA_LUMA_PRED), true);
+        encoder.encode_bypass(true);
+        encoder.encode_bypass(false);
+        encoder.encode_decision(contexts.state_mut(ctx::INTRA_CHROMA_PRED_MODE), false);
+        encoder.encode_decision(contexts.state_mut(ctx::CBF_CHROMA), false);
+        encoder.encode_decision(contexts.state_mut(ctx::CBF_CHROMA), false);
+        encoder.encode_decision(contexts.state_mut(ctx::CBF_LUMA + 1), false);
+        encoder.encode_terminate(index == count);
+    }
+    encoder.finish()
+}
+
+/// The NAL units of `count` 16x16 IDR pictures.
+pub(crate) fn intra_pictures(count: usize) -> Vec<Vec<u8>> {
+    let mut units = vec![small_sps(16, 16, 0), small_pps(0)];
+    units.extend((0..count).map(|_| SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(1))));
+    units
+}
+
+/// `units` as one Annex-B packet.
+pub(crate) fn annexb_of(units: &[Vec<u8>]) -> Vec<u8> {
+    let mut stream = Vec::new();
+    for unit in units {
+        stream.extend_from_slice(&[0, 0, 0, 1]);
+        stream.extend_from_slice(unit);
+    }
+    stream
+}
+
+/// Feeds `units`, and returns the first error.
+fn feed_units(decoder: &mut StreamDecoder, units: &[Vec<u8>]) -> Result<(), HevcError> {
+    units.iter().try_for_each(|unit| decoder.decode_nal(unit))
+}
+
+#[test]
+fn hand_built_pictures_decode() {
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    assert_eq!(feed_units(&mut decoder, &intra_pictures(2)), Ok(()));
+    assert_eq!(decoder.flush(), Ok(()));
+    let outputs = std::iter::from_fn(|| decoder.next_output()).count();
+    assert_eq!(outputs, 2);
+}
+
+/// A trailing picture cannot change the format, because its references keep the old
+/// one. The check runs before the new tables and buffers.
+#[test]
+fn a_format_change_at_a_trailing_picture_is_a_named_error() {
+    let previous = SequenceFormat {
+        width: 16,
+        height: 16,
+        bit_depth: 8,
+    };
+    let changes = [(32, 16, 0), (16, 32, 0), (16, 16, 2)];
+    for (width, height, depth_minus8) in changes {
+        let mut decoder = StreamDecoder::new(DecodeOptions::default());
+        feed_units(&mut decoder, &intra_pictures(1)).unwrap();
+        decoder
+            .decode_nal(&small_sps(width, height, depth_minus8))
+            .unwrap();
+        let slice = SmallSlice::first(TRAIL_R).nal(&intra_ctus(1));
+        assert_eq!(
+            decoder.decode_nal(&slice),
+            Err(HevcError::SequenceFormatChange {
+                previous,
+                current: SequenceFormat {
+                    width,
+                    height,
+                    bit_depth: 8 + depth_minus8,
+                },
+            })
+        );
+    }
+}
+
+#[test]
+fn a_format_change_at_an_idr_picture_decodes() {
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    feed_units(&mut decoder, &intra_pictures(1)).unwrap();
+    decoder.decode_nal(&small_sps(32, 16, 0)).unwrap();
+    let slice = SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(2));
+    assert_eq!(decoder.decode_nal(&slice), Ok(()));
+    assert_eq!(decoder.flush(), Ok(()));
+    let widths: Vec<usize> = std::iter::from_fn(|| decoder.next_output())
+        .map(|picture| match picture {
+            DecodedPicture::Eight(frame) => frame.picture.luma().width(),
+            DecodedPicture::Ten(frame) => frame.picture.luma().width(),
+        })
+        .collect();
+    assert_eq!(widths, [16, 32]);
+}
+
+#[test]
+fn a_trailing_picture_of_the_same_format_decodes() {
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    feed_units(&mut decoder, &intra_pictures(1)).unwrap();
+    decoder.decode_nal(&small_sps(16, 16, 0)).unwrap();
+    let slice = SmallSlice::first(TRAIL_R).nal(&intra_ctus(1));
+    assert_eq!(decoder.decode_nal(&slice), Ok(()));
+    assert_eq!(decoder.flush(), Ok(()));
+    assert_eq!(std::iter::from_fn(|| decoder.next_output()).count(), 2);
+}
+
+#[test]
+fn a_slice_that_names_another_pps_is_a_named_error() {
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    let first = SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(1));
+    let units = [small_sps(32, 16, 0), small_pps(0), small_pps(1), first];
+    feed_units(&mut decoder, &units).unwrap();
+    let second = SmallSlice {
+        nal_unit_type: IDR_W_RADL,
+        pps_id: 1,
+        address: Some((1, 1)),
+    };
+    assert!(matches!(
+        decoder.decode_nal(&second.nal(&intra_ctus(1))),
+        Err(HevcError::InvalidSyntax {
+            element: "slice_pic_parameter_set_id",
+            value: 1,
+            ..
+        })
+    ));
+}
+
+/// A slice segment over CTBs that a slice segment before it holds decodes nothing.
+#[test]
+fn a_repeated_slice_address_is_a_named_error() {
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    let first = SmallSlice::first(IDR_W_RADL).nal(&intra_ctus(1));
+    let second = SmallSlice {
+        nal_unit_type: IDR_W_RADL,
+        pps_id: 0,
+        address: Some((1, 1)),
+    }
+    .nal(&intra_ctus(1));
+    let units = [small_sps(32, 16, 0), small_pps(0), first, second.clone()];
+    feed_units(&mut decoder, &units).unwrap();
+    assert!(matches!(
+        decoder.decode_nal(&second),
+        Err(HevcError::InvalidSyntax {
+            element: "slice_segment_address",
+            value: 1,
+            ..
+        })
+    ));
+}
+
+/// (A-2) with `MaxLumaPs` 35651584.
+#[test]
+fn max_dpb_size_follows_the_picture_size() {
+    assert_eq!(max_dpb_size(4_096, 2_176), 16);
+    assert_eq!(max_dpb_size(4_096, 2_184), 12);
+    assert_eq!(max_dpb_size(4_096, 4_352), 12);
+    assert_eq!(max_dpb_size(4_096, 4_360), 8);
+    assert_eq!(max_dpb_size(8_192, 3_264), 8);
+    assert_eq!(max_dpb_size(8_192, 3_272), 6);
+    assert_eq!(max_dpb_size(8_192, 4_320), 6);
+}
+
+/// The error comes from a few bytes, before any plane exists.
+#[test]
+fn a_buffer_above_max_dpb_size_is_a_named_error() {
+    let sps = sps_tests::build(&sps_tests::Spec {
+        width: 8_192,
+        height: 4_352,
+        dec_pic_buffering: [15, 15],
+        num_reorder: [0, 0],
+        min_cb_minus3: 1,
+        diff_cb: 0,
+        diff_tb: 2,
+        depth_inter: 0,
+        depth_intra: 0,
+        sao: false,
+        sets: Vec::new(),
+        temporal_mvp: false,
+        ..sps_tests::Spec::default()
+    });
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    feed_units(&mut decoder, &[sps, small_pps(0)]).unwrap();
+    assert_eq!(
+        decoder.decode_nal(&SmallSlice::first(IDR_W_RADL).nal(&[])),
+        Err(HevcError::DpbTooLarge {
+            count: 16,
+            limit: 6,
+            width: 8_192,
+            height: 4_352,
+        })
+    );
+}
+
+/// 8.3.3 allocates a picture for each missing entry, so the entries stay under the limit.
+#[test]
+fn a_reference_set_above_max_dpb_size_is_refused() {
+    let set = ShortTermRefPicSet {
+        num_negative_pics: 7,
+        ..ShortTermRefPicSet::default()
+    };
+    let header = SliceSegmentHeader {
+        nal_unit_type: 21,
+        short_term_ref_pic_set: Some(set),
+        ..SliceSegmentHeader::default()
+    };
+    let sps = sps_tests::valid(&sps_tests::Spec::default());
+    let count = RpsPocs::derive(&header, &sps, 0).entry_count();
+    assert_eq!(count, 7);
+    assert_eq!(check_dpb_count(count, 416, 240), Ok(()));
+    assert_eq!(
+        check_dpb_count(count, 8_192, 4_352),
+        Err(HevcError::DpbTooLarge {
+            count: 7,
+            limit: 6,
+            width: 8_192,
+            height: 4_352,
+        })
+    );
+}
+
+/// Bits past the end read as zero, so these parse until a named error ends them.
+#[test]
+fn slices_of_zeros_or_no_data_end_with_errors() {
+    let cases: [&[u8]; 3] = [&[], &[0; 4], &[0; 512]];
+    for data in cases {
+        let mut decoder = StreamDecoder::new(DecodeOptions::default());
+        feed_units(&mut decoder, &[small_sps(32, 16, 0), small_pps(0)]).unwrap();
+        let slice = SmallSlice::first(IDR_W_RADL).nal(data);
+        let ended = decoder.decode_nal(&slice).and_then(|()| decoder.flush());
+        assert!(ended.is_err(), "{} bytes of zeros", data.len());
+    }
 }

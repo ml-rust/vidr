@@ -116,6 +116,7 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `new` takes an `hvcC` payload with length-prefixed samples, or an empty config with Annex-B data. `with_picture_hash_check` also compares each picture with its hash SEI message.
   - Each frame carries the pts and VUI colour of the packet that started its picture. A skipped, unoutput, or dropped picture leaves no pending pts, and a lost frame is `DecodeError::MissingPictures` at flush.
   - `DecodeError::HevcTool` names a tool outside the decoder. `UnsupportedLayout` names another chroma format, unequal depths, or a depth other than 8 or 10.
+- `vidr`: `hevc_mutations_stay_safe`, a harness behind `cpu-hevc` and `VIDR_HEVC_CONFORMANCE`. It runs ten kinds of seeded damage on each HEVC_v1 zip through `HevcDecoder`: bit flips at two rates, runs of zeros or 0xFF, truncation, dropped, repeated, and swapped NAL units, and corrupt parameter sets and slice headers. A panic, a stream over the deadline, or a frame pile fails the case, and the failure line states zip, seed, and kind. `VIDR_HEVC_ROBUST_SEEDS`, `VIDR_HEVC_ROBUST_DEADLINE_SECS`, `VIDR_HEVC_ROBUST_KEEP`, and `VIDR_HEVC_ROBUST_TRACE` control it.
 - `vidr`: the HEVC_v1 conformance test now decodes with `cpu-hevc`. It checks each picture's hash SEI message and the zip's MD5 of the whole stream, hashes as it goes, and keeps no frame. `VIDR_HEVC_ONLY` picks zips, and `VIDR_HEVC_REPORT` writes one line per vector.
 
 ### Changed
@@ -128,6 +129,12 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 ### Fixed
 
 - `vidr`: an HEVC SPS with an inter-predicted `st_ref_pic_set` read the wrong number of flags in the next set when a source entry landed on delta 0. `NumDeltaPocs` now follows (7-61) and (7-62).
+- `vidr`: `HevcDecoder` refuses more bad input by name. A valid stream holds none of these cases.
+  - A picture that does not start a coded video sequence and changes size or bit depth returns a named error (7.4.2.4.2). The decoder took it, and its references kept the old size.
+  - A slice segment that names another PPS than the first slice segment of its picture returns a named error (7.4.7.1). The decoder read its header under another SPS, and decoded it under the first.
+  - A slice segment at or before an address that a slice segment of its picture has passed returns a named error (7.4.2.4.5). The decoder decoded those CTBs again.
+  - A buffer above `MaxDpbSize` at the picture size, level 6.2 (A-2), returns a named error before any picture allocates. So does a reference picture set above it, before 8.3.3 generates a picture for each entry. The decoder allowed 16 full-size pictures from a few bytes.
+  - One `send` stops at the luma samples of 16 full-size pictures, so a packet of many small pictures cannot fill memory before `receive`.
 - `vidr-remaster`: a second signal removes the temporary directory before `process::exit`. `TempOutput` registers its directory, and `remove_temp_directories` removes every registered one. `ctrlc` calls the handler on its own thread, outside signal context, so the removal runs there.
 - `vidr-remaster`: the provenance sidecar is written beside the temporary output before the publish, and renames into place after it. A failure to hash or write it now leaves no output. Only the rename can fail after the publish, and that gives `RunOutcome::OutputWithoutSidecar`, report status `output_without_sidecar`, exit code 1, and an error that names both paths. The sidecar bytes are unchanged, since a record holds no output path.
 - `vidr-remaster`: a report that does not write after the publish keeps the run complete. The command prints a warning with the report path and the cause, and exits 0.

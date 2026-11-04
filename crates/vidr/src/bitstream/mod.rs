@@ -99,7 +99,7 @@ mod vp9_header;
 #[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
 mod header_oracle;
 #[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
-mod test_bits;
+pub(crate) mod test_bits;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use annexb::StartCode;

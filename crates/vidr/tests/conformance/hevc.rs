@@ -146,6 +146,44 @@ pub(super) fn unzip(flag: &str, zip: &Path, member: Option<&str>) -> Result<Stri
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// The bitstream bytes, and the hash member with its kind.
+#[cfg(feature = "cpu-hevc")]
+pub(super) type StreamMembers = (Vec<u8>, Option<(String, HashKind)>);
+
+/// The bitstream of a zip, and the hash member that goes with it.
+#[cfg(feature = "cpu-hevc")]
+pub(super) fn read_stream(zip: &Path) -> Result<StreamMembers, String> {
+    let listing = unzip("-Z1", zip, None)?;
+    let layout = lookup(listing.lines());
+    let member = layout
+        .bitstream
+        .ok_or_else(|| format!("{}: the zip holds no bitstream member", zip.display()))?;
+    let stream = unzip_bytes("-p", zip, Some(&member))?;
+    Ok((stream, layout.hash))
+}
+
+/// The zips that `VIDR_HEVC_CONFORMANCE` and `VIDR_HEVC_ONLY` select, or `None` with a
+/// skip notice when the first is unset.
+#[cfg(feature = "cpu-hevc")]
+pub(super) fn selected_zips() -> Option<Vec<PathBuf>> {
+    let Some(directory) = std::env::var_os("VIDR_HEVC_CONFORMANCE") else {
+        eprintln!(
+            "skipping: VIDR_HEVC_CONFORMANCE is unset. Run \
+             `scripts/conformance/fetch_hevc.sh DIR`, then set it to DIR."
+        );
+        return None;
+    };
+    let directory = PathBuf::from(directory);
+    let found = zips(&directory);
+    assert!(
+        !found.is_empty(),
+        "{} holds no zip for VIDR_HEVC_ONLY. Run `scripts/conformance/fetch_hevc.sh {}`.",
+        directory.display(),
+        directory.display()
+    );
+    Some(found)
+}
+
 #[test]
 fn hevc_zips_hold_a_bitstream_and_a_hash() {
     let Some(directory) = std::env::var_os("VIDR_HEVC_CONFORMANCE") else {

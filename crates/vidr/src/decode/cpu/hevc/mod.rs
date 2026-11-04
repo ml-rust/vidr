@@ -24,5 +24,5 @@ pub(crate) mod scaling;
 pub(crate) mod scan;
 pub(crate) mod stream;
 #[cfg(test)]
-mod stream_tests;
+pub(in crate::decode) mod stream_tests;
 pub(crate) mod syntax;

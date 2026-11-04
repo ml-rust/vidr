@@ -59,6 +59,15 @@ pub(crate) struct RpsPocs {
 }
 
 impl RpsPocs {
+    /// The entries of the five lists.
+    pub(crate) fn entry_count(&self) -> usize {
+        self.st_curr_before.as_slice().len()
+            + self.st_curr_after.as_slice().len()
+            + self.st_foll.as_slice().len()
+            + self.lt_curr.as_slice().len()
+            + self.lt_foll.as_slice().len()
+    }
+
     /// (8-5) for a picture with `PicOrderCntVal` `poc`. An IDR picture has no set in
     /// its header, and gets five empty lists.
     pub(crate) fn derive(header: &SliceSegmentHeader, sps: &SeqParameterSet, poc: i32) -> Self {

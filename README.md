@@ -56,7 +56,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - H.264, HEVC, and AV1 bitstream filters
 - NVDEC hardware decode and NVENC hardware encode
 - CPU codecs, each with one host copy per frame: AV1 decode on dav1d, H.264 Baseline decode and encode on OpenH264. A source build of OpenH264 (`openh264`) gets no Cisco patent cover. Cisco's cover applies only to its own binary, which `openh264-cisco` loads from a path the caller supplies
-- AV1 encode on rav1r, VP9 decode on `rusty_vp9`, and HEVC Main and Main 10 decode on this crate's own core, each with one host copy per frame. HEVC conformance status is pending. See [CPU codecs](#cpu-codecs)
+- AV1 encode on rav1r, VP9 decode on `rusty_vp9`, and HEVC Main and Main 10 decode on this crate's own core, each with one host copy per frame. See [CPU codecs](#cpu-codecs)
 - Conversion between NV12 or P010 planes and float RGB
 - SDR colour policy
 - MP4, MOV, Matroska, and WebM input facts through containr

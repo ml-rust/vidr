@@ -20,7 +20,7 @@ use super::filter::sao::{SaoContext, sao_is_active, sao_picture};
 use super::hash::picture_hash::{PictureHash, check_picture_hash};
 use super::layout::PicLayout;
 use super::motion::field::MotionField;
-use super::params::{CodingParams, check_stream, picture_layout};
+use super::params::{CodingParams, check_dpb_count, check_stream, picture_layout};
 use super::picture::{DisplayWindow, Picture};
 use super::recon::ctu::{ReconContext, Reconstructor};
 use super::recon::inter::InterContext;
@@ -130,6 +130,8 @@ impl<S: Sample> PictureDecoder<S> {
     /// - Any error of `check_stream`, and any error of `CodingParams::from_headers`.
     /// - [`HevcError::Allocation`] when a buffer does not fit in memory.
     /// - [`HevcError::DisplayWindow`] for a conformance window that does not fit.
+    /// - [`HevcError::DpbTooLarge`] for a reference picture set above `MaxDpbSize`,
+    ///   before 8.3.3 generates a picture for any entry.
     pub(crate) fn begin(
         &mut self,
         sps: &SeqParameterSet,
@@ -152,6 +154,7 @@ impl<S: Sample> PictureDecoder<S> {
         let params = CodingParams::from_headers(sps, pps, header)?;
         let max_poc_lsb = 1u32 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
         let rps = RpsPocs::derive(header, sps, begin.poc);
+        check_dpb_count(rps.entry_count(), params.width, params.height)?;
         let sets = self.dpb.apply_rps(&rps, max_poc_lsb, begin.irap_no_rasl)?;
         let nal_unit_type = header.nal_unit_type;
         // C.5.2.2: a CRA picture sets NoOutputOfPriorPicsFlag to 1.

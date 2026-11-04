@@ -22,6 +22,8 @@ pub(crate) struct EntropyCarry {
     last_cu_qp_y: i32,
     /// CTBs that slices have reached in this picture.
     pub(crate) decoded_ctbs: usize,
+    /// `CtbAddrInTs` after the last slice segment of this picture.
+    next_ts: usize,
 }
 
 /// One slice segment's data and place in the picture.
@@ -44,8 +46,9 @@ pub(crate) struct SegmentInput<'a> {
 ///
 /// # Errors
 ///
-/// - [`HevcError::InvalidSyntax`] for an address outside the picture, a slice that
-///   runs past the last CTB, an `end_of_subset_one_bit` of 0, or a dependent slice
+/// - [`HevcError::InvalidSyntax`] for an address outside the picture, an address that
+///   does not follow the slice segment before it (7.4.2.4.5), a slice that runs past
+///   the last CTB, an `end_of_subset_one_bit` of 0, or a dependent slice
 ///   segment with no slice segment before it.
 /// - Any error of the syntax inside a CTU, and any error of `on_ctu`.
 pub(crate) fn parse_slice_segment<F>(
@@ -60,6 +63,13 @@ where
     let (params, layout) = (input.params, input.layout);
     let mut parser = CtuParser::new(params, layout, maps, input.data, input.start)?;
     let mut ts = first_ts(input)?;
+    if ts < carry.next_ts {
+        return Err(HevcError::InvalidSyntax {
+            element: "slice_segment_address",
+            value: i64::from(input.first_ctb_rs),
+            allowed: "an address after the last CTB of the slice segment before it",
+        });
+    }
     if input.dependent {
         // Only a new slice resets qPY_PREV (8.6.1). A dependent segment continues.
         parser.qp.last_cu_qp_y = carry.last_cu_qp_y;
@@ -88,6 +98,7 @@ where
                 carry.dependent = Some(parser.cabac.contexts.clone());
             }
             carry.last_cu_qp_y = parser.qp.last_cu_qp_y;
+            carry.next_ts = ts;
             return Ok(());
         }
         let Some(next_rs) = layout.ts_to_rs(ts) else {

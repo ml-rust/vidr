@@ -15,7 +15,7 @@ use crate::bitstream::{HevcNalType, VuiSignal};
 
 use super::dpb::buffer::Frame;
 use super::dpb::poc::{PictureFacts, PictureStart, SequenceState, is_cra};
-use super::error::HevcError;
+use super::error::{HevcError, SequenceFormat};
 use super::hash::picture_hash::find_picture_hash;
 use super::picture_decoder::{PictureBegin, PictureDecoder};
 
@@ -77,6 +77,10 @@ pub(crate) struct StreamDecoder {
     pictures_started: u64,
     /// The picture the latest NAL unit started.
     started: Option<StartedPicture>,
+    /// The format of the latest picture that started decoding.
+    sequence_format: Option<SequenceFormat>,
+    /// `slice_pic_parameter_set_id` of the current picture.
+    picture_pps: Option<u32>,
 }
 
 impl StreamDecoder {
@@ -94,6 +98,8 @@ impl StreamDecoder {
             output: VecDeque::new(),
             pictures_started: 0,
             started: None,
+            sequence_format: None,
+            picture_pps: None,
         }
     }
 
@@ -106,6 +112,10 @@ impl StreamDecoder {
     ///   checks.
     /// - [`HevcError::MissingParameterSet`] for a slice before its parameter sets.
     /// - [`HevcError::MissingReference`] for a list entry the buffer does not hold.
+    /// - [`HevcError::SequenceFormatChange`] for a new size or bit depth at a picture
+    ///   that does not start a coded video sequence.
+    /// - [`HevcError::InvalidSyntax`] for a slice segment that names another PPS than
+    ///   the first slice segment of its picture.
     /// - [`HevcError::Unsupported`] for a tool outside Main and Main 10 at 4:2:0.
     /// - [`HevcError::PictureHashMismatch`] with the hash check on.
     /// - Any error of the slice data.
@@ -209,6 +219,8 @@ impl StreamDecoder {
         self.ten.flush_output();
         self.collect_output();
         self.sequence = SequenceState::new();
+        self.sequence_format = None;
+        self.picture_pps = None;
         result
     }
 
@@ -237,6 +249,7 @@ impl StreamDecoder {
             let check = self.options.check_picture_hash;
             finish_active(&mut self.eight, &mut self.ten, check)?;
             self.independent = None;
+            self.picture_pps = Some(header.slice_pic_parameter_set_id);
             let start = self.sequence.begin_picture(PictureFacts {
                 nal_unit_type: header.nal_unit_type,
                 temporal_id: header.temporal_id,
@@ -245,6 +258,13 @@ impl StreamDecoder {
             });
             self.skip_picture = start == PictureStart::Skip;
             if let PictureStart::Decode { poc, irap_no_rasl } = start {
+                let format = SequenceFormat {
+                    width: sps.pic_width_in_luma_samples,
+                    height: sps.pic_height_in_luma_samples,
+                    bit_depth: sps.bit_depth_y(),
+                };
+                check_sequence_format(self.sequence_format, format, irap_no_rasl)?;
+                self.sequence_format = Some(format);
                 let decode_order = self.pictures_started;
                 let begin = PictureBegin {
                     poc,
@@ -273,6 +293,13 @@ impl StreamDecoder {
                 value: 0,
                 allowed: "1 in the first slice segment of a picture",
             });
+        } else if self.picture_pps != Some(header.slice_pic_parameter_set_id) {
+            // 7.4.7.1: every slice segment header of a picture holds one value.
+            return Err(HevcError::InvalidSyntax {
+                element: "slice_pic_parameter_set_id",
+                value: i64::from(header.slice_pic_parameter_set_id),
+                allowed: "the value of the first slice segment of this picture",
+            });
         }
         if !header.dependent_slice_segment_flag {
             self.independent = Some(header.clone());
@@ -286,6 +313,22 @@ impl StreamDecoder {
         } else {
             self.ten.decode_slice(&header, &data)
         }
+    }
+}
+
+/// 7.4.2.4.2: an SPS stays active for its whole coded video sequence, and an IRAP
+/// picture with `NoRaslOutputFlag` 1 starts each one. A later picture of another
+/// format has references that its layout does not fit.
+fn check_sequence_format(
+    previous: Option<SequenceFormat>,
+    current: SequenceFormat,
+    irap_no_rasl: bool,
+) -> Result<(), HevcError> {
+    match previous {
+        Some(previous) if !irap_no_rasl && previous != current => {
+            Err(HevcError::SequenceFormatChange { previous, current })
+        }
+        _ => Ok(()),
     }
 }
 

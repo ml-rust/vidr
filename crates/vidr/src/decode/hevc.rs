@@ -13,6 +13,7 @@ use numr::runtime::Runtime;
 use super::cpu::dsp::sample::Sample;
 use super::cpu::hevc::dpb::buffer::Frame;
 use super::cpu::hevc::error::HevcError;
+use super::cpu::hevc::params::MAX_LUMA_PICTURE_SIZE;
 use super::cpu::hevc::picture::HostScratch;
 use super::cpu::hevc::stream::{DecodeOptions, DecodedPicture, StreamDecoder};
 use super::{ChromaFormat, ColorFacts, DecodeCodec, DecodedFrame, Decoder, PixelFormat, vui_color};
@@ -24,6 +25,9 @@ use crate::geometry::Dimensions;
 use crate::route::FrameRoute;
 
 const DECODER: &str = "HevcDecoder";
+/// The luma samples of the frames one `send` can output: 16 pictures, the largest
+/// `MaxDpbSize` (A-2), at `MaxLumaPs` of level 6.2. One access unit stays below it.
+const MAX_SEND_LUMA_SAMPLES: u64 = 16 * MAX_LUMA_PICTURE_SIZE;
 
 /// What a picture's packet stated when the picture started decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +69,20 @@ struct PendingPicture {
 /// `new` checks each SPS of `hvcC` for the layout, and `send` checks each SPS in a
 /// packet. The other refusals come at the first picture that activates the SPS.
 ///
+/// # Limits
+///
+/// Bad input ends in an error, and memory stays tied to these limits:
+///
+/// | Limit | Value | Error |
+/// | --- | --- | --- |
+/// | Luma samples of one picture | 35651584, `MaxLumaPs` of level 6.2 (Table A.8) | [`DecodeError::Software`] |
+/// | Samples on one picture side | 16888 (A.4.1) | [`DecodeError::Software`] |
+/// | Pictures in the buffer | `MaxDpbSize` of level 6.2 at the picture size: 6 to 16 (A-2) | [`DecodeError::Software`] |
+/// | Luma samples of the frames from one `send` | 16 pictures of the largest size | [`DecodeError::Software`] |
+///
+/// A caller holds the frame queue to its own size: call [`Decoder::receive`] until
+/// it returns `None` after each `send`.
+///
 /// # Errors after the first
 ///
 /// After a decode error or a refusal, every later `send` and `flush` returns the same
@@ -78,6 +96,12 @@ pub struct HevcDecoder<R: Runtime> {
     pending: BTreeMap<u64, PendingPicture>,
     scratch: HostScratch,
     frames: VecDeque<DecodedFrame<R>>,
+    /// The pts of the packet in `send`.
+    send_pts: i64,
+    /// The luma samples of the frames the packet in `send` has output.
+    send_luma: u64,
+    /// The largest `send_luma`.
+    send_luma_limit: u64,
     flushed: bool,
     error: Option<DecodeError>,
 }
@@ -137,6 +161,9 @@ where
             pending: BTreeMap::new(),
             scratch: HostScratch::default(),
             frames: VecDeque::new(),
+            send_pts: 0,
+            send_luma: 0,
+            send_luma_limit: MAX_SEND_LUMA_SAMPLES,
             flushed: false,
             error: None,
         })
@@ -195,6 +222,7 @@ where
     /// Moves every output picture of the core to the frame queue.
     fn drain(&mut self) -> Result<(), DecodeError> {
         while let Some(picture) = self.stream.next_output() {
+            self.charge_send(&picture)?;
             let frame = match &picture {
                 DecodedPicture::Eight(frame) => self.convert(frame, PixelFormat::Nv12)?,
                 DecodedPicture::Ten(frame) => self.convert(frame, PixelFormat::P010)?,
@@ -202,6 +230,29 @@ where
             self.frames.push_back(frame);
         }
         Ok(())
+    }
+
+    /// Counts one output picture against the packet in `send`, before its upload.
+    fn charge_send(&mut self, picture: &DecodedPicture) -> Result<(), DecodeError> {
+        let window = match picture {
+            DecodedPicture::Eight(frame) => frame.picture.window(),
+            DecodedPicture::Ten(frame) => frame.picture.window(),
+        };
+        let luma = (window.width as u64).saturating_mul(window.height as u64);
+        self.send_luma = self.send_luma.saturating_add(luma);
+        if self.send_luma <= self.send_luma_limit {
+            return Ok(());
+        }
+        Err(DecodeError::Software {
+            decoder: DECODER,
+            call: "HevcDecoder::send",
+            input: format!("the packet at pts {}", self.send_pts),
+            reason: format!(
+                "the packet outputs {} luma samples and the limit is {}, so pass one access unit \
+                 per packet",
+                self.send_luma, self.send_luma_limit
+            ),
+        })
     }
 
     fn convert<S: Sample>(
@@ -350,6 +401,8 @@ where
             return Err(DecodeError::EmptyPacket { pts });
         }
         self.stored_error()?;
+        self.send_pts = pts;
+        self.send_luma = 0;
         let units: Vec<&[u8]> = match self.length_size {
             Some(size) => length_prefixed::split(packet, size).collect::<Result<_, _>>()?,
             None => annexb::split(packet)?.collect(),
@@ -364,6 +417,7 @@ where
         }
         self.flushed = true;
         self.stored_error()?;
+        self.send_luma = 0;
         let result = self.finish();
         self.keep_error(result)
     }
@@ -381,6 +435,7 @@ where
 mod tests {
     use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 
+    use super::super::cpu::hevc::stream_tests;
     use super::*;
 
     const fn refused(
@@ -504,6 +559,31 @@ mod tests {
             Err(DecodeError::Bitstream(_))
         ));
         assert_eq!(decoder.flush(), Ok(()));
+    }
+
+    /// A packet of many pictures stops at its limit, before the frames pile up.
+    #[test]
+    fn a_packet_past_its_luma_limit_is_a_named_error() {
+        let mut decoder = HevcDecoder::<CpuRuntime>::new(&CpuDevice::new(), &[]).unwrap();
+        // Two output pictures of 16x16 fit, and a third does not.
+        decoder.send_luma_limit = 2 * 16 * 16;
+        let stream = stream_tests::annexb_of(&stream_tests::intra_pictures(4));
+        let error = decoder.send(&stream, 9).unwrap_err();
+        let DecodeError::Software { call, input, .. } = &error else {
+            panic!("a packet over its limit is a software error: {error}");
+        };
+        assert_eq!(*call, "HevcDecoder::send");
+        assert_eq!(input, "the packet at pts 9");
+        assert_eq!(decoder.queued(), 2);
+    }
+
+    #[test]
+    fn a_packet_under_its_luma_limit_decodes() {
+        let mut decoder = HevcDecoder::<CpuRuntime>::new(&CpuDevice::new(), &[]).unwrap();
+        let stream = stream_tests::annexb_of(&stream_tests::intra_pictures(4));
+        assert_eq!(decoder.send(&stream, 9), Ok(()));
+        assert_eq!(decoder.flush(), Ok(()));
+        assert_eq!(decoder.queued(), 4);
     }
 
     #[test]

@@ -7,9 +7,45 @@ use crate::bitstream::hevc_slice::{SLICE_TYPE_I, SLICE_TYPE_P, SliceSegmentHeade
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 
 /// `MaxLumaPs` of levels 6 to 6.2 (Table A.8).
-const MAX_LUMA_PICTURE_SIZE: u64 = 35_651_584;
+pub(crate) const MAX_LUMA_PICTURE_SIZE: u64 = 35_651_584;
 /// `Sqrt( MaxLumaPs * 8 )`, rounded down (A.4.1).
 const MAX_PICTURE_SIDE: u32 = 16_888;
+
+/// `maxDpbPicBuf` of the profiles this decoder takes (A.4.2).
+const MAX_DPB_PIC_BUF: usize = 6;
+
+/// `MaxDpbSize` (A-2) with `MaxLumaPs` of level 6.2. A lower level gives a smaller
+/// value at the same size, so a valid stream of any level this decoder takes fits.
+pub(crate) const fn max_dpb_size(width: u32, height: u32) -> usize {
+    let samples = width as u64 * height as u64;
+    if samples <= MAX_LUMA_PICTURE_SIZE >> 2 {
+        16
+    } else if samples <= MAX_LUMA_PICTURE_SIZE >> 1 {
+        2 * MAX_DPB_PIC_BUF
+    } else if samples <= (3 * MAX_LUMA_PICTURE_SIZE) >> 2 {
+        4 * MAX_DPB_PIC_BUF / 3
+    } else {
+        MAX_DPB_PIC_BUF
+    }
+}
+
+/// Refuses `count` pictures in the buffer of one picture size.
+///
+/// # Errors
+///
+/// [`HevcError::DpbTooLarge`] above `MaxDpbSize`.
+pub(crate) fn check_dpb_count(count: usize, width: u32, height: u32) -> Result<(), HevcError> {
+    let limit = max_dpb_size(width, height);
+    if count > limit {
+        return Err(HevcError::DpbTooLarge {
+            count,
+            limit,
+            width,
+            height,
+        });
+    }
+    Ok(())
+}
 
 /// The slice types (Table 7-7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +260,7 @@ impl CodingParams {
 ///
 /// - [`HevcError::Unsupported`] names the tool a stream uses.
 /// - [`HevcError::PictureTooLarge`] for a picture above level 6.2.
+/// - [`HevcError::DpbTooLarge`] for a buffer above `MaxDpbSize` at this size.
 /// - [`HevcError::Header`] for a PPS that does not fit its SPS, or for a range
 ///   extension tool. The parameter set parsers refuse screen content tools.
 pub(crate) fn check_stream(sps: &SeqParameterSet, pps: &PicParameterSet) -> Result<(), HevcError> {
@@ -285,7 +322,9 @@ pub(crate) fn check_stream(sps: &SeqParameterSet, pps: &PicParameterSet) -> Resu
     {
         return Err(HevcError::PictureTooLarge { width, height });
     }
-    Ok(())
+    let top = usize::from(sps.sps_max_sub_layers_minus1).min(6);
+    let buffering = sps.sps_max_dec_pic_buffering_minus1[top] as usize + 1;
+    check_dpb_count(buffering, width, height)
 }
 
 /// Builds the address tables of the active SPS and PPS. Call [`check_stream`]
