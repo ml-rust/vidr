@@ -123,7 +123,13 @@ pub use nal::HevcNalType;
 pub use nal::ParameterSetKind;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use to_annexb::ToAnnexB;
+#[cfg(feature = "cpu-vp9")]
+pub(crate) use vp9::split_superframe;
 #[cfg(feature = "vp9")]
 pub use vp9::{Vp9Color, vp9_color, vp9_packet_color};
+#[cfg(feature = "cpu-vp9")]
+pub(crate) use vp9_header::{
+    ColorConfig, NUM_REF_FRAMES, RefFrameTable, UncompressedHeader, Vp9HeaderParser,
+};
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use vui::{ChromaSampleLoc, ColourDescription, VideoSignalType, VuiSignal};

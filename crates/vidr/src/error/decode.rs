@@ -3,7 +3,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 use super::BitstreamError;
 #[cfg(feature = "frame")]
 use super::FrameError;
@@ -185,6 +185,19 @@ pub enum DecodeError {
         /// `profile_idc`.
         profile_idc: u8,
     },
+    /// A VP9 frame header states a layout the VP9 decoder does not take.
+    Vp9Layout {
+        /// The decoder.
+        decoder: &'static str,
+        /// `Profile`, 0 to 3.
+        profile: u8,
+        /// `BitDepth`.
+        bit_depth: u8,
+        /// `subsampling_x`.
+        subsampling_x: bool,
+        /// `subsampling_y`.
+        subsampling_y: bool,
+    },
     /// The OpenH264 binary at the caller's path does not load, or its hash is
     /// not on the list the `openh264` crate holds.
     Openh264Library {
@@ -197,7 +210,7 @@ pub enum DecodeError {
     #[cfg(feature = "frame")]
     Frame(FrameError),
     /// The config record or a packet fails the bitstream filter.
-    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
     Bitstream(BitstreamError),
 }
 
@@ -369,6 +382,26 @@ impl fmt::Display for DecodeError {
                  reference decode. Decode this stream with another decoder, or re-encode the \
                  source as Baseline."
             ),
+            Self::Vp9Layout {
+                decoder,
+                profile,
+                bit_depth,
+                subsampling_x,
+                subsampling_y,
+            } => {
+                let chroma = match (subsampling_x, subsampling_y) {
+                    (true, true) => "4:2:0",
+                    (true, false) => "4:2:2",
+                    (false, true) => "4:4:0",
+                    (false, false) => "4:4:4",
+                };
+                write!(
+                    f,
+                    "the VP9 frame header states profile {profile}, {chroma}, {bit_depth} bits, \
+                     and {decoder} takes profiles 0 and 2, 4:2:0 at 8 or 10 bits. Decode this \
+                     stream with another decoder, or convert the source to 4:2:0 at 8 or 10 bits."
+                )
+            }
             Self::Openh264Library { path, reason } => write!(
                 f,
                 "the OpenH264 binary at {path} does not load: {reason}. Pass the path of an \
@@ -376,7 +409,7 @@ impl fmt::Display for DecodeError {
             ),
             #[cfg(feature = "frame")]
             Self::Frame(error) => fmt::Display::fmt(error, f),
-            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
             Self::Bitstream(error) => fmt::Display::fmt(error, f),
         }
     }
@@ -384,7 +417,7 @@ impl fmt::Display for DecodeError {
 
 impl StdError for DecodeError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+        #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
         if let Self::Bitstream(error) = self {
             return Some(error);
         }
@@ -396,7 +429,7 @@ impl StdError for DecodeError {
     }
 }
 
-#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 impl From<BitstreamError> for DecodeError {
     fn from(error: BitstreamError) -> Self {
         Self::Bitstream(error)
@@ -460,6 +493,21 @@ mod tests {
         };
         assert!(profile.to_string().contains("profile_idc 100"));
         assert!(profile.to_string().contains("as Baseline"));
+    }
+
+    #[test]
+    fn vp9_layout_names_profile_chroma_depth_and_next_action() {
+        let error = DecodeError::Vp9Layout {
+            decoder: "rusty_vp9",
+            profile: 3,
+            bit_depth: 12,
+            subsampling_x: false,
+            subsampling_y: true,
+        };
+        let message = error.to_string();
+        assert!(message.contains("profile 3, 4:4:0, 12 bits"));
+        assert!(message.contains("rusty_vp9 takes profiles 0 and 2"));
+        assert!(message.contains("convert the source"));
     }
 
     #[test]

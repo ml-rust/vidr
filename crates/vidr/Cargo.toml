@@ -79,6 +79,15 @@ openh264 = ["frame", "h264", "dep:openh264", "openh264/source"]
 # the caller supplies after the crate checks its hash. For shipped builds. Cisco's
 # patent cover applies only to its own binary. No download code exists here.
 openh264-cisco = ["frame", "h264", "dep:openh264", "openh264/libloading"]
+# AV1 software encode on rav1r, pure Rust, at 8 or 10 bits. Each frame takes one
+# copy through host memory. AV1 patent terms bind a binary distribution: see the
+# README. Assembly stays off in this feature.
+cpu-av1 = ["frame", "av1", "dep:rav1r"]
+# rav1r's assembly. NASM 2.15 or newer on x86_64, a C compiler on aarch64.
+cpu-av1-asm = ["cpu-av1", "rav1r/asm"]
+# VP9 software decode on rusty_vp9, pure Rust, profiles 0 and 2, 4:2:0. Each frame
+# takes one copy through host memory. VP9 has a patent pool: see the README.
+cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
@@ -95,3 +104,8 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
 libloading = { version = "0.9", optional = true }
 dav1d = { version = "0.11", optional = true }
 openh264 = { version = "0.9", optional = true, default-features = false }
+rav1r = { version = "0.1", optional = true, default-features = false, features = [
+  "threading",
+] }
+# Pinned: conformance runs against this exact release.
+rusty_vp9 = { version = "=0.1.3", optional = true, default-features = false }

@@ -6,6 +6,7 @@
 numr = { path = "../numr" }
 boostr = { path = "../boostr" }
 containr = { path = "../containr" }
+rav1r = { path = "../rav1r" }
 
 # Model and media fixtures live outside the repo. Tests that need a real
 # model skip loudly when this is unset.

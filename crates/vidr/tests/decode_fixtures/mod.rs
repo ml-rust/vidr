@@ -8,15 +8,29 @@ use std::path::PathBuf;
 
 use vidr::decode::DecodeCodec;
 
-use crate::bitstream::fixtures::unframe;
+use crate::framing::unframe;
 
-#[cfg(any(feature = "dav1d", feature = "openh264", feature = "openh264-cisco"))]
+#[cfg(any(
+    feature = "dav1d",
+    feature = "openh264",
+    feature = "openh264-cisco",
+    feature = "cpu-vp9"
+))]
 pub(crate) mod cpu;
 
 /// One generated stream.
 pub(crate) struct Stream {
     pub(crate) name: &'static str,
-    /// The `avcC`, `hvcC`, `av1C`, or `vpcC` payload.
+    /// The `avcC`, `hvcC`, `av1C`, or `vpcC` payload. VP9 decoders ignore it.
+    #[cfg_attr(
+        not(any(
+            feature = "nvdec",
+            feature = "dav1d",
+            feature = "openh264",
+            feature = "openh264-cisco"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) config: Vec<u8>,
     /// Every MP4 sample, in decode order.
     pub(crate) samples: Vec<Vec<u8>>,

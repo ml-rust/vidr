@@ -15,7 +15,7 @@ cargo clippy -p vidr-remaster --all-targets -- -D warnings
 cargo test -p vidr --no-fail-fast
 cargo test -p vidr-remaster --no-fail-fast
 cargo deny --exclude-dev check
-shellcheck scripts/ci/*.sh
+shellcheck scripts/ci/*.sh scripts/conformance/*.sh
 ```
 
 CI has no GPU and no CUDA toolkit. Put every hardware path behind its own feature, such as `cuda`, `vulkan-video`, or `vaapi`. The crates must build and test without them.

@@ -24,6 +24,31 @@ pub const TRANSFER_UNSPECIFIED: u8 = 2;
 /// H.273 `ColourPrimaries` 2: unspecified.
 pub const PRIMARIES_UNSPECIFIED: u8 = 2;
 
+/// The H.273 `MatrixCoefficients` of a VP9 `color_space`.
+///
+/// | `color_space` | Meaning | Matrix |
+/// | --- | --- | --- |
+/// | 0 | unknown | 2 |
+/// | 1 | BT.601 | 5 |
+/// | 2 | BT.709 | 1 |
+/// | 3 | SMPTE 170M | 6 |
+/// | 4 | SMPTE 240M | 7 |
+/// | 5 | BT.2020 | 9 |
+/// | 6 | reserved | 2 |
+/// | 7 | sRGB | 0 |
+#[cfg(any(feature = "nvdec", feature = "cpu-vp9"))]
+pub(crate) const fn vp9_matrix(color_space: u8) -> u8 {
+    match color_space {
+        1 => MATRIX_BT470BG,
+        2 => MATRIX_BT709,
+        3 => MATRIX_SMPTE170M,
+        4 => MATRIX_SMPTE240M,
+        5 => 9,
+        7 => 0,
+        _ => MATRIX_UNSPECIFIED,
+    }
+}
+
 /// Position of a 4:2:0 chroma sample relative to the luma samples.
 ///
 /// The variants are H.273 `ChromaSampleLocType` 0 to 5.

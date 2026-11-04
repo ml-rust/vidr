@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Generate the decode fixtures for `tests/nvdec/`, `tests/dav1d/`, and `tests/openh264/`.
+"""Generate the decode fixtures for `tests/nvdec/`, `tests/dav1d/`, `tests/openh264/`, and `tests/rusty_vp9/`.
 
 Run from any directory:
 
-    python3 crates/vidr/tests/fixtures/gen_nvdec.py [--out DIR]
+    python3 crates/vidr/tests/fixtures/gen_nvdec.py [--out DIR] [--only NAME ...]
 
 ffmpeg and ffprobe with libx264, libx265 (8 and 10 bit), libaom-av1 and
-libvpx-vp9 must be on PATH. A stream whose encoder is missing is skipped
-with a notice. The default output directory is
+libvpx-vp9 must be on PATH, and vpxenc for `vp9_resize`. A stream whose
+encoder is missing is skipped with a notice. The default output directory is
 `crates/vidr/tests/fixtures/nvdec/`, which git ignores. Never commit its
 contents.
 
@@ -31,8 +31,8 @@ For each stream NAME the script writes:
   (0 or 1) are what ffprobe reports for every frame. The script exits when
   frames disagree, so each stream holds one structure.
 - `NAME.yuv`: ffmpeg's software decode as `-f rawvideo` in `nv12` or
-  `p010le`, every frame in display order. Streams the tests expect a
-  decoder to refuse have no `.yuv`.
+  `p010le`, every frame in display order, each at its own size. Streams the
+  tests expect a decoder to refuse have no `.yuv`.
 
 The tests read `VIDR_NVDEC_FIXTURES` first, then the default directory.
 """
@@ -86,7 +86,8 @@ X265 = "keyint=5:min-keyint=5:bframes=2:log-level=error"
 AOM = ["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "5", "-row-mt", "0"]
 VPX = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-g", "5"]
 
-# (name, codec, source pix_fmt, encoder args, decoded pix_fmt or None)
+# (name, codec, source pix_fmt, encoder args, decoded pix_fmt or None). A stream
+# in `CUSTOM_ENCODES` has no encoder args.
 STREAMS = [
     ("h264_8bit", "h264", "yuv420p", X264, "nv12"),
     ("hevc_8bit", "hevc", "yuv420p",
@@ -103,6 +104,15 @@ STREAMS = [
     ("vp9_bt470bg_pc", "vp9", "yuv420p",
      [*VPX, "-colorspace", "bt470bg", "-color_range", "pc"], "nv12"),
     ("vp9_untagged", "vp9", "yuv420p", VPX, "nv12"),
+    ("vp9_10bit", "vp9", "yuv420p10le", [*VPX, "-profile:v", "2"], "p010le"),
+    # Spatial resize changes the frame size mid-stream.
+    ("vp9_resize", "vp9", "yuv420p", None, "nv12"),
+    # Hidden alt-ref frames in superframes.
+    ("vp9_altref", "vp9", "yuv420p", None, "nv12"),
+    # VP9 layouts the rusty_vp9 tests expect `Vp9Layout` for.
+    ("vp9_12bit", "vp9", "yuv420p12le", [*VPX, "-profile:v", "2"], None),
+    ("vp9_444", "vp9", "yuv444p", [*VPX, "-profile:v", "1"], None),
+    ("vp9_422_10bit", "vp9", "yuv422p10le", [*VPX, "-profile:v", "3"], None),
     # The SPS VUI signals chroma sample location type 1.
     ("h264_chroma_center", "h264", "yuv420p", [*X264, *CENTER], "nv12"),
     ("hevc_chroma_center", "hevc", "yuv420p",
@@ -168,6 +178,49 @@ def encode(path, pix_fmt, codec_args, size=SIZE, crop="", color_filter=COLOR_FIL
               "-frames:v", FRAMES, "-pix_fmt", pix_fmt]
     chain = crop + color_filter if color_filter else crop.rstrip(",") or "null"
     return tool("ffmpeg", [*QUIET, *source, *codec_args, "-vf", chain, str(path)]) is not None
+
+
+def encode_vp9_resize(path, out):
+    """Encodes through vpxenc at a low rate, so spatial resize changes the size."""
+    raw = out / "vp9_resize.source.yuv"
+    webm = out / "vp9_resize.source.webm"
+    source = [*QUIET, "-f", "lavfi", "-i", "testsrc2=size=640x480:rate=25", "-frames:v", "60",
+              "-pix_fmt", "yuv420p", "-f", "rawvideo", str(raw)]
+    if shutil.which("vpxenc") is None or tool("ffmpeg", source) is None:
+        return False
+    encoded = subprocess.run(
+        ["vpxenc", "--codec=vp9", "--disable-warning-prompt", "--width=640", "--height=480",
+         "--fps=25/1", "--rt", "--cpu-used=8", "--end-usage=cbr", "--resize-allowed=1",
+         "--resize-up=60", "--resize-down=30", "--target-bitrate=15", "--buf-sz=200",
+         "--buf-initial-sz=100", "--buf-optimal-sz=100", "--limit=60", "--webm",
+         "-o", str(webm), str(raw)], capture_output=True, text=True)
+    raw.unlink()
+    if encoded.returncode != 0:
+        print(f"vpxenc failed:\n{encoded.stderr}", file=sys.stderr)
+        return False
+    remuxed = tool("ffmpeg", [*QUIET, "-i", str(webm), "-c", "copy", str(path)])
+    webm.unlink()
+    return remuxed is not None
+
+
+def encode_vp9_altref(path, out):
+    """Encodes in two passes, the mode that writes hidden alt-ref frames."""
+    log = out / "vp9_altref.pass"
+    common = ["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25", "-frames:v", "30",
+              "-pix_fmt", "yuv420p", "-vf", COLOR_FILTER, "-c:v", "libvpx-vp9",
+              "-deadline", "good", "-cpu-used", "4", "-b:v", "300k", "-g", "30",
+              "-auto-alt-ref", "1", "-lag-in-frames", "16", "-row-mt", "0",
+              "-passlogfile", str(log)]
+    first = tool("ffmpeg", [*QUIET, *common, "-pass", "1", "-f", "null", "-"])
+    second = None
+    if first is not None:
+        second = tool("ffmpeg", [*QUIET, *common, "-pass", "2", str(path)])
+    for leftover in out.glob("vp9_altref.pass*"):
+        leftover.unlink()
+    return second is not None
+
+
+CUSTOM_ENCODES = {"vp9_resize": encode_vp9_resize, "vp9_altref": encode_vp9_altref}
 
 
 def vp9_header_color(mp4, out, name):
@@ -240,7 +293,7 @@ def write_meta(mp4, out, name, codec, decoded, chroma_location):
 def decode(mp4, out, name, decoded):
     """Writes ffmpeg's software decode as raw planes in display order."""
     args = [*QUIET, "-i", str(mp4), "-map", "0:v:0", "-fps_mode", "passthrough",
-            "-f", "rawvideo", "-pix_fmt", decoded, str(out / f"{name}.yuv")]
+            "-noautoscale", "-f", "rawvideo", "-pix_fmt", decoded, str(out / f"{name}.yuv")]
     if tool("ffmpeg", args) is None:
         sys.exit(f"{name}: ffmpeg cannot decode {mp4}")
 
@@ -250,6 +303,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=default,
                         help=f"output directory (default: {default})")
+    parser.add_argument("--only", nargs="+", metavar="NAME",
+                        help="write these streams only (default: every stream)")
     args = parser.parse_args()
 
     for name in ("ffmpeg", "ffprobe"):
@@ -259,16 +314,23 @@ def main():
 
     args.out.mkdir(parents=True, exist_ok=True)
     for name, codec, pix_fmt, codec_args, decoded in STREAMS:
+        if args.only and name not in args.only:
+            continue
         mp4 = args.out / f"{name}.mp4"
         odd = name.endswith("_odd")
         prefix = ODD_CROP if odd else SOURCE_FILTERS.get(name, "")
         color_filter = "" if name in FLAG_COLOR else COLOR_FILTER
-        if not encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix, color_filter):
+        if name in CUSTOM_ENCODES:
+            written = CUSTOM_ENCODES[name](mp4, args.out)
+        else:
+            written = encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix,
+                             color_filter)
+        if not written:
             print(f"{name}: skipped, the encoder is missing or refuses {pix_fmt}")
             continue
         extract(mp4, args.out, name)
         write_meta(mp4, args.out, name, codec, decoded,
-                   "center" if "-chroma_sample_location" in codec_args else None)
+                   "center" if "-chroma_sample_location" in (codec_args or []) else None)
         if decoded is not None:
             decode(mp4, args.out, name, decoded)
         print(f"{name}: {mp4}")

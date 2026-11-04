@@ -105,7 +105,7 @@ pub fn vp9_packet_color(packet: &[u8]) -> Result<Option<Vp9Color>, BitstreamErro
 /// # Errors
 ///
 /// [`BitstreamError::InvalidField`] for a frame size that runs into the index.
-pub(super) fn split_superframe(packet: &[u8]) -> Result<Vec<&[u8]>, BitstreamError> {
+pub(crate) fn split_superframe(packet: &[u8]) -> Result<Vec<&[u8]>, BitstreamError> {
     let Some(index) = SuperframeIndex::of(packet) else {
         return Ok(vec![packet]);
     };

@@ -1,11 +1,13 @@
 //! CPU decoders on numr's CPU backend against ffmpeg's decode, byte for byte.
 //!
-//! H.264 and AV1 decoding is bit-exact by specification, film grain aside, and
+//! H.264, AV1, and VP9 decoding is bit-exact by specification, film grain aside, and
 //! no fixture has film grain. A mismatch is a defect, never a tolerance to widen.
 
 use numr::runtime::cpu::CpuRuntime;
 use numr::tensor::Tensor;
-use vidr::decode::{ChromaLocation, DecodedFrame, Decoder, PixelFormat};
+#[cfg(any(feature = "dav1d", feature = "openh264", feature = "openh264-cisco"))]
+use vidr::decode::ChromaLocation;
+use vidr::decode::{DecodedFrame, Decoder, PixelFormat};
 
 use super::Stream;
 
@@ -50,7 +52,37 @@ fn plane_bytes(plane: &Tensor<CpuRuntime>, name: &str) -> Vec<u8> {
         .unwrap_or_else(|error| panic!("{name}: reading a plane: {error}"))
 }
 
+/// The fixture's pixel format.
+pub(crate) fn stream_format(stream: &Stream) -> PixelFormat {
+    match stream.meta("format") {
+        "nv12" => PixelFormat::Nv12,
+        "p010" => PixelFormat::P010,
+        other => panic!("{}: format `{other}`", stream.name),
+    }
+}
+
+/// Checks every plane byte against the fixture's `.yuv`.
+pub(crate) fn check_bytes(stream: &Stream, frames: &[DecodedFrame<CpuRuntime>]) {
+    let name = stream.name;
+    let Some(yuv) = &stream.yuv else {
+        panic!("{name}: the fixture has no .yuv");
+    };
+    let mut decoded = Vec::with_capacity(yuv.len());
+    for frame in frames {
+        decoded.extend(plane_bytes(frame.y(), name));
+        decoded.extend(plane_bytes(frame.uv(), name));
+    }
+    assert_eq!(decoded.len(), yuv.len(), "{name}: decoded bytes");
+    if let Some(offset) = decoded.iter().zip(yuv).position(|(a, b)| a != b) {
+        panic!(
+            "{name}: byte {offset} differs from ffmpeg's decode: {} against {}",
+            decoded[offset], yuv[offset]
+        );
+    }
+}
+
 /// Checks pts, size, format, colour, and every plane byte against the fixture.
+#[cfg(any(feature = "dav1d", feature = "openh264", feature = "openh264-cisco"))]
 pub(crate) fn check_frames(
     stream: &Stream,
     frames: &[DecodedFrame<CpuRuntime>],
@@ -61,15 +93,7 @@ pub(crate) fn check_frames(
     assert_eq!(pts, stream.frames, "{name}: display-order pts");
 
     let (width, height) = (stream.number("width"), stream.number("height"));
-    let format = match stream.meta("format") {
-        "nv12" => PixelFormat::Nv12,
-        "p010" => PixelFormat::P010,
-        other => panic!("{name}: format `{other}`"),
-    };
-    let Some(yuv) = &stream.yuv else {
-        panic!("{name}: the fixture has no .yuv");
-    };
-    let mut decoded = Vec::with_capacity(yuv.len());
+    let format = stream_format(stream);
     for (index, frame) in frames.iter().enumerate() {
         assert_eq!(frame.format(), format, "{name} frame {index}: format");
         assert_eq!(
@@ -103,14 +127,6 @@ pub(crate) fn check_frames(
             stream.meta("range") == "pc",
             "{name} frame {index}: range"
         );
-        decoded.extend(plane_bytes(frame.y(), name));
-        decoded.extend(plane_bytes(frame.uv(), name));
     }
-    assert_eq!(decoded.len(), yuv.len(), "{name}: decoded bytes");
-    if let Some(offset) = decoded.iter().zip(yuv).position(|(a, b)| a != b) {
-        panic!(
-            "{name}: byte {offset} differs from ffmpeg's decode: {} against {}",
-            decoded[offset], yuv[offset]
-        );
-    }
+    check_bytes(stream, frames);
 }
