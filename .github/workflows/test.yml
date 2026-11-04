@@ -19,10 +19,11 @@
 #   audit    — cargo-deny: advisories, licences, sources, banned crates
 #
 # No job installs a CUDA toolkit, a GPU driver, or a hardware video stack.
-# Hardware features (`cuda`, `nvdec`, `vulkan-video`, `vaapi`) stay out of
-# every feature set, so every hardware path sits behind its gate and the rest
-# compiles without it. `nvdec` loads libnvcuvid at run time, but it enables
-# numr's `cuda` feature, whose build script needs nvcc.
+# Hardware features (`cuda`, `nvdec`, `nvenc`, `vulkan-video`, `vaapi`) stay out
+# of every feature set, so every hardware path sits behind its gate and the rest
+# compiles without it. `nvdec` loads libnvcuvid and `nvenc` loads
+# libnvidia-encode at run time, but both enable numr's `cuda` feature, whose
+# build script needs nvcc.
 #
 # No job runs with `--locked`. The committed Cargo.lock resolves numr and
 # boostr through local path patches, so a lock-exact build on a clean runner
@@ -91,6 +92,7 @@ jobs:
           - { crate: vidr, features: "hevc" }
           - { crate: vidr, features: "av1" }
           - { crate: vidr, features: "decode" }
+          - { crate: vidr, features: "encode" }
           - { crate: vidr-remaster, features: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

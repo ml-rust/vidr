@@ -14,6 +14,11 @@ pub const MATRIX_BT470BG: u8 = 5;
 /// H.273 `MatrixCoefficients` 6: SMPTE 170M. BT.601 525-line.
 pub const MATRIX_SMPTE170M: u8 = 6;
 
+/// H.273 `TransferCharacteristics` 2: unspecified.
+pub const TRANSFER_UNSPECIFIED: u8 = 2;
+/// H.273 `ColourPrimaries` 2: unspecified.
+pub const PRIMARIES_UNSPECIFIED: u8 = 2;
+
 /// Position of a 4:2:0 chroma sample relative to the luma samples.
 ///
 /// The variants are H.273 `ChromaSampleLocType` 0 to 5.
@@ -61,6 +66,28 @@ impl ChromaLocation {
             4 => Some(Self::BottomLeft),
             5 => Some(Self::Bottom),
             _ => None,
+        }
+    }
+
+    /// The H.273 `ChromaSampleLocType`, 0 to 5, that H.264 and HEVC VUI carry.
+    pub const fn to_h273(self) -> u8 {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::TopLeft => 2,
+            Self::Top => 3,
+            Self::BottomLeft => 4,
+            Self::Bottom => 5,
+        }
+    }
+
+    /// The AV1 `chroma_sample_position`: 1 for `Left`, 2 for `TopLeft`. AV1
+    /// has no code for the other locations, so they give `None`.
+    pub const fn to_av1(self) -> Option<u8> {
+        match self {
+            Self::Left => Some(1),
+            Self::TopLeft => Some(2),
+            Self::Center | Self::Top | Self::BottomLeft | Self::Bottom => None,
         }
     }
 
@@ -222,6 +249,7 @@ mod tests {
         ];
         for (kind, (location, siting)) in expected.into_iter().enumerate() {
             assert_eq!(ChromaLocation::from_h273(kind as u8), Some(location));
+            assert_eq!(location.to_h273(), kind as u8);
             assert_eq!(location.horizontal(), siting);
         }
         assert_eq!(ChromaLocation::from_h273(6), None);
@@ -233,6 +261,9 @@ mod tests {
         assert_eq!(ChromaLocation::from_av1(1), Some(ChromaLocation::Left));
         assert_eq!(ChromaLocation::from_av1(2), Some(ChromaLocation::TopLeft));
         assert_eq!(ChromaLocation::from_av1(3), None);
+        assert_eq!(ChromaLocation::Left.to_av1(), Some(1));
+        assert_eq!(ChromaLocation::TopLeft.to_av1(), Some(2));
+        assert_eq!(ChromaLocation::Center.to_av1(), None);
         assert_eq!(ChromaLocation::TopLeft.horizontal(), ChromaSiting::Left);
         assert_eq!(ChromaLocation::Top.horizontal(), ChromaSiting::Center);
     }

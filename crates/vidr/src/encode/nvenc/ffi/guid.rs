@@ -1,0 +1,131 @@
+//! `GUID` and the codec, profile, and preset values vidr passes, from
+//! `nvEncodeAPI.h`, NVENC API 13.1.
+
+// `derive` reads the `Guid` fields for equality, which the lint does not count.
+#![allow(dead_code, reason = "FFI mirrors keep every header field")]
+
+/// `GUID`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Guid {
+    pub(crate) data1: u32,
+    pub(crate) data2: u16,
+    pub(crate) data3: u16,
+    pub(crate) data4: [u8; 8],
+}
+
+impl Guid {
+    /// Creates a GUID from its parts.
+    pub(crate) const fn new(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> Self {
+        Self {
+            data1,
+            data2,
+            data3,
+            data4,
+        }
+    }
+}
+
+/// `NV_ENC_CODEC_H264_GUID`.
+pub(crate) const CODEC_H264: Guid = Guid::new(
+    0x6bc8_2762,
+    0x4e63,
+    0x4ca4,
+    [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf],
+);
+/// `NV_ENC_CODEC_HEVC_GUID`.
+pub(crate) const CODEC_HEVC: Guid = Guid::new(
+    0x790c_dc88,
+    0x4522,
+    0x4d7b,
+    [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03],
+);
+/// `NV_ENC_CODEC_AV1_GUID`.
+pub(crate) const CODEC_AV1: Guid = Guid::new(
+    0x0a35_2289,
+    0x0aa7,
+    0x4759,
+    [0x86, 0x2d, 0x5d, 0x15, 0xcd, 0x16, 0xd2, 0x54],
+);
+
+/// `NV_ENC_H264_PROFILE_HIGH_GUID`.
+pub(crate) const PROFILE_H264_HIGH: Guid = Guid::new(
+    0xe7cb_c309,
+    0x4f7a,
+    0x4b89,
+    [0xaf, 0x2a, 0xd5, 0x37, 0xc9, 0x2b, 0xe3, 0x10],
+);
+/// `NV_ENC_H264_PROFILE_HIGH_10_GUID`.
+pub(crate) const PROFILE_H264_HIGH_10: Guid = Guid::new(
+    0x8f0c_337e,
+    0x186c,
+    0x48e9,
+    [0xa6, 0x9d, 0x7a, 0x83, 0x34, 0x08, 0x97, 0x58],
+);
+/// `NV_ENC_HEVC_PROFILE_MAIN_GUID`.
+pub(crate) const PROFILE_HEVC_MAIN: Guid = Guid::new(
+    0xb514_c39a,
+    0xb55b,
+    0x40fa,
+    [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec],
+);
+/// `NV_ENC_HEVC_PROFILE_MAIN10_GUID`.
+pub(crate) const PROFILE_HEVC_MAIN10: Guid = Guid::new(
+    0xfa4d_2b6c,
+    0x3a5b,
+    0x411a,
+    [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5],
+);
+/// `NV_ENC_AV1_PROFILE_MAIN_GUID`.
+pub(crate) const PROFILE_AV1_MAIN: Guid = Guid::new(
+    0x5f2a_39f5,
+    0xf14e,
+    0x4f95,
+    [0x9a, 0x9e, 0xb7, 0x6d, 0x56, 0x8f, 0xcf, 0x97],
+);
+
+/// `NV_ENC_PRESET_P1_GUID` to `NV_ENC_PRESET_P7_GUID`.
+pub(crate) const PRESETS: [Guid; 7] = [
+    Guid::new(
+        0xfc0a_8d3e,
+        0x45f8,
+        0x4cf8,
+        [0x80, 0xc7, 0x29, 0x88, 0x71, 0x59, 0x0e, 0xbf],
+    ),
+    Guid::new(
+        0xf581_cfb8,
+        0x88d6,
+        0x4381,
+        [0x93, 0xf0, 0xdf, 0x13, 0xf9, 0xc2, 0x7d, 0xab],
+    ),
+    Guid::new(
+        0x3685_0110,
+        0x3a07,
+        0x441f,
+        [0x94, 0xd5, 0x36, 0x70, 0x63, 0x1f, 0x91, 0xf6],
+    ),
+    Guid::new(
+        0x90a7_b826,
+        0xdf06,
+        0x4862,
+        [0xb9, 0xd2, 0xcd, 0x6d, 0x73, 0xa0, 0x86, 0x81],
+    ),
+    Guid::new(
+        0x21c6_e6b4,
+        0x297a,
+        0x4cba,
+        [0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3],
+    ),
+    Guid::new(
+        0x8e75_c279,
+        0x6299,
+        0x4ab6,
+        [0x83, 0x02, 0x0b, 0x21, 0x5a, 0x33, 0x5c, 0xf5],
+    ),
+    Guid::new(
+        0x8484_8c12,
+        0x6f71,
+        0x4c13,
+        [0x93, 0x1b, 0x53, 0xe2, 0x83, 0xf5, 0x79, 0x74],
+    ),
+];

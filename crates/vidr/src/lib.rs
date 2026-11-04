@@ -2,15 +2,18 @@
 //! geometry, output checks, and, behind the `h264`, `hevc`, and `av1`
 //! features, the bitstream filters between container samples and hardware
 //! codecs. Behind `nvdec`, `decode::nvdec::NvdecDecoder` decodes H.264,
-//! HEVC, AV1, and VP9 on NVDEC into numr CUDA tensors. Software codecs,
-//! other hardware decoders, encoding, and the filter graph are roadmap
-//! items.
+//! HEVC, AV1, and VP9 on NVDEC into numr CUDA tensors. Behind `nvenc`,
+//! `encode::nvenc::NvencEncoder` encodes numr CUDA tensors to H.264, HEVC, and
+//! AV1 samples on NVENC. Software codecs, other hardware codecs, and the filter
+//! graph are roadmap items.
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 pub mod bitstream;
 pub mod check;
 #[cfg(feature = "decode")]
 pub mod decode;
+#[cfg(feature = "encode")]
+pub mod encode;
 pub mod error;
 pub mod geometry;
 pub mod time;
@@ -20,6 +23,8 @@ pub use check::{CheckError, DURATION_TOLERANCE, Deviation, Side, StreamFacts, ch
 pub use error::BitstreamError;
 #[cfg(feature = "decode")]
 pub use error::DecodeError;
+#[cfg(feature = "encode")]
+pub use error::EncodeError;
 pub use error::{EditListError, Error, GeometryError, Operation, TimeError, TimingError};
 pub use geometry::{Dimensions, Geometry, Rotation, SampleAspectRatio};
 pub use time::{

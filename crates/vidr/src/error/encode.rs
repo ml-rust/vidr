@@ -1,0 +1,395 @@
+//! Errors in video encoding.
+
+use std::error::Error as StdError;
+use std::fmt;
+
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+use super::BitstreamError;
+use crate::decode::PixelFormat;
+use crate::encode::EncodeCodec;
+
+/// An error in an encoder: loading the driver library, checking the GPU,
+/// checking a frame, encoding, or converting the output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EncodeError {
+    /// The encoder's driver library does not load.
+    LibraryMissing {
+        /// The library file name, for example `libnvidia-encode.so.1`.
+        library: &'static str,
+        /// The loader's message.
+        reason: String,
+    },
+    /// The driver library lacks a function vidr calls.
+    SymbolMissing {
+        /// The library file name.
+        library: &'static str,
+        /// The function name.
+        symbol: &'static str,
+        /// The loader's message.
+        reason: String,
+    },
+    /// The driver supports an older API than vidr pins.
+    DriverTooOld {
+        /// The newest `(major, minor)` API the driver reports.
+        found: (u32, u32),
+        /// The `(major, minor)` API vidr pins.
+        required: (u32, u32),
+    },
+    /// An NVENC call returns an error status.
+    Nvenc {
+        /// The function called.
+        call: &'static str,
+        /// The `NVENCSTATUS` code.
+        code: i32,
+        /// The code's name, or `unknown` for a code vidr does not name.
+        name: &'static str,
+        /// The inputs of the call.
+        input: String,
+        /// The driver's last error string. Empty when it has none.
+        detail: String,
+    },
+    /// A CUDA call through numr or cudarc fails.
+    Cuda {
+        /// The operation, for example `cuMemcpy2DAsync into an NVENC surface`.
+        operation: &'static str,
+        /// The driver's message.
+        reason: String,
+    },
+    /// The GPU has no encoder for the codec.
+    CodecUnsupported {
+        /// The codec.
+        codec: EncodeCodec,
+        /// The codecs the GPU lists.
+        available: String,
+    },
+    /// The GPU does not encode the codec at this bit depth.
+    BitDepthUnsupported {
+        /// The codec.
+        codec: EncodeCodec,
+        /// The sample layout.
+        format: PixelFormat,
+    },
+    /// The GPU encodes fewer consecutive B-frames than the config asks.
+    BFramesUnsupported {
+        /// The codec.
+        codec: EncodeCodec,
+        /// The config's `b_frames`.
+        requested: u32,
+        /// The GPU's maximum. 0 means no B-frames.
+        maximum: u32,
+    },
+    /// An odd size for a codec that crops 4:2:0 in units of two samples.
+    OddSize {
+        /// The codec.
+        codec: EncodeCodec,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+    },
+    /// The size is outside the GPU's range for the codec.
+    SizeOutOfRange {
+        /// The codec.
+        codec: EncodeCodec,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The GPU's minimum `(width, height)`.
+        minimum: (u32, u32),
+        /// The GPU's maximum `(width, height)`.
+        maximum: (u32, u32),
+    },
+    /// A config value is out of range.
+    InvalidConfig {
+        /// The field.
+        field: &'static str,
+        /// The value.
+        value: String,
+        /// What the field needs.
+        reason: &'static str,
+    },
+    /// A plane's shape or dtype does not match the config.
+    SurfaceMismatch {
+        /// The plane: `luma` or `chroma`.
+        plane: &'static str,
+        /// The shape `[rows, columns]` and dtype the config needs.
+        expected: String,
+        /// The plane's shape and dtype.
+        found: String,
+    },
+    /// A plane's strides are not a row pitch over adjacent columns.
+    PlaneStrides {
+        /// The plane: `luma` or `chroma`.
+        plane: &'static str,
+        /// The plane's strides, in samples.
+        strides: Vec<isize>,
+        /// Samples per row.
+        columns: usize,
+    },
+    /// A frame's pts does not increase.
+    PtsNotIncreasing {
+        /// The frame's pts.
+        pts: i64,
+        /// The previous frame's pts.
+        previous: i64,
+    },
+    /// A frame's duration is not above zero.
+    NonPositiveDuration {
+        /// The frame's pts.
+        pts: i64,
+        /// The duration.
+        duration: i64,
+    },
+    /// `send` follows `flush`.
+    AfterFlush {
+        /// The frame's pts.
+        pts: i64,
+    },
+    /// A decode timestamp does not fit `i64`.
+    TimestampOverflow {
+        /// The first frame's pts.
+        pts: i64,
+        /// The first frame's duration.
+        duration: i64,
+        /// The reorder delay in frames.
+        delay: u32,
+    },
+    /// The encoder returns a picture that decodes after it displays. The reorder
+    /// depth is deeper than the config's `b_frames`.
+    DtsAfterPts {
+        /// The computed dts.
+        dts: i64,
+        /// The packet's pts.
+        pts: i64,
+        /// The reorder delay in frames.
+        delay: u32,
+    },
+    /// The encoder returns more pictures than the frames it received.
+    UnexpectedOutput {
+        /// The packet's pts.
+        pts: i64,
+    },
+    /// Device memory for an input surface cannot be allocated.
+    Allocation {
+        /// The size in bytes.
+        bytes: usize,
+        /// The driver's message.
+        reason: String,
+    },
+    /// The encoder's output fails the bitstream filter.
+    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+    Bitstream(BitstreamError),
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LibraryMissing { library, reason } => write!(
+                f,
+                "{library} does not load: {reason}. Install the NVIDIA driver, which ships \
+                 {library}, and check that the loader path finds it."
+            ),
+            Self::SymbolMissing {
+                library,
+                symbol,
+                reason,
+            } => write!(
+                f,
+                "{library} has no function `{symbol}`: {reason}. The driver is older than \
+                 vidr needs. Update the NVIDIA driver."
+            ),
+            Self::DriverTooOld { found, required } => write!(
+                f,
+                "the NVIDIA driver supports NVENC API {}.{}, and vidr needs {}.{}. Update the \
+                 NVIDIA driver.",
+                found.0, found.1, required.0, required.1
+            ),
+            Self::Nvenc {
+                call,
+                code,
+                name,
+                input,
+                detail,
+            } => write!(
+                f,
+                "{call} returns NVENCSTATUS {code} ({name}) for {input}. Driver says: \
+                 \"{detail}\". Check the encoder config against the GPU's caps, and check that \
+                 another process has not used every encode session, then retry."
+            ),
+            Self::Cuda { operation, reason } => write!(
+                f,
+                "{operation} fails: {reason}. Check that the CUDA device is present and has \
+                 free memory, then retry."
+            ),
+            Self::CodecUnsupported { codec, available } => write!(
+                f,
+                "the GPU has no {codec} encoder. It lists: {available}. Pick a listed codec, or \
+                 encode on a GPU that has {codec}."
+            ),
+            Self::BitDepthUnsupported { codec, format } => write!(
+                f,
+                "the GPU does not encode {codec} from {format} at {} bits. Convert the frames \
+                 to NV12, or pick a codec the GPU encodes at this depth.",
+                format.bit_depth()
+            ),
+            Self::BFramesUnsupported {
+                codec,
+                requested,
+                maximum,
+            } => write!(
+                f,
+                "the config asks for {requested} consecutive B-frames, and the GPU encodes at \
+                 most {maximum} for {codec}. Set `b_frames` to at most {maximum}."
+            ),
+            Self::OddSize {
+                codec,
+                width,
+                height,
+            } => write!(
+                f,
+                "{codec} cannot code the odd size {width}x{height}, because it crops 4:2:0 in \
+                 units of two samples. Scale or pad the frames to an even size."
+            ),
+            Self::SizeOutOfRange {
+                codec,
+                width,
+                height,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "{codec} size {width}x{height} is outside the GPU's range: {}x{} to {}x{}. \
+                 Scale the frames into that range.",
+                minimum.0, minimum.1, maximum.0, maximum.1
+            ),
+            Self::InvalidConfig {
+                field,
+                value,
+                reason,
+            } => write!(
+                f,
+                "encoder config `{field}` is {value}: {reason}. Change the value and open the \
+                 encoder again."
+            ),
+            Self::SurfaceMismatch {
+                plane,
+                expected,
+                found,
+            } => write!(
+                f,
+                "the {plane} plane is {found}, and the encoder config needs {expected}. Convert \
+                 the frame to the config's size and pixel format."
+            ),
+            Self::PlaneStrides {
+                plane,
+                strides,
+                columns,
+            } => write!(
+                f,
+                "the {plane} plane has strides {strides:?} for {columns} samples per row. The \
+                 encoder needs a column stride of 1 and a row stride of at least {columns}. Pass \
+                 a dense plane, or a `narrow` of a pitched surface."
+            ),
+            Self::PtsNotIncreasing { pts, previous } => write!(
+                f,
+                "the frame at pts {pts} follows pts {previous}. Send frames in display order \
+                 with increasing pts."
+            ),
+            Self::NonPositiveDuration { pts, duration } => write!(
+                f,
+                "the frame at pts {pts} has duration {duration}. Pass a duration above zero."
+            ),
+            Self::AfterFlush { pts } => write!(
+                f,
+                "the frame at pts {pts} follows flush. Create a new encoder for a new stream."
+            ),
+            Self::TimestampOverflow {
+                pts,
+                duration,
+                delay,
+            } => write!(
+                f,
+                "the first dts, pts {pts} minus {delay} frames of duration {duration}, does not \
+                 fit 64 bits. Rebase the pts near zero, or lower `b_frames`."
+            ),
+            Self::DtsAfterPts { dts, pts, delay } => write!(
+                f,
+                "the packet at pts {pts} gets dts {dts} with a reorder delay of {delay} frames, \
+                 so it decodes after it displays. Report the NVIDIA driver version as a vidr \
+                 bug, and encode with `b_frames` 0 until a fix lands."
+            ),
+            Self::UnexpectedOutput { pts } => write!(
+                f,
+                "the encoder returns a packet at pts {pts} with no frame left to match it. \
+                 Report the NVIDIA driver version as a vidr bug, and retry with the driver \
+                 updated."
+            ),
+            Self::Allocation { bytes, reason } => write!(
+                f,
+                "an input surface of {bytes} bytes does not allocate: {reason}. Free device \
+                 memory, or lower the frame size or `b_frames`."
+            ),
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            Self::Bitstream(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl StdError for EncodeError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+        if let Self::Bitstream(error) = self {
+            return Some(error);
+        }
+        None
+    }
+}
+
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+impl From<BitstreamError> for EncodeError {
+    fn from(error: BitstreamError) -> Self {
+        Self::Bitstream(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codec_refusal_names_the_codec_and_the_list() {
+        let error = EncodeError::CodecUnsupported {
+            codec: EncodeCodec::Av1,
+            available: "H.264, HEVC".to_owned(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("no AV1 encoder"));
+        assert!(message.contains("H.264, HEVC"));
+    }
+
+    #[test]
+    fn old_driver_names_both_versions() {
+        let error = EncodeError::DriverTooOld {
+            found: (12, 2),
+            required: (13, 1),
+        };
+        let message = error.to_string();
+        assert!(message.contains("API 12.2"));
+        assert!(message.contains("needs 13.1"));
+        assert!(message.contains("Update the NVIDIA driver"));
+    }
+
+    #[test]
+    fn odd_size_says_what_to_do() {
+        let error = EncodeError::OddSize {
+            codec: EncodeCodec::Hevc,
+            width: 321,
+            height: 180,
+        };
+        let message = error.to_string();
+        assert!(message.contains("HEVC cannot code the odd size 321x180"));
+        assert!(message.contains("even size"));
+    }
+}

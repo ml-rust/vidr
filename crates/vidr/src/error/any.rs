@@ -7,6 +7,8 @@ use std::fmt;
 use super::BitstreamError;
 #[cfg(feature = "decode")]
 use super::DecodeError;
+#[cfg(feature = "encode")]
+use super::EncodeError;
 use super::{EditListError, GeometryError, TimeError, TimingError};
 use crate::check::CheckError;
 
@@ -29,6 +31,9 @@ pub enum Error {
     /// Video decoding.
     #[cfg(feature = "decode")]
     Decode(DecodeError),
+    /// Video encoding.
+    #[cfg(feature = "encode")]
+    Encode(EncodeError),
 }
 
 impl fmt::Display for Error {
@@ -43,6 +48,8 @@ impl fmt::Display for Error {
             Self::Bitstream(error) => fmt::Display::fmt(error, f),
             #[cfg(feature = "decode")]
             Self::Decode(error) => fmt::Display::fmt(error, f),
+            #[cfg(feature = "encode")]
+            Self::Encode(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -59,6 +66,8 @@ impl StdError for Error {
             Self::Bitstream(error) => Some(error),
             #[cfg(feature = "decode")]
             Self::Decode(error) => Some(error),
+            #[cfg(feature = "encode")]
+            Self::Encode(error) => Some(error),
         }
     }
 }
@@ -104,6 +113,13 @@ impl From<BitstreamError> for Error {
 impl From<DecodeError> for Error {
     fn from(error: DecodeError) -> Self {
         Self::Decode(error)
+    }
+}
+
+#[cfg(feature = "encode")]
+impl From<EncodeError> for Error {
+    fn from(error: EncodeError) -> Self {
+        Self::Encode(error)
     }
 }
 

@@ -4,4 +4,6 @@
 mod bitstream;
 #[cfg(feature = "nvdec")]
 mod nvdec;
+#[cfg(feature = "nvenc")]
+mod nvenc;
 mod timing;
