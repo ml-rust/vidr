@@ -55,7 +55,7 @@ mod h264_vui;
 mod hevc_params;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_pps;
+pub(crate) mod hevc_pps;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
 mod hevc_pred_weight;
@@ -66,15 +66,15 @@ mod hevc_ptl;
 mod hevc_rps;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_scaling;
+pub(crate) mod hevc_scaling;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_slice;
+pub(crate) mod hevc_slice;
 #[cfg(feature = "hevc")]
 mod hevc_sps;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_sps_full;
+pub(crate) mod hevc_sps_full;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
 mod hevc_vps;

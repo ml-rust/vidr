@@ -93,6 +93,12 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - VP9 `uncompressed_header` in a parser that keeps the state the syntax needs: colour, loop filter deltas, segmentation features, and the last frame size. The caller holds the reference frame table.
   - `tests/fixtures/gen_headers.py` writes the sidecars. It takes each value from ffmpeg's `trace_headers`, over libx265, libvpx, vpxenc, and hand-built streams. The tests compare every element the parsers keep.
 - `vidr`: `BitstreamError::InvalidSignedField` for a signed syntax element outside its range.
+- `vidr`: the first units of a CPU HEVC decoder behind the crate-internal `cpu-hevc` feature, written from ITU-T H.265 V11 for Main and Main 10 at 4:2:0. It does not decode a picture yet: intra prediction, inter prediction, in-loop filters, the slice data loop, and the `Decoder` implementation are roadmap items.
+  - Picture and plane buffers over a `Sample` type for `u8` and `u16`, with a view as `HostPlanes` in I420 or I010.
+  - The CABAC engine and context tables, with a test encoder from 9.3.5.
+  - The coding quadtree, coding unit, prediction unit, transform tree, transform unit, and `residual_coding` parsers, with sign data hiding and transform skip. They write plain records per CTU, for a later reconstruct stage.
+  - QP derivation, scaling, scaling lists, the inverse DST and DCT from 4x4 to 32x32, transform skip, and transform bypass.
+  - A stream with unequal luma and chroma bit depth, another chroma format, a depth above 10 bits, a range or multilayer extension tool, or a picture above level 6.2 gets a named refusal.
 
 ### Changed
 

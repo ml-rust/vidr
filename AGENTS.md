@@ -5,7 +5,7 @@ The PoC model set (Real-ESRGAN, PureVision) is the first use case, NOT the scope
 
 ## Placement
 
-- `numr`: kernels. Conv, resize, colour conversion, pixel shuffle, activations.
+- `numr`: kernels, meaning tensor operations. Conv, resize, colour conversion, pixel shuffle, activations. Block-level DSP inside a CPU codec stays in `crates/vidr/src/decode/cpu/dsp`.
 - `boostr`: model networks, tensor-only, one feature gate per architecture.
 - `crates/vidr`: video codecs, hardware decode and encode, frame timing, output checks, colour, filter graph.
 - `crates/vidr-remaster`: CLI, model selection, resolution, provenance. It calls the vidr output checks.

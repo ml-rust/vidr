@@ -18,6 +18,9 @@ mod color;
 pub(crate) mod frame;
 mod traits;
 
+#[cfg(feature = "cpu-hevc")]
+#[allow(dead_code, reason = "the units after this pass read these items")]
+pub(crate) mod cpu;
 #[cfg(feature = "dav1d")]
 pub mod dav1d;
 #[cfg(feature = "nvdec")]

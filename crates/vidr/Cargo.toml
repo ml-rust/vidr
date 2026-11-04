@@ -88,6 +88,9 @@ cpu-av1-asm = ["cpu-av1", "rav1r/asm"]
 # VP9 software decode on rusty_vp9, pure Rust, profiles 0 and 2, 4:2:0. Each frame
 # takes one copy through host memory. VP9 has a patent pool: see the README.
 cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
+# The parts of a CPU HEVC decoder written in this crate, for Main and Main 10 at
+# 4:2:0. Crate-internal: no public decoder exists yet.
+cpu-hevc = ["frame", "hevc"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
