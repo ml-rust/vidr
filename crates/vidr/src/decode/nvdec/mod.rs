@@ -14,5 +14,6 @@ mod sequence_tests;
 mod session;
 mod signal;
 mod surface;
+mod vp9_color;
 
 pub use decoder::{NvdecDecoder, nvdec_available};

@@ -46,7 +46,7 @@ decode (hardware or software) → filters and models on the GPU → encode → m
 
 ## Status
 
-In development. No release exists yet. The frame timing model, output checks, the H.264, HEVC, and AV1 bitstream filters, NVDEC hardware decode, and NVENC hardware encode work today. The rest of [Scope](#scope) does not work yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table.
+In development. No release exists yet. The frame timing model, output checks, the H.264, HEVC, and AV1 bitstream filters, NVDEC hardware decode, NVENC hardware encode, and conversion between NV12 or P010 planes and float RGB work today. The rest of [Scope](#scope) does not work yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table.
 
 ## Crates
 

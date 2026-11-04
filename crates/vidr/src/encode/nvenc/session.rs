@@ -45,7 +45,9 @@ impl Session {
         let code = unsafe { (nvenc.open_encode_session_ex)(&mut open, &mut handle) };
         let input = || format!("numr's CUDA context on {}", client.device().name());
         if handle.is_null() {
-            ffi::check("nvEncOpenEncodeSessionEx", code, input, String::new)?;
+            ffi::check("nvEncOpenEncodeSessionEx", code, input, || {
+                open_detail(code)
+            })?;
             return Err(EncodeError::Cuda {
                 operation: "nvEncOpenEncodeSessionEx",
                 reason: "the driver returns success and a null session".to_owned(),
@@ -219,6 +221,18 @@ impl Drop for Session {
     }
 }
 
+/// The next action for a failed open. The driver reports a full session table
+/// as a client key or memory error on GPUs that limit concurrent sessions.
+fn open_detail(code: NvEncStatus) -> String {
+    match code {
+        ffi::ERR_OUT_OF_MEMORY | ffi::ERR_INCOMPATIBLE_CLIENT_KEY => {
+            "The GPU can be at its concurrent NVENC session limit. Close other encoders and retry"
+                .to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
 fn bind(client: &CudaClient) -> Result<(), EncodeError> {
     client
         .context()
@@ -227,4 +241,16 @@ fn bind(client: &CudaClient) -> Result<(), EncodeError> {
             operation: "binding numr's CUDA context to the calling thread",
             reason: error.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_session_table_names_the_next_action() {
+        assert!(open_detail(ffi::ERR_INCOMPATIBLE_CLIENT_KEY).contains("session limit"));
+        assert!(open_detail(ffi::ERR_OUT_OF_MEMORY).contains("session limit"));
+        assert_eq!(open_detail(1), "");
+    }
 }

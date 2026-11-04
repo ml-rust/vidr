@@ -156,7 +156,10 @@ impl Session {
             sequence.format,
             info.timestamp,
             sequence.display,
-            sequence.color,
+            self.picture_colors
+                .get(&info.picture_index)
+                .copied()
+                .unwrap_or(sequence.color),
             PictureStructure {
                 progressive: info.progressive_frame != 0,
                 top_field_first: info.top_field_first != 0,

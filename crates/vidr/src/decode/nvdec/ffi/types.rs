@@ -155,11 +155,14 @@ pub(crate) struct CuvidProcParams {
     pub(crate) cuvid_proc_ext: *mut c_void,
 }
 
-/// Opaque `CUVIDPICPARAMS`: the parser fills it, and vidr passes the
-/// pointer to `cuvidDecodePicture` unread.
+/// The head of `CUVIDPICPARAMS`: the parser fills the struct, and vidr reads
+/// only `CurrPicIdx` before it passes the pointer to `cuvidDecodePicture`.
 #[repr(C)]
 pub(crate) struct CuvidPicParams {
-    _opaque: [u8; 0],
+    pic_width_in_mbs: c_int,
+    frame_height_in_mbs: c_int,
+    pub(crate) curr_pic_idx: c_int,
+    _rest: [u8; 0],
 }
 
 /// Mirrors the `frame_rate` member of `CUVIDEOFORMAT`.

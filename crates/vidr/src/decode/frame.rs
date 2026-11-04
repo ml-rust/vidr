@@ -71,6 +71,26 @@ impl<R: Runtime> DecodedFrame<R> {
         }
     }
 
+    /// Assembles a progressive frame from planes the caller holds: a decoder
+    /// outside this crate, or a test.
+    ///
+    /// This function checks nothing. `vidr::frame::to_rgb` checks each plane
+    /// against `format` and `display`, and an encoder checks them in `send`.
+    pub fn from_planes(
+        y: Tensor<R>,
+        uv: Tensor<R>,
+        format: PixelFormat,
+        pts: i64,
+        display: Dimensions,
+        color: ColorFacts,
+    ) -> Self {
+        let structure = PictureStructure {
+            progressive: true,
+            top_field_first: false,
+        };
+        Self::new(y, uv, format, pts, display, color, structure)
+    }
+
     /// The luma plane.
     pub fn y(&self) -> &Tensor<R> {
         &self.y
@@ -125,7 +145,8 @@ impl<R: Runtime> DecodedFrame<R> {
     ///
     /// numr converts even sizes only. A frame with an odd display width or
     /// height holds ffmpeg's plane layout, and `yuv_to_rgb` returns
-    /// `Error::InvalidArgument` for the `planes` argument.
+    /// `Error::InvalidArgument` for the `planes` argument. `vidr::frame::to_rgb`
+    /// converts every size.
     pub fn planes(&self) -> YuvPlanes<'_, R> {
         match self.format {
             PixelFormat::Nv12 => YuvPlanes::Nv12 {

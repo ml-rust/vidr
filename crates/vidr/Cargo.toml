@@ -16,6 +16,8 @@ default = []
 h264 = []
 hevc = []
 av1 = []
+# VP9 uncompressed-header colour: `color_space` and `color_range`.
+vp9 = []
 # Backend-neutral decode API: the `Decoder` trait and `DecodedFrame`, over
 # numr tensors. Builds on any numr backend.
 decode = ["dep:numr"]
@@ -27,6 +29,7 @@ nvdec = [
   "h264",
   "hevc",
   "av1",
+  "vp9",
   "numr/cuda",
   "dep:cudarc",
   "dep:libloading",
@@ -47,6 +50,9 @@ nvenc = [
   "dep:cudarc",
   "dep:libloading",
 ]
+# Conversion between NV12 or P010 planes and float RGB, on any numr backend with
+# colour kernels. `numr/f16` gives the CPU backend F16 RGB.
+frame = ["decode", "encode", "numr/f16"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 

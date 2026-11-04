@@ -12,6 +12,8 @@ use super::ffi::{
     CudaVideoCodec, CuvidDecodeCaps, CuvidDecodeCreateInfo, DEINTERLACE_WEAVE, SURFACE_NV12,
     SURFACE_P016, ShortRect,
 };
+use super::vp9_color;
+use crate::bitstream::Vp9Color;
 use crate::decode::{ChromaFormat, ChromaLocation, ColorFacts, DecodeCodec, PixelFormat};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
@@ -64,6 +66,10 @@ pub(super) struct Sequence {
 impl Sequence {
     /// Reads and checks a sequence header for a decoder opened on `codec`.
     ///
+    /// For VP9, NVDEC's signal description is all zero, so `vp9` supplies
+    /// the matrix and range from the latest key frame header. `None` gives
+    /// an unspecified matrix. The argument is ignored for other codecs.
+    ///
     /// # Errors
     ///
     /// [`DecodeError::CodecMismatch`], [`DecodeError::UnsupportedLayout`]
@@ -74,6 +80,7 @@ impl Sequence {
         codec: DecodeCodec,
         format: &CuVideoFormat,
         chroma_location: Option<ChromaLocation>,
+        vp9: Option<Vp9Color>,
     ) -> Result<Self, DecodeError> {
         if format.codec != cuvid_codec(codec) {
             return Err(DecodeError::CodecMismatch {
@@ -102,6 +109,16 @@ impl Sequence {
             minimum => u32::from(minimum),
         };
         let signal = format.video_signal_description;
+        let mut color = ColorFacts {
+            matrix_coefficients: signal.matrix_coefficients,
+            transfer_characteristics: signal.transfer_characteristics,
+            colour_primaries: signal.color_primaries,
+            full_range: signal.full_range(),
+            chroma_location,
+        };
+        if codec == DecodeCodec::Vp9 {
+            vp9_color::apply(&mut color, vp9);
+        }
         Ok(Self {
             codec,
             format: pixel,
@@ -109,13 +126,7 @@ impl Sequence {
             crop,
             display,
             decode_surfaces,
-            color: ColorFacts {
-                matrix_coefficients: signal.matrix_coefficients,
-                transfer_characteristics: signal.transfer_characteristics,
-                colour_primaries: signal.color_primaries,
-                full_range: signal.full_range(),
-                chroma_location,
-            },
+            color,
         })
     }
 

@@ -148,14 +148,22 @@ fn check(stream: &Stream, frames: &[DecodedFrame<CudaRuntime>]) {
             color.chroma_location, location,
             "{name} frame {index}: chroma location"
         );
-        // VP9 carries no primaries or transfer in its bitstream, and the
-        // fixture's values come from `vpcC`, which the decoder ignores.
+        // Matrix and range of every codec come from the stream's own header:
+        // the fixture records them with ffprobe, for VP9 on the raw IVF.
+        assert_eq!(
+            u32::from(color.matrix_coefficients),
+            stream.number("matrix"),
+            "{name} frame {index}: matrix"
+        );
+        assert_eq!(
+            color.full_range,
+            stream.meta("range") == "pc",
+            "{name} frame {index}: range"
+        );
+        // A VP9 frame header carries no primaries or transfer. The fixture
+        // values come from `vpcC`, which the decoder ignores, so vidr reports
+        // them unspecified and the container fills them later.
         if stream.codec() != DecodeCodec::Vp9 {
-            assert_eq!(
-                u32::from(color.matrix_coefficients),
-                stream.number("matrix"),
-                "{name} frame {index}: matrix"
-            );
             assert_eq!(
                 u32::from(color.transfer_characteristics),
                 stream.number("transfer"),
@@ -165,11 +173,6 @@ fn check(stream: &Stream, frames: &[DecodedFrame<CudaRuntime>]) {
                 u32::from(color.colour_primaries),
                 stream.number("primaries"),
                 "{name} frame {index}: primaries"
-            );
-            assert_eq!(
-                color.full_range,
-                stream.meta("range") == "pc",
-                "{name} frame {index}: range"
             );
         }
 
@@ -240,6 +243,18 @@ fn av1_8bit_matches_ffmpeg() {
 #[test]
 fn vp9_8bit_matches_ffmpeg() {
     decodes_samples("vp9_8bit");
+}
+
+/// The key frame header states `color_space` 1 (BT.601) and full range.
+#[test]
+fn vp9_header_colour_matches_ffmpeg() {
+    decodes_samples("vp9_bt470bg_pc");
+}
+
+/// The key frame header states `color_space` 0 (unknown) and limited range.
+#[test]
+fn vp9_untagged_stream_matches_ffmpeg() {
+    decodes_samples("vp9_untagged");
 }
 
 /// AV1 and VP9 carry odd display sizes. H.264 and HEVC crop 4:2:0 frames in

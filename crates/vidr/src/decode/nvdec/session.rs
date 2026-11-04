@@ -1,7 +1,7 @@
 //! The state the parser callbacks share: the hardware decoder, the frames
 //! ready in display order, and the surfaces still mapped.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_int;
 
 use cudarc::driver::CudaEvent;
@@ -9,7 +9,9 @@ use numr::runtime::cuda::{CudaClient, CudaRuntime};
 
 use super::ffi::{self, CuVideoCtxLock, CuVideoDecoder, CuVideoFormat, Cuvid, CuvidPicParams};
 use super::sequence::Sequence;
-use crate::decode::{ChromaLocation, DecodeCodec, DecodedFrame};
+use super::vp9_color;
+use crate::bitstream::Vp9Color;
+use crate::decode::{ChromaLocation, ColorFacts, DecodeCodec, DecodedFrame};
 use crate::error::DecodeError;
 
 /// A hardware decoder and the sequence it was created for.
@@ -38,7 +40,13 @@ pub(super) struct Session {
     pub(super) codec: DecodeCodec,
     pub(super) ctx_lock: CuVideoCtxLock,
     pub(super) chroma_location: Option<ChromaLocation>,
+    /// The colour of the latest VP9 key frame or intra-only header, or
+    /// `None` before one is parsed.
+    pub(super) vp9_color: Option<Vp9Color>,
     pub(super) active: Option<Active>,
+    /// The colour each picture index had when it was decoded. A picture can wait
+    /// for display past a colour change, so display reads its colour here.
+    pub(super) picture_colors: HashMap<c_int, ColorFacts>,
     pub(super) frames: VecDeque<DecodedFrame<CudaRuntime>>,
     pub(super) mapped: VecDeque<Mapped>,
     /// The first error a callback hits. Every later callback returns 0, and
@@ -51,7 +59,7 @@ impl Session {
     /// decoder when it still fits, and otherwise replaces it. Returns the
     /// decode surface count, which overrides the parser's.
     pub(super) fn on_sequence(&mut self, format: &CuVideoFormat) -> Result<c_int, DecodeError> {
-        let sequence = Sequence::read(self.codec, format, self.chroma_location)?;
+        let sequence = Sequence::read(self.codec, format, self.chroma_location, self.vp9_color)?;
         let surfaces = c_int::try_from(sequence.decode_surfaces).unwrap_or(c_int::MAX);
         if let Some(active) = &mut self.active
             && active.sequence.same_decoder(&sequence)
@@ -80,6 +88,15 @@ impl Session {
         Ok(surfaces)
     }
 
+    /// Keeps the colour of a VP9 key frame header. A key frame of the same
+    /// size starts no new sequence, so the active sequence takes it too.
+    pub(super) fn set_vp9_color(&mut self, color: Vp9Color) {
+        self.vp9_color = Some(color);
+        if let Some(active) = &mut self.active {
+            vp9_color::apply(&mut active.sequence.color, Some(color));
+        }
+    }
+
     /// The decode callback: submits one picture to the hardware decoder.
     pub(super) fn on_decode(&mut self, picture: *mut CuvidPicParams) -> Result<c_int, DecodeError> {
         let active = self
@@ -89,6 +106,9 @@ impl Session {
         // SAFETY: the parser owns `picture` for the duration of this
         // callback and filled it for `active.handle`, the decoder its last
         // sequence callback created.
+        let index = unsafe { (*picture).curr_pic_idx };
+        self.picture_colors.insert(index, active.sequence.color);
+        // SAFETY: as above.
         let code = unsafe { (self.cuvid.decode_picture)(active.handle, picture) };
         ffi::check("cuvidDecodePicture", code, || active.sequence.describe())?;
         Ok(1)
@@ -98,6 +118,7 @@ impl Session {
     /// already queued keep their own copies.
     pub(super) fn release_decoder(&mut self) -> Result<(), DecodeError> {
         let unmapped = self.unmap_all();
+        self.picture_colors.clear();
         let destroyed = match self.active.take() {
             Some(active) => {
                 // SAFETY: `active.handle` came from `cuvidCreateDecoder`, no

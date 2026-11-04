@@ -4,6 +4,7 @@
 //! or its fixture is missing.
 
 mod decode;
-mod fixtures;
+pub(crate) mod fixtures;
 mod refusals;
 mod structure;
+mod vp9_color;

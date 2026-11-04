@@ -13,5 +13,5 @@ mod types;
 pub(crate) use config_types::*;
 pub(crate) use guid::*;
 pub(crate) use library::{Nvenc, nvenc};
-pub(crate) use result::{NEED_MORE_INPUT, check};
+pub(crate) use result::{ERR_INCOMPATIBLE_CLIENT_KEY, ERR_OUT_OF_MEMORY, NEED_MORE_INPUT, check};
 pub(crate) use types::*;

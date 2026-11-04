@@ -13,9 +13,14 @@
 //! | `av1::Av1FromEncoder` | AV1 temporal units | samples and `av1C` |
 //!
 //! The filters read raw sample and config bytes, and depend on no container
-//! crate. Each codec is a Cargo feature: `h264`, `hevc`, and `av1`.
+//! crate. Each codec is a Cargo feature: `h264`, `hevc`, `av1`, and `vp9`.
+//!
+//! VP9 has no config record the decoder needs and no filter. The `vp9`
+//! feature holds `vp9_color` and `vp9_packet_color`, which read
+//! `color_space` and `color_range` from a frame header.
 
 mod bits;
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
 mod bytes;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]
@@ -60,6 +65,8 @@ mod vui;
 
 #[cfg(feature = "av1")]
 pub mod av1;
+#[cfg(feature = "vp9")]
+mod vp9;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use annexb::StartCode;
@@ -83,5 +90,7 @@ pub use nal::HevcNalType;
 pub use nal::ParameterSetKind;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use to_annexb::ToAnnexB;
+#[cfg(feature = "vp9")]
+pub use vp9::{Vp9Color, vp9_color, vp9_packet_color};
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use vui::{ChromaSampleLoc, ColourDescription, VideoSignalType, VuiSignal};

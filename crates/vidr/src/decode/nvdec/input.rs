@@ -3,6 +3,7 @@
 use super::signal;
 use crate::bitstream::av1::{Av1Config, Av1ToDecoder};
 use crate::bitstream::{AvcConfig, HevcConfig, HevcNalType, LengthSize, ToAnnexB};
+use crate::bitstream::{Vp9Color, vp9_packet_color};
 use crate::bitstream::{annexb, length_prefixed};
 use crate::decode::{ChromaLocation, DecodeCodec};
 use crate::error::DecodeError;
@@ -26,7 +27,8 @@ impl Input {
     /// The filter for `codec` and its config record.
     ///
     /// An empty `config` selects raw input. VP9 always takes raw input:
-    /// `vpcC` carries nothing the parser needs. For AV1 the result also
+    /// `vpcC` carries nothing the parser needs, and the colour comes from
+    /// the frame headers (see `Input::vp9_color`). For AV1 the result also
     /// holds the `av1C` chroma sample position, and for H.264 and HEVC the
     /// chroma sample location of the config's first SPS.
     ///
@@ -100,6 +102,17 @@ impl Input {
         }
     }
 
+    /// The colour a VP9 packet states, read from the header of every frame
+    /// in it before the parser runs. `None` means the packet holds no key
+    /// frame or intra-only header with colour, so the colour in effect
+    /// stays. Other codecs, and a header that does not parse, give `None`.
+    pub(super) fn vp9_color(&self, codec: DecodeCodec, packet: &[u8]) -> Option<Vp9Color> {
+        if codec != DecodeCodec::Vp9 || !matches!(self, Self::Raw) {
+            return None;
+        }
+        vp9_packet_color(packet).ok().flatten()
+    }
+
     /// Converts one packet into `out`, which is cleared first. Raw input
     /// copies nothing and returns the packet itself.
     ///
@@ -141,6 +154,26 @@ mod tests {
             assert_eq!(location, None);
             assert_eq!(input.filter(&[0, 0, 1, 9], &mut out), Ok(&[0, 0, 1, 9][..]));
         }
+    }
+
+    #[test]
+    fn vp9_packets_report_the_key_frame_colour() {
+        // Key frame, profile 0, sync code, color_space 2 (BT.709), limited.
+        let key = [0x82, 0x49, 0x83, 0x42, 0x40, 0, 0, 0];
+        let Ok((input, _)) = Input::new(DecodeCodec::Vp9, &[1, 0, 0]) else {
+            panic!("VP9 input failed");
+        };
+        let expected = Vp9Color {
+            color_space: 2,
+            full_range: false,
+            bit_depth: 8,
+        };
+        assert_eq!(input.vp9_color(DecodeCodec::Vp9, &key), Some(expected));
+        // An inter frame, a header that does not parse, and other codecs
+        // give no colour.
+        assert_eq!(input.vp9_color(DecodeCodec::Vp9, &[0x86, 0, 0]), None);
+        assert_eq!(input.vp9_color(DecodeCodec::Vp9, &key[..3]), None);
+        assert_eq!(input.vp9_color(DecodeCodec::Av1, &key), None);
     }
 
     /// An H.264 Main profile SPS with chroma sample location type 1 in both

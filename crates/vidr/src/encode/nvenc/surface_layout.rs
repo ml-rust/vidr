@@ -60,10 +60,7 @@ impl SurfaceLayout {
     }
 
     fn sample_dtype(&self) -> DType {
-        match self.format {
-            PixelFormat::Nv12 => DType::U8,
-            PixelFormat::P010 => DType::U16,
-        }
+        self.format.sample_dtype()
     }
 
     /// Checks a frame against the config, and returns its row pitches.

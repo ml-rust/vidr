@@ -12,8 +12,10 @@ use std::mem::{align_of, offset_of, size_of};
 
 use super::types::{
     CuVideoFormat, CuvidDecodeCaps, CuvidDecodeCreateInfo, CuvidParserDispInfo, CuvidParserParams,
-    CuvidProcParams, CuvidSourceDataPacket, VideoSignalDescription,
+    CuvidPicParams, CuvidProcParams, CuvidSourceDataPacket, VideoSignalDescription,
 };
+
+const _: () = assert!(offset_of!(CuvidPicParams, curr_pic_idx) == 8);
 
 macro_rules! check {
     ($type:ty, size $size:expr, align $align:expr, $($field:ident @ $offset:expr),* $(,)?) => {

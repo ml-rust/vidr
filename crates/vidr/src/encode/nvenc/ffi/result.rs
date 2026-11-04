@@ -5,6 +5,10 @@ use crate::error::EncodeError;
 
 /// `NV_ENC_SUCCESS`.
 pub(crate) const SUCCESS: NvEncStatus = 0;
+/// `NV_ENC_ERR_OUT_OF_MEMORY`.
+pub(crate) const ERR_OUT_OF_MEMORY: NvEncStatus = 10;
+/// `NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY`.
+pub(crate) const ERR_INCOMPATIBLE_CLIENT_KEY: NvEncStatus = 21;
 /// `NV_ENC_ERR_NEED_MORE_INPUT`. In synchronous mode this is no error: the
 /// encoder holds the picture until a later one completes its reorder group.
 pub(crate) const NEED_MORE_INPUT: NvEncStatus = 17;

@@ -21,7 +21,11 @@ For each stream NAME the script writes:
 - `NAME.frames`: the pts of each frame ffmpeg decodes, in display order.
 - `NAME.meta`: `key=value` lines: `codec`, `width`, `height`, `format`
   (`nv12` or `p010`), and the ffprobe colour fields `matrix`, `transfer`,
-  `primaries` as H.273 code points and `range` (`tv` or `pc`). A stream
+  `primaries` as H.273 code points and `range` (`tv` or `pc`). For VP9,
+  `matrix` and `range` come from ffprobe on the raw IVF, which reads the
+  frame header. ffprobe on the MP4 reads `vpcC`, a copy the decoder
+  ignores. `transfer` and `primaries` still come from the MP4, because a
+  VP9 frame header carries neither. A stream
   whose SPS signals a chroma sample location also has `chroma_location`,
   the H.273 `ChromaSampleLocType` number. `interlaced` and `top_field_first`
   (0 or 1) are what ffprobe reports for every frame. The script exits when
@@ -54,6 +58,9 @@ FRAMES = "12"
 # The frames carry the colour description, so every encoder writes it into
 # the sequence header.
 COLOR_FILTER = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+# Streams whose colour comes from encoder flags, not from frame properties.
+# The frames stay untagged, so the encoder writes only what the flags say.
+FLAG_COLOR = {"vp9_bt470bg_pc", "vp9_untagged"}
 
 # H.273 code points of the ffprobe names the streams use.
 H273 = {
@@ -89,6 +96,12 @@ STREAMS = [
      "p010le"),
     ("av1_8bit", "av1", "yuv420p", AOM, "nv12"),
     ("vp9_8bit", "vp9", "yuv420p", VPX, "nv12"),
+    # VP9 states its colour in the key frame header only. These streams
+    # write `color_space` 1 with full range, and `color_space` 0 with the
+    # default limited range.
+    ("vp9_bt470bg_pc", "vp9", "yuv420p",
+     [*VPX, "-colorspace", "bt470bg", "-color_range", "pc"], "nv12"),
+    ("vp9_untagged", "vp9", "yuv420p", VPX, "nv12"),
     # The SPS VUI signals chroma sample location type 1.
     ("h264_chroma_center", "h264", "yuv420p", [*X264, *CENTER], "nv12"),
     ("hevc_chroma_center", "hevc", "yuv420p",
@@ -140,11 +153,32 @@ def probe(path, section, entries):
     return json.loads(out)
 
 
-def encode(path, pix_fmt, codec_args, size=SIZE, crop=""):
+def encode(path, pix_fmt, codec_args, size=SIZE, crop="", color_filter=COLOR_FILTER):
     """Encodes the test source into an MP4 file. Returns False on an error."""
     source = ["-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25",
               "-frames:v", FRAMES, "-pix_fmt", pix_fmt]
-    return tool("ffmpeg", [*QUIET, *source, *codec_args, "-vf", crop + COLOR_FILTER, str(path)]) is not None
+    chain = crop + color_filter if color_filter else crop.rstrip(",") or "null"
+    return tool("ffmpeg", [*QUIET, *source, *codec_args, "-vf", chain, str(path)]) is not None
+
+
+def vp9_header_color(mp4, out, name):
+    """Returns (matrix, range) that ffprobe reads from the raw IVF of a VP9 stream.
+
+    The IVF holds the bitstream without `vpcC`, so ffprobe reports the
+    `color_space` and `color_range` of the key frame header.
+    """
+    ivf = out / f"{name}.ivf"
+    args = [*QUIET, "-i", str(mp4), "-map", "0:v:0", "-c", "copy", "-f", "ivf", str(ivf)]
+    if tool("ffmpeg", args) is None:
+        sys.exit(f"{name}: ffmpeg cannot write the raw IVF")
+    try:
+        stream = probe(ivf, "streams", "stream=color_space,color_range")["streams"][0]
+    finally:
+        ivf.unlink(missing_ok=True)
+    space = stream.get("color_space", "unknown")
+    if space not in H273:
+        sys.exit(f"{name}: color_space {space} has no H.273 code in this script")
+    return H273[space], stream.get("color_range", "tv")
 
 
 def write_meta(mp4, out, name, codec, decoded, chroma_location):
@@ -182,6 +216,8 @@ def write_meta(mp4, out, name, codec, decoded, chroma_location):
         "primaries": code("color_primaries"),
         "range": stream.get("color_range", "tv"),
     }
+    if codec == "vp9":
+        meta["matrix"], meta["range"] = vp9_header_color(mp4, out, name)
     meta["interlaced"], meta["top_field_first"] = picture_structure(mp4, name)
     if chroma_location is not None:
         number, probed = CHROMA_LOCATIONS[chroma_location]
@@ -217,7 +253,8 @@ def main():
         mp4 = args.out / f"{name}.mp4"
         odd = name.endswith("_odd")
         prefix = ODD_CROP if odd else SOURCE_FILTERS.get(name, "")
-        if not encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix):
+        color_filter = "" if name in FLAG_COLOR else COLOR_FILTER
+        if not encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix, color_filter):
             print(f"{name}: skipped, the encoder is missing or refuses {pix_fmt}")
             continue
         extract(mp4, args.out, name)

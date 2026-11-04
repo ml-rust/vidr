@@ -37,6 +37,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Bitstream filters (`h264`, `hevc`, `av1`): length-prefixed and Annex-B NAL units, OBU framing, `avcC` / `hvcC` / `av1C` parse and write, MP4 samples to NVDEC input, NVENC output to MP4 samples | Implemented |
 | NVDEC hardware decode (`nvdec`): H.264, HEVC, AV1, VP9, 4:2:0 at 8 or 10 bits, into numr CUDA tensors on numr's stream | Implemented |
 | NVENC hardware encode (`nvenc`): H.264, HEVC, AV1, NV12 and P010, from numr CUDA tensors on numr's stream, to MP4 samples and config records. AV1 runs on GPUs that list it, and no test covers it on the development GPU | Implemented |
+| Frame conversion (`frame`): NV12 and P010 to F32 or F16 RGB at any display size, even-size RGB back to planes, without leaving the device | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.

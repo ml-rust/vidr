@@ -1,0 +1,89 @@
+//! Errors in frame conversion.
+
+use std::error::Error as StdError;
+use std::fmt;
+
+use numr::ops::ConvLayout;
+
+/// An error in a conversion between 4:2:0 planes and float RGB.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FrameError {
+    /// A decoded plane's shape or dtype does not match the frame's format and
+    /// display size.
+    PlaneMismatch {
+        /// The plane: `luma` or `chroma`.
+        plane: &'static str,
+        /// The shape `[rows, columns]` and dtype the frame needs.
+        expected: String,
+        /// The plane's shape and dtype.
+        found: String,
+    },
+    /// An RGB tensor does not hold one frame in its layout.
+    RgbShape {
+        /// The tensor's shape.
+        shape: Vec<usize>,
+        /// The layout the call names.
+        layout: ConvLayout,
+    },
+    /// RGB of an odd size cannot become 4:2:0 planes.
+    OddRgbSize {
+        /// Width in pixels.
+        width: usize,
+        /// Height in pixels.
+        height: usize,
+    },
+    /// A numr call refuses its input or fails.
+    Numr {
+        /// The numr function.
+        operation: &'static str,
+        /// The inputs of the call.
+        input: String,
+        /// numr's message.
+        reason: String,
+    },
+}
+
+impl fmt::Display for FrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlaneMismatch {
+                plane,
+                expected,
+                found,
+            } => write!(
+                f,
+                "the {plane} plane is {found}, and the frame's format and display size \
+                 need {expected}. Build the frame with planes in the layout `DecodedFrame` \
+                 documents."
+            ),
+            Self::RgbShape { shape, layout } => {
+                let needed = match layout {
+                    ConvLayout::Nchw => "[1, 3, H, W]",
+                    ConvLayout::Nhwc => "[1, H, W, 3]",
+                };
+                write!(
+                    f,
+                    "RGB of shape {shape:?} does not hold one {layout:?} frame. That layout needs \
+                     {needed} with H and W above zero. Pass one frame, or name its layout."
+                )
+            }
+            Self::OddRgbSize { width, height } => write!(
+                f,
+                "RGB of size {width}x{height} cannot become 4:2:0 planes, because `from_rgb` \
+                 needs an even width and height. Crop or pad the RGB to an even size."
+            ),
+            Self::Numr {
+                operation,
+                input,
+                reason,
+            } => write!(
+                f,
+                "{operation} fails for {input}: {reason}. Check that the backend supports the \
+                 dtype and plane form, and that the device has free memory, then retry."
+            ),
+        }
+    }
+}
+
+impl StdError for FrameError {}

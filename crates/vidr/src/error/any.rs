@@ -3,12 +3,14 @@
 use std::error::Error as StdError;
 use std::fmt;
 
-#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 use super::BitstreamError;
 #[cfg(feature = "decode")]
 use super::DecodeError;
 #[cfg(feature = "encode")]
 use super::EncodeError;
+#[cfg(feature = "frame")]
+use super::FrameError;
 use super::{EditListError, GeometryError, TimeError, TimingError};
 use crate::check::CheckError;
 
@@ -26,7 +28,7 @@ pub enum Error {
     /// Output checks.
     Check(CheckError),
     /// Bitstream filters and codec config records.
-    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+    #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
     Bitstream(BitstreamError),
     /// Video decoding.
     #[cfg(feature = "decode")]
@@ -34,6 +36,9 @@ pub enum Error {
     /// Video encoding.
     #[cfg(feature = "encode")]
     Encode(EncodeError),
+    /// Frame conversion.
+    #[cfg(feature = "frame")]
+    Frame(FrameError),
 }
 
 impl fmt::Display for Error {
@@ -44,12 +49,14 @@ impl fmt::Display for Error {
             Self::EditList(error) => fmt::Display::fmt(error, f),
             Self::Geometry(error) => fmt::Display::fmt(error, f),
             Self::Check(error) => fmt::Display::fmt(error, f),
-            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
             Self::Bitstream(error) => fmt::Display::fmt(error, f),
             #[cfg(feature = "decode")]
             Self::Decode(error) => fmt::Display::fmt(error, f),
             #[cfg(feature = "encode")]
             Self::Encode(error) => fmt::Display::fmt(error, f),
+            #[cfg(feature = "frame")]
+            Self::Frame(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -62,12 +69,14 @@ impl StdError for Error {
             Self::EditList(error) => Some(error),
             Self::Geometry(error) => Some(error),
             Self::Check(error) => Some(error),
-            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+            #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
             Self::Bitstream(error) => Some(error),
             #[cfg(feature = "decode")]
             Self::Decode(error) => Some(error),
             #[cfg(feature = "encode")]
             Self::Encode(error) => Some(error),
+            #[cfg(feature = "frame")]
+            Self::Frame(error) => Some(error),
         }
     }
 }
@@ -102,7 +111,7 @@ impl From<CheckError> for Error {
     }
 }
 
-#[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
+#[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 impl From<BitstreamError> for Error {
     fn from(error: BitstreamError) -> Self {
         Self::Bitstream(error)
@@ -120,6 +129,13 @@ impl From<DecodeError> for Error {
 impl From<EncodeError> for Error {
     fn from(error: EncodeError) -> Self {
         Self::Encode(error)
+    }
+}
+
+#[cfg(feature = "frame")]
+impl From<FrameError> for Error {
+    fn from(error: FrameError) -> Self {
+        Self::Frame(error)
     }
 }
 

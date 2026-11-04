@@ -1,0 +1,8 @@
+# Consumer GPUs limit concurrent NVENC sessions, and each process opens its
+# own, so nextest caps the tests that open one.
+[test-groups]
+nvenc = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(api) & (test(nvenc::) | test(encode_loop))'
+test-group = 'nvenc'

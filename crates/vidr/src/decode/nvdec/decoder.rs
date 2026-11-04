@@ -1,6 +1,6 @@
 //! [`NvdecDecoder`]: NVDEC behind the backend-neutral [`Decoder`] trait.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_ulong, c_void};
 use std::ptr::NonNull;
 
@@ -122,7 +122,9 @@ impl NvdecDecoder {
             codec,
             ctx_lock,
             chroma_location,
+            vp9_color: None,
             active: None,
+            picture_colors: HashMap::new(),
             frames: VecDeque::new(),
             mapped: VecDeque::new(),
             error: None,
@@ -187,6 +189,10 @@ impl NvdecDecoder {
         if let Some(location) = self.input.sps_location(codec, packet) {
             // SAFETY: no parse runs, and `&mut self` excludes other access.
             unsafe { self.session.as_mut() }.chroma_location = location;
+        }
+        if let Some(color) = self.input.vp9_color(codec, packet) {
+            // SAFETY: as above.
+            unsafe { self.session.as_mut() }.set_vp9_color(color);
         }
         let mut source = CuvidSourceDataPacket {
             flags: PKT_TIMESTAMP,

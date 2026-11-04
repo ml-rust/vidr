@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use numr::dtype::DType;
+
 /// A compressed video format a decoder takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -100,6 +102,14 @@ impl PixelFormat {
         match self {
             Self::Nv12 => 1,
             Self::P010 => 2,
+        }
+    }
+
+    /// The numr dtype of a stored sample: U8 for `Nv12`, U16 for `P010`.
+    pub const fn sample_dtype(self) -> DType {
+        match self {
+            Self::Nv12 => DType::U8,
+            Self::P010 => DType::U16,
         }
     }
 }

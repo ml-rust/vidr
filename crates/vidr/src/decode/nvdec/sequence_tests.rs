@@ -3,11 +3,16 @@
 use std::ffi::c_ulong;
 
 use super::ffi::{
-    CHROMA_420, CHROMA_444, CODEC_H264, CODEC_HEVC, CuVideoFormat, CudaVideoCodec, CuvidDecodeCaps,
-    DEINTERLACE_WEAVE, IntRect, SURFACE_NV12, SURFACE_P016, VideoSignalDescription,
+    CHROMA_420, CHROMA_444, CODEC_H264, CODEC_HEVC, CODEC_VP9, CuVideoFormat, CudaVideoCodec,
+    CuvidDecodeCaps, DEINTERLACE_WEAVE, IntRect, SURFACE_NV12, SURFACE_P016,
+    VideoSignalDescription,
 };
 use super::sequence::{OUTPUT_SURFACES, Sequence};
-use crate::decode::{ChromaFormat, DecodeCodec, PixelFormat};
+use crate::bitstream::Vp9Color;
+use crate::decode::{
+    ChromaFormat, DecodeCodec, MATRIX_BT470BG, MATRIX_BT709, MATRIX_UNSPECIFIED,
+    PRIMARIES_UNSPECIFIED, PixelFormat, TRANSFER_UNSPECIFIED,
+};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
 
@@ -41,7 +46,7 @@ fn area(right: i32, bottom: i32) -> IntRect {
 }
 
 fn read(format: &CuVideoFormat) -> Result<Sequence, DecodeError> {
-    Sequence::read(DecodeCodec::H264, format, None)
+    Sequence::read(DecodeCodec::H264, format, None, None)
 }
 
 #[test]
@@ -119,6 +124,7 @@ fn ten_bit_is_p010_and_twelve_bit_is_refused() {
         DecodeCodec::Hevc,
         &format(CODEC_HEVC, 2, area(320, 180)),
         None,
+        None,
     ) else {
         panic!("read failed");
     };
@@ -127,6 +133,7 @@ fn ten_bit_is_p010_and_twelve_bit_is_refused() {
         Sequence::read(
             DecodeCodec::Hevc,
             &format(CODEC_HEVC, 4, area(320, 180)),
+            None,
             None
         ),
         Err(DecodeError::UnsupportedLayout {
@@ -141,7 +148,7 @@ fn non_420_and_mixed_depths_are_refused() {
     let mut header = format(CODEC_HEVC, 0, area(320, 180));
     header.chroma_format = CHROMA_444;
     assert!(matches!(
-        Sequence::read(DecodeCodec::Hevc, &header, None),
+        Sequence::read(DecodeCodec::Hevc, &header, None, None),
         Err(DecodeError::UnsupportedLayout {
             chroma: ChromaFormat::Yuv444,
             ..
@@ -150,7 +157,7 @@ fn non_420_and_mixed_depths_are_refused() {
     let mut header = format(CODEC_HEVC, 2, area(320, 180));
     header.bit_depth_chroma_minus8 = 0;
     assert!(matches!(
-        Sequence::read(DecodeCodec::Hevc, &header, None),
+        Sequence::read(DecodeCodec::Hevc, &header, None, None),
         Err(DecodeError::UnsupportedLayout { .. })
     ));
 }
@@ -239,4 +246,67 @@ fn create_info_crops_without_scaling() {
     let query = sequence.caps_query();
     assert_eq!(query.codec_type, CODEC_H264);
     assert_eq!(query.bit_depth_minus8, 0);
+}
+
+fn read_vp9(vp9: Option<Vp9Color>) -> Sequence {
+    // NVDEC reports flags 0 and matrix 0 for VP9. `format` sets matrix 1
+    // and primaries 1, which the VP9 path must replace.
+    let mut header = format(CODEC_VP9, 0, area(320, 180));
+    header.video_signal_description.matrix_coefficients = 0;
+    header.video_signal_description.color_primaries = 0;
+    header.video_signal_description.transfer_characteristics = 0;
+    match Sequence::read(DecodeCodec::Vp9, &header, None, vp9) {
+        Ok(sequence) => sequence,
+        Err(error) => panic!("read failed: {error}"),
+    }
+}
+
+#[test]
+fn vp9_colour_comes_from_the_frame_header() {
+    let header = Vp9Color {
+        color_space: 2,
+        full_range: false,
+        bit_depth: 8,
+    };
+    let color = read_vp9(Some(header)).color;
+    assert_eq!(color.matrix_coefficients, MATRIX_BT709);
+    assert!(!color.full_range);
+    assert_eq!(color.transfer_characteristics, TRANSFER_UNSPECIFIED);
+    assert_eq!(color.colour_primaries, PRIMARIES_UNSPECIFIED);
+    assert!(color.matrix().is_some());
+
+    let full = Vp9Color {
+        color_space: 1,
+        full_range: true,
+        bit_depth: 8,
+    };
+    let color = read_vp9(Some(full)).color;
+    assert_eq!(color.matrix_coefficients, MATRIX_BT470BG);
+    assert!(color.full_range);
+}
+
+#[test]
+fn vp9_without_a_key_frame_header_is_unspecified() {
+    let color = read_vp9(None).color;
+    assert_eq!(color.matrix_coefficients, MATRIX_UNSPECIFIED);
+    assert!(!color.full_range);
+}
+
+#[test]
+fn other_codecs_ignore_the_vp9_header() {
+    let header = Vp9Color {
+        color_space: 5,
+        full_range: true,
+        bit_depth: 8,
+    };
+    let Ok(sequence) = Sequence::read(
+        DecodeCodec::H264,
+        &format(CODEC_H264, 0, area(320, 180)),
+        None,
+        Some(header),
+    ) else {
+        panic!("read failed");
+    };
+    assert_eq!(sequence.color.matrix_coefficients, 1);
+    assert!(!sequence.color.full_range);
 }
