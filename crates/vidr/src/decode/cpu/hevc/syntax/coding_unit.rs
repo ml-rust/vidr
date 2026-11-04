@@ -71,6 +71,11 @@ impl CtuParser<'_, '_> {
         record.qp_y = qp;
         self.qp.last_cu_qp_y = qp;
         self.maps.set_qp_y(x0, y0, size, qp);
+        // 8.7.2.5.7, 8.7.2.5.8, and 8.7.3.2 share this condition in Main and Main 10.
+        let no_filter =
+            record.transquant_bypass || (record.pcm && self.params.pcm_loop_filter_disabled);
+        let intra = record.pred_mode == PredMode::Intra;
+        self.maps.set_cu_kind(x0, y0, size, intra, no_filter);
         push_record(&mut self.records.cus, record, "coding unit records")?;
         self.check_not_exhausted()
     }

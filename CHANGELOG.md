@@ -99,6 +99,12 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - The coding quadtree, coding unit, prediction unit, transform tree, transform unit, and `residual_coding` parsers, with sign data hiding and transform skip. They write plain records per CTU, for a later reconstruct stage.
   - QP derivation, scaling, scaling lists, the inverse DST and DCT from 4x4 to 32x32, transform skip, and transform bypass.
   - A stream with unequal luma and chroma bit depth, another chroma format, a depth above 10 bits, a range or multilayer extension tool, or a picture above level 6.2 gets a named refusal.
+- `vidr`: the CPU HEVC decoder core behind `cpu-hevc`, crate-internal, intra pictures only. It has no `Decoder` adapter yet, so no public API decodes HEVC on the CPU.
+  - The slice data loop: SAO syntax, CTB address order, `end_of_subset_one_bit`, tiles, wavefronts, and dependent slice segments. A P or B slice returns `HevcError::Unsupported`.
+  - Intra prediction: reference sample substitution, three-tap and strong smoothing, planar, DC, angular, and the boundary filters. PCM samples and constrained intra prediction.
+  - The deblocking filter and SAO, with picture, slice, and tile boundary rules, `pcm_loop_filter_disabled_flag`, and `cu_transquant_bypass_flag`.
+  - The decoded picture hash SEI message with MD5, CRC, and checksum. The check is off by default. `DecodeOptions::check_picture_hash` turns it on, and a mismatch returns `HevcError::PictureHashMismatch`.
+  - `crates/vidr/tests/fixtures/gen_hevc.py` generates x265 streams and ffmpeg raw video for the comparison tests. The tests print a skip notice without them.
 
 ### Changed
 

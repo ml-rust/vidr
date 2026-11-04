@@ -26,12 +26,16 @@ pub(crate) const fn qp_prime_y(qp_y: i32, qp_bd_offset: i32) -> u32 {
 /// `offset` is the PPS offset plus the slice offset.
 pub(crate) fn qp_prime_c(qp_y: i32, offset: i32, qp_bd_offset: i32) -> u32 {
     let qp_i = (qp_y + offset).max(-qp_bd_offset).min(57);
-    let qp_c = match qp_i {
+    (qp_c_from_index(qp_i) + qp_bd_offset) as u32
+}
+
+/// `QpC` from `qPi` for `ChromaArrayType` 1 (Table 8-10).
+pub(crate) fn qp_c_from_index(qp_i: i32) -> i32 {
+    match qp_i {
         ..=29 => qp_i,
         30..=43 => QP_C_TABLE[(qp_i - 30) as usize],
         _ => qp_i - 6,
-    };
-    (qp_c + qp_bd_offset) as u32
+    }
 }
 
 /// The running state of 8.6.1 for one slice.
@@ -124,6 +128,15 @@ mod tests {
         for (qp_i, qp_c) in expected {
             assert_eq!(qp_prime_c(qp_i, 0, 0), qp_c, "qPi {qp_i}");
         }
+    }
+
+    /// The index of Table 8-10 has no clip in the deblocking use (8-382).
+    #[test]
+    fn the_table_alone_takes_any_index() {
+        assert_eq!(qp_c_from_index(-20), -20);
+        assert_eq!(qp_c_from_index(29), 29);
+        assert_eq!(qp_c_from_index(43), 37);
+        assert_eq!(qp_c_from_index(70), 64);
     }
 
     #[test]

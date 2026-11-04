@@ -36,3 +36,6 @@ crates/vidr/tests/fixtures/nvdec/
 
 # Generated media input fixtures (crates/vidr/tests/fixtures/gen_media.py)
 crates/vidr/tests/fixtures/media/
+
+# Generated CPU HEVC fixtures (crates/vidr/tests/fixtures/gen_hevc.py)
+crates/vidr/tests/fixtures/hevc/

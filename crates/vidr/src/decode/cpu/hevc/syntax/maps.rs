@@ -5,12 +5,25 @@ use crate::decode::cpu::hevc::error::HevcError;
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
 
+use super::sao::SaoCtb;
+
 /// `SliceAddrRs` of a CTB no slice has reached in this picture.
 const NO_SLICE: u32 = u32::MAX;
 /// `IntraPredModeY` units are 4x4 luma samples: the smallest prediction block.
 const INTRA_UNIT_LOG2: u32 = 2;
 /// `INTRA_DC` (Table 8-1).
 pub(crate) const INTRA_DC: u8 = 1;
+
+/// What the in-loop filters read from the slice that holds one CTB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CtbFilter {
+    /// `slice_beta_offset_div2`.
+    pub(crate) beta_offset_div2: i32,
+    /// `slice_tc_offset_div2`.
+    pub(crate) tc_offset_div2: i32,
+    /// `slice_loop_filter_across_slices_enabled_flag`.
+    pub(crate) across_slices: bool,
+}
 
 /// A square region to fill, in luma samples.
 #[derive(Clone, Copy)]
@@ -37,8 +50,18 @@ pub(crate) struct ParseMaps {
     /// `IntraPredModeY`, per 4x4 unit. A block with no mode holds `INTRA_DC`,
     /// the candidate 8.4.2 assigns to it.
     intra_mode: Vec<u8>,
+    /// True when `CuPredMode` is `MODE_INTRA`, per minimum coding block.
+    cu_intra: Vec<bool>,
+    /// True when neither in-loop filter can change the samples, per minimum coding
+    /// block: `cu_transquant_bypass_flag` 1, or PCM with
+    /// `pcm_loop_filter_disabled_flag` 1.
+    no_filter: Vec<bool>,
     /// `SliceAddrRs`, per CTB in raster order.
     ctb_slice: Vec<u32>,
+    /// The slice values of each CTB, in raster order.
+    ctb_filter: Vec<CtbFilter>,
+    /// The SAO values of each CTB, in raster order.
+    sao: Vec<SaoCtb>,
 }
 
 impl ParseMaps {
@@ -62,7 +85,15 @@ impl ParseMaps {
             cu_skip: filled(cb_count, false, "cu_skip_flag")?,
             qp_y: filled(cb_count, 0, "QpY")?,
             intra_mode: filled(intra_count, INTRA_DC, "IntraPredModeY")?,
+            cu_intra: filled(cb_count, false, "CuPredMode")?,
+            no_filter: filled(cb_count, false, "in-loop filter flags")?,
             ctb_slice: filled(layout.ctb_count(), NO_SLICE, "SliceAddrRs")?,
+            ctb_filter: filled(
+                layout.ctb_count(),
+                CtbFilter::default(),
+                "CTB filter values",
+            )?,
+            sao: filled(layout.ctb_count(), SaoCtb::default(), "SAO values")?,
         })
     }
 
@@ -76,6 +107,48 @@ impl ParseMaps {
         if let Some(entry) = self.ctb_slice.get_mut(rs) {
             *entry = slice_addr_rs;
         }
+    }
+
+    /// True when a slice has reached CTB `rs` in this picture.
+    pub(crate) fn ctb_reached(&self, rs: usize) -> bool {
+        self.ctb_slice
+            .get(rs)
+            .is_some_and(|&slice| slice != NO_SLICE)
+    }
+
+    /// `SliceAddrRs` of CTB `rs`. A CTB outside the picture returns no slice.
+    pub(crate) fn ctb_slice(&self, rs: usize) -> u32 {
+        self.ctb_slice.get(rs).copied().unwrap_or(NO_SLICE)
+    }
+
+    /// Records the slice values of CTB `rs`, and clears its SAO values.
+    pub(crate) fn begin_ctb_filter(&mut self, rs: usize, filter: CtbFilter) {
+        if let Some(entry) = self.ctb_filter.get_mut(rs) {
+            *entry = filter;
+        }
+        self.set_sao(rs, SaoCtb::default());
+    }
+
+    /// The slice values of CTB `rs`.
+    pub(crate) fn ctb_filter(&self, rs: usize) -> CtbFilter {
+        self.ctb_filter.get(rs).copied().unwrap_or_default()
+    }
+
+    /// The SAO values of CTB `rs`.
+    pub(crate) fn sao(&self, rs: usize) -> SaoCtb {
+        self.sao.get(rs).copied().unwrap_or_default()
+    }
+
+    /// Records the SAO values of CTB `rs`.
+    pub(crate) fn set_sao(&mut self, rs: usize, values: SaoCtb) {
+        if let Some(entry) = self.sao.get_mut(rs) {
+            *entry = values;
+        }
+    }
+
+    /// `MinCbLog2SizeY`.
+    pub(crate) const fn min_cb_log2(&self) -> u32 {
+        self.min_cb_log2
     }
 
     /// The availability derivation of 6.4.1.
@@ -133,6 +206,30 @@ impl ParseMaps {
             .get(self.intra_index(x, y))
             .copied()
             .unwrap_or(INTRA_DC)
+    }
+
+    /// True when `CuPredMode` at a luma location is `MODE_INTRA`.
+    pub(crate) fn cu_intra(&self, x: u32, y: u32) -> bool {
+        self.cu_intra
+            .get(self.cb_index(x, y))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// True when neither in-loop filter can change the sample at a luma location.
+    pub(crate) fn no_filter(&self, x: u32, y: u32) -> bool {
+        self.no_filter
+            .get(self.cb_index(x, y))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Records the prediction mode and in-loop filter flag of a coding unit.
+    pub(crate) fn set_cu_kind(&mut self, x: u32, y: u32, size: u32, intra: bool, no_filter: bool) {
+        let region = Region { x, y, size };
+        let (stride, log2) = (self.cb_stride, self.min_cb_log2);
+        fill_region(&mut self.cu_intra, stride, log2, region, intra);
+        fill_region(&mut self.no_filter, stride, log2, region, no_filter);
     }
 
     /// Records `CtDepth` and `cu_skip_flag` of a coding unit.

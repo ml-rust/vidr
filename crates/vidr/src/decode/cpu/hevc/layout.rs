@@ -105,6 +105,16 @@ impl PicLayout {
         self.height
     }
 
+    /// `CtbLog2SizeY`.
+    pub(crate) const fn ctb_log2(&self) -> u32 {
+        self.ctb_log2
+    }
+
+    /// `PicWidthInCtbsY`.
+    pub(crate) const fn width_in_ctbs(&self) -> u32 {
+        self.width_in_ctbs
+    }
+
     /// `PicSizeInCtbsY`.
     pub(crate) fn ctb_count(&self) -> usize {
         self.rs_to_ts.len()

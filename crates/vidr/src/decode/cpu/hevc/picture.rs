@@ -82,6 +82,19 @@ impl<S: Sample> Plane<S> {
         let start = y * self.stride;
         self.samples.get_mut(start..start + self.width)
     }
+
+    /// Every sample, stride gaps included. Row `y` starts at `y * stride`.
+    pub(crate) fn samples_mut(&mut self) -> &mut [S] {
+        &mut self.samples
+    }
+
+    /// Copies the samples of a plane of the same size. A plane of another size
+    /// leaves this one unchanged.
+    pub(crate) fn copy_samples_from(&mut self, other: &Self) {
+        if self.samples.len() == other.samples.len() {
+            self.samples.copy_from_slice(&other.samples);
+        }
+    }
 }
 
 // A manual impl: a derive prints every sample.
@@ -187,6 +200,29 @@ impl<S: Sample> Picture<S> {
     /// The Cr plane.
     pub(crate) const fn cr(&self) -> &Plane<S> {
         &self.cr
+    }
+
+    /// The plane of `cIdx` `c_idx`. An index above 2 selects Cr.
+    pub(crate) const fn plane(&self, c_idx: usize) -> &Plane<S> {
+        match c_idx {
+            0 => &self.luma,
+            1 => &self.cb,
+            _ => &self.cr,
+        }
+    }
+
+    /// The plane of `cIdx` `c_idx` for writing. An index above 2 selects Cr.
+    pub(crate) const fn plane_mut(&mut self, c_idx: usize) -> &mut Plane<S> {
+        match c_idx {
+            0 => &mut self.luma,
+            1 => &mut self.cb,
+            _ => &mut self.cr,
+        }
+    }
+
+    /// The output area.
+    pub(crate) const fn window(&self) -> DisplayWindow {
+        self.window
     }
 
     /// The luma plane for writing.

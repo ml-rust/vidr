@@ -8,7 +8,7 @@ use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
 use crate::decode::cpu::hevc::qp::{QpState, predict_qp_y};
 
-use super::maps::ParseMaps;
+use super::maps::{CtbFilter, ParseMaps};
 use super::records::CtuRecords;
 
 /// Above this Exp-Golomb order, a value exceeds every element's limit: 2 to the
@@ -57,6 +57,14 @@ impl<'p, 'd> CtuParser<'p, 'd> {
         self.records.clear();
         let rs = self.layout.ctb_rs_at(x, y);
         self.maps.set_ctb_slice(rs, self.params.slice_addr_rs);
+        self.maps.begin_ctb_filter(
+            rs,
+            CtbFilter {
+                beta_offset_div2: self.params.beta_offset_div2,
+                tc_offset_div2: self.params.tc_offset_div2,
+                across_slices: self.params.loop_filter_across_slices,
+            },
+        );
     }
 
     /// `end_of_slice_segment_flag` (7.3.8.1).

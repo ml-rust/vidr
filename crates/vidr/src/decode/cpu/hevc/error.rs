@@ -51,6 +51,31 @@ pub(crate) enum HevcError {
         /// Slice data size in bytes.
         size: usize,
     },
+    /// A slice names a parameter set the stream has not sent.
+    MissingParameterSet {
+        /// `SPS` or `PPS`.
+        kind: &'static str,
+        /// The identifier the slice or PPS names.
+        id: u32,
+    },
+    /// A picture ends before its slices cover every CTB.
+    IncompletePicture {
+        /// CTBs the slices reach.
+        decoded: usize,
+        /// `PicSizeInCtbsY`.
+        expected: usize,
+    },
+    /// A decoded picture differs from its picture hash SEI message (D.3.20).
+    PictureHashMismatch {
+        /// `MD5`, `CRC`, or `checksum`.
+        method: &'static str,
+        /// `cIdx` of the plane.
+        c_idx: usize,
+        /// The value in the SEI message.
+        expected: u128,
+        /// The value of the decoded plane.
+        computed: u128,
+    },
     /// A syntax element holds a value the specification forbids.
     InvalidSyntax {
         /// The syntax element or derived variable.
@@ -100,6 +125,27 @@ impl fmt::Display for HevcError {
                 f,
                 "HEVC slice data of {size} bytes ends after the parser reads {read_bits} bits. \
                  The input is truncated or corrupt. Remux the source."
+            ),
+            Self::MissingParameterSet { kind, id } => write!(
+                f,
+                "The HEVC stream names {kind} {id} before sending it. Send the parameter sets \
+                 before the slices, or remux the source."
+            ),
+            Self::IncompletePicture { decoded, expected } => write!(
+                f,
+                "An HEVC picture ends with {decoded} of {expected} CTBs decoded. The input is \
+                 truncated or corrupt. Remux the source."
+            ),
+            Self::PictureHashMismatch {
+                method,
+                c_idx,
+                expected,
+                computed,
+            } => write!(
+                f,
+                "The {method} of plane {c_idx} is {computed:x}, and the picture hash SEI message \
+                 holds {expected:x}. The input is corrupt or this decoder has a defect. Decode \
+                 the stream with another decoder to tell which."
             ),
             Self::InvalidSyntax {
                 element,

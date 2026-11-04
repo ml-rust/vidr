@@ -3,15 +3,23 @@
 //!
 //! The parse stage reads CABAC data and writes plain records for one CTU. The
 //! reconstruct stage reads those records and no bitstream state. A later unit
-//! can run the two stages on separate threads.
+//! can run the two stages on separate threads. The in-loop filters run per picture
+//! after both stages. Intra pictures only: a P or B slice returns a named error.
 
 pub(crate) mod cabac;
 pub(crate) mod error;
+pub(crate) mod filter;
+pub(crate) mod hash;
 pub(crate) mod layout;
 pub(crate) mod params;
 pub(crate) mod picture;
+pub(crate) mod picture_decoder;
 pub(crate) mod qp;
+pub(crate) mod recon;
 pub(crate) mod residual;
 pub(crate) mod scaling;
 pub(crate) mod scan;
+pub(crate) mod stream;
+#[cfg(test)]
+mod stream_tests;
 pub(crate) mod syntax;

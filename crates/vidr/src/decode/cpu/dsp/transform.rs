@@ -44,6 +44,14 @@ impl TbBlock {
         }
     }
 
+    /// Row `y` of a block of `Log2( nTbS )` `log2_size`, or an empty row outside it.
+    pub(crate) fn row(&self, log2_size: u32, y: usize) -> &[i32] {
+        let start = y << log2_size;
+        self.samples
+            .get(start..start + (1usize << log2_size))
+            .unwrap_or_default()
+    }
+
     /// The first `n` rows as `n` arrays. `None` when they do not fit, and no
     /// size this module instantiates reaches that.
     fn square<const N: usize>(&mut self) -> Option<&mut [[i32; N]; N]> {

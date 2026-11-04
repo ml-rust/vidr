@@ -36,7 +36,7 @@ pub mod length_prefixed;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 mod nal;
 #[cfg(any(feature = "h264", feature = "hevc"))]
-mod rbsp;
+pub(crate) mod rbsp;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 mod to_annexb;
 #[cfg(feature = "h264")]

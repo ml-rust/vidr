@@ -88,6 +88,36 @@ pub(crate) struct CodingParams {
     pub(crate) num_ref_idx_minus1: [u32; 2],
     /// `mvd_l1_zero_flag`.
     pub(crate) mvd_l1_zero: bool,
+    /// `pcm_loop_filter_disabled_flag`.
+    pub(crate) pcm_loop_filter_disabled: bool,
+    /// `constrained_intra_pred_flag`.
+    pub(crate) constrained_intra_pred: bool,
+    /// `strong_intra_smoothing_enabled_flag`.
+    pub(crate) strong_intra_smoothing: bool,
+    /// `slice_sao_luma_flag`.
+    pub(crate) sao_luma: bool,
+    /// `slice_sao_chroma_flag`.
+    pub(crate) sao_chroma: bool,
+    /// `slice_deblocking_filter_disabled_flag`.
+    pub(crate) deblocking_disabled: bool,
+    /// `slice_beta_offset_div2`.
+    pub(crate) beta_offset_div2: i32,
+    /// `slice_tc_offset_div2`.
+    pub(crate) tc_offset_div2: i32,
+    /// `slice_loop_filter_across_slices_enabled_flag`.
+    pub(crate) loop_filter_across_slices: bool,
+    /// `loop_filter_across_tiles_enabled_flag`.
+    pub(crate) loop_filter_across_tiles: bool,
+    /// `pps_cb_qp_offset`, the `cQpPicOffset` of Cb (8.7.2.5.1).
+    pub(crate) pps_cb_qp_offset: i32,
+    /// `pps_cr_qp_offset`, the `cQpPicOffset` of Cr (8.7.2.5.1).
+    pub(crate) pps_cr_qp_offset: i32,
+    /// `tiles_enabled_flag`.
+    pub(crate) tiles_enabled: bool,
+    /// `entropy_coding_sync_enabled_flag`.
+    pub(crate) entropy_coding_sync: bool,
+    /// `dependent_slice_segments_enabled_flag`.
+    pub(crate) dependent_slice_segments: bool,
 }
 
 impl CodingParams {
@@ -165,6 +195,21 @@ impl CodingParams {
                 slice.num_ref_idx_l1_active_minus1,
             ],
             mvd_l1_zero: slice.mvd_l1_zero_flag,
+            pcm_loop_filter_disabled: sps.pcm_loop_filter_disabled_flag,
+            constrained_intra_pred: pps.constrained_intra_pred_flag,
+            strong_intra_smoothing: sps.strong_intra_smoothing_enabled_flag,
+            sao_luma: slice.slice_sao_luma_flag,
+            sao_chroma: slice.slice_sao_chroma_flag,
+            deblocking_disabled: slice.slice_deblocking_filter_disabled_flag,
+            beta_offset_div2: slice.slice_beta_offset_div2,
+            tc_offset_div2: slice.slice_tc_offset_div2,
+            loop_filter_across_slices: slice.slice_loop_filter_across_slices_enabled_flag,
+            loop_filter_across_tiles: pps.loop_filter_across_tiles_enabled_flag,
+            pps_cb_qp_offset: pps.pps_cb_qp_offset,
+            pps_cr_qp_offset: pps.pps_cr_qp_offset,
+            tiles_enabled: pps.tiles_enabled_flag,
+            entropy_coding_sync: pps.entropy_coding_sync_enabled_flag,
+            dependent_slice_segments: pps.dependent_slice_segments_enabled_flag,
         })
     }
 }
@@ -290,6 +335,21 @@ impl CodingParams {
             max_merge_cand: 5,
             num_ref_idx_minus1: [0, 0],
             mvd_l1_zero: false,
+            pcm_loop_filter_disabled: false,
+            constrained_intra_pred: false,
+            strong_intra_smoothing: false,
+            sao_luma: false,
+            sao_chroma: false,
+            deblocking_disabled: true,
+            beta_offset_div2: 0,
+            tc_offset_div2: 0,
+            loop_filter_across_slices: true,
+            loop_filter_across_tiles: true,
+            pps_cb_qp_offset: 0,
+            pps_cr_qp_offset: 0,
+            tiles_enabled: false,
+            entropy_coding_sync: false,
+            dependent_slice_segments: false,
         }
     }
 }
@@ -487,6 +547,35 @@ mod tests {
         assert_eq!(params.slice_qp, 27);
         assert_eq!(params.max_merge_cand, 2);
         assert_eq!(params.num_ref_idx_minus1, [2, 0]);
+    }
+
+    #[test]
+    fn from_headers_reads_the_filter_fields() {
+        let sps = sps(&sps_tests::Spec::default());
+        let pps = pps_tests::valid(&pps_tests::Spec {
+            cb_offset: -3,
+            cr_offset: 4,
+            ..pps_tests::Spec::default()
+        });
+        let slice = SliceSegmentHeader {
+            slice_type: SLICE_TYPE_I,
+            slice_sao_luma_flag: true,
+            slice_deblocking_filter_disabled_flag: true,
+            slice_beta_offset_div2: 2,
+            slice_tc_offset_div2: -2,
+            slice_cb_qp_offset: 1,
+            ..SliceSegmentHeader::default()
+        };
+        let params = CodingParams::from_headers(&sps, &pps, &slice).unwrap();
+        assert!(params.sao_luma);
+        assert!(!params.sao_chroma);
+        assert!(params.deblocking_disabled);
+        assert_eq!(params.beta_offset_div2, 2);
+        assert_eq!(params.tc_offset_div2, -2);
+        // cQpPicOffset keeps the PPS value alone (8.7.2.5.1).
+        assert_eq!(params.pps_cb_qp_offset, -3);
+        assert_eq!(params.pps_cr_qp_offset, 4);
+        assert_eq!(params.cb_qp_offset, -2);
     }
 
     #[test]

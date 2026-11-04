@@ -209,6 +209,17 @@ impl<'a> CabacEngine<'a> {
     /// - [`HevcError::SliceDataTruncated`] past the end of the data.
     /// - [`HevcError::InvalidSyntax`] for an alignment bit of 1.
     pub(crate) fn aligned_byte(&self) -> Result<usize, HevcError> {
+        self.aligned_byte_after("pcm_alignment_zero_bit")
+    }
+
+    /// Skips zero bits up to a byte boundary after a terminating bin, and returns
+    /// the byte that follows. `element` names the bits in the error.
+    ///
+    /// # Errors
+    ///
+    /// - [`HevcError::SliceDataTruncated`] past the end of the data.
+    /// - [`HevcError::InvalidSyntax`] for a bit of 1.
+    pub(crate) fn aligned_byte_after(&self, element: &'static str) -> Result<usize, HevcError> {
         if self.exhausted() {
             return Err(self.truncated());
         }
@@ -222,7 +233,7 @@ impl<'a> CabacEngine<'a> {
         let padding = partial & (0xff >> used);
         if padding != 0 {
             return Err(HevcError::InvalidSyntax {
-                element: "pcm_alignment_zero_bit",
+                element,
                 value: i64::from(padding),
                 allowed: "0",
             });
