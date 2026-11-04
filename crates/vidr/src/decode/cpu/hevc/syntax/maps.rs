@@ -262,7 +262,12 @@ fn checked_area(width: usize, height: usize) -> Result<usize, HevcError> {
     })
 }
 
-fn filled<T: Clone>(count: usize, value: T, what: &'static str) -> Result<Vec<T>, HevcError> {
+/// A vector of `count` copies of `value`, or an allocation error that names `what`.
+pub(crate) fn filled<T: Clone>(
+    count: usize,
+    value: T,
+    what: &'static str,
+) -> Result<Vec<T>, HevcError> {
     let mut map = Vec::new();
     map.try_reserve_exact(count)
         .map_err(|_| HevcError::Allocation { what, count })?;

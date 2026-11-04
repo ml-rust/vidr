@@ -3,3 +3,4 @@
 pub(crate) mod deblock;
 pub(crate) mod edges;
 pub(crate) mod sao;
+pub(crate) mod strength;

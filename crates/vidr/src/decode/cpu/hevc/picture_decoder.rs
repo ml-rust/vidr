@@ -1,20 +1,29 @@
-//! One picture at a time, at one sample type: the parse and reconstruct stages for
-//! each slice segment, then the in-loop filters and the hash check.
+//! One picture at a time, at one sample type: reference picture sets, the parse and
+//! reconstruct stages for each slice segment, the in-loop filters, the hash check,
+//! and the decoded picture buffer.
+
+use std::sync::Arc;
 
 use crate::bitstream::hevc_pps::PicParameterSet;
 use crate::bitstream::hevc_slice::SliceSegmentHeader;
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::decode::cpu::dsp::sample::Sample;
 
+use super::dpb::buffer::{Dpb, DpbLimits, Frame, FrameFormat, RefPicSets};
+use super::dpb::poc::{is_bla, is_cra};
+use super::dpb::ref_lists::SliceRefs;
+use super::dpb::rps::RpsPocs;
 use super::error::HevcError;
 use super::filter::deblock::{DeblockContext, deblock_picture};
-use super::filter::edges::EdgeMap;
+use super::filter::edges::{EdgeMap, StrengthInput};
 use super::filter::sao::{SaoContext, sao_is_active, sao_picture};
 use super::hash::picture_hash::{PictureHash, check_picture_hash};
 use super::layout::PicLayout;
+use super::motion::field::MotionField;
 use super::params::{CodingParams, check_stream, picture_layout};
 use super::picture::{DisplayWindow, Picture};
 use super::recon::ctu::{ReconContext, Reconstructor};
+use super::recon::inter::InterContext;
 use super::scaling::ScalingFactors;
 use super::syntax::maps::ParseMaps;
 use super::syntax::slice_data::{EntropyCarry, SegmentInput, parse_slice_segment};
@@ -27,6 +36,7 @@ struct PictureTables {
     layout: PicLayout,
     maps: ParseMaps,
     edges: EdgeMap,
+    field: MotionField,
     factors: Option<ScalingFactors>,
 }
 
@@ -40,12 +50,14 @@ impl PictureTables {
         let params = CodingParams::from_headers(sps, pps, header)?;
         let layout = picture_layout(sps, pps)?;
         let maps = ParseMaps::new(&params, &layout)?;
+        let field = MotionField::new(params.width, params.height, &layout)?;
         Ok(Self {
             sps: sps.clone(),
             pps: pps.clone(),
             layout,
             maps,
             edges: EdgeMap::new(params.width, params.height)?,
+            field,
             factors: ScalingFactors::select(sps, pps),
         })
     }
@@ -54,21 +66,28 @@ impl PictureTables {
 /// The picture being decoded.
 #[derive(Debug)]
 struct ActivePicture<S> {
-    picture: Picture<S>,
+    /// The buffer that becomes a decoded picture.
+    frame: Frame<S>,
     carry: EntropyCarry,
     /// The first slice's values. In-loop filters read fields that hold per picture.
     params: CodingParams,
-    /// `pic_output_flag`.
+    /// `PicOutputFlag`.
     output: bool,
     hash: Option<PictureHash>,
+    /// The reference picture set of this picture.
+    sets: RefPicSets<S>,
+    /// The lists of the current slice.
+    refs: SliceRefs<S>,
+    limits: DpbLimits,
 }
 
-/// A finished picture.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FinishedPicture<S> {
-    pub(crate) picture: Picture<S>,
-    /// `pic_output_flag`.
-    pub(crate) output: bool,
+/// What [`PictureDecoder::begin`] reads from the sequence state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PictureBegin {
+    /// `PicOrderCntVal`.
+    pub(crate) poc: i32,
+    /// True for an IRAP picture with `NoRaslOutputFlag` 1.
+    pub(crate) irap_no_rasl: bool,
 }
 
 /// Decodes pictures of one sample type. Allocations reuse between pictures of one
@@ -80,6 +99,7 @@ pub(crate) struct PictureDecoder<S> {
     active: Option<ActivePicture<S>>,
     /// The working copy for SAO.
     deblocked: Option<Picture<S>>,
+    dpb: Dpb<S>,
 }
 
 impl<S: Sample> PictureDecoder<S> {
@@ -90,6 +110,7 @@ impl<S: Sample> PictureDecoder<S> {
             reconstructor: Reconstructor::new(),
             active: None,
             deblocked: None,
+            dpb: Dpb::new(),
         }
     }
 
@@ -98,8 +119,9 @@ impl<S: Sample> PictureDecoder<S> {
         self.active.is_some()
     }
 
-    /// Starts a picture from its first slice segment. Call [`Self::finish`] on the
-    /// picture before it first.
+    /// Starts a picture from its first slice segment: the reference picture set
+    /// (8.3.2), output and removal (C.5.2.2), and unavailable pictures (8.3.3). Call
+    /// [`Self::finish`] on the picture before it first.
     ///
     /// # Errors
     ///
@@ -111,6 +133,7 @@ impl<S: Sample> PictureDecoder<S> {
         sps: &SeqParameterSet,
         pps: &PicParameterSet,
         header: &SliceSegmentHeader,
+        begin: PictureBegin,
     ) -> Result<(), HevcError> {
         let reuse = self
             .tables
@@ -122,16 +145,38 @@ impl<S: Sample> PictureDecoder<S> {
         if let Some(tables) = &mut self.tables {
             tables.maps.reset();
             tables.edges.reset();
+            tables.field.begin_picture();
         }
         let params = CodingParams::from_headers(sps, pps, header)?;
-        let mut picture = Picture::new(params.width as usize, params.height as usize)?;
-        picture.set_window(conformance_window(sps))?;
+        let max_poc_lsb = 1u32 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+        let rps = RpsPocs::derive(header, sps, begin.poc);
+        let sets = self.dpb.apply_rps(&rps, max_poc_lsb, begin.irap_no_rasl)?;
+        let nal_unit_type = header.nal_unit_type;
+        // C.5.2.2: a CRA picture sets NoOutputOfPriorPicsFlag to 1.
+        let no_output = is_cra(nal_unit_type) || header.no_output_of_prior_pics_flag;
+        let limits = DpbLimits::from_sps(sps);
+        self.dpb
+            .before_picture(begin.irap_no_rasl, no_output, &limits);
+        let format = FrameFormat {
+            width: params.width as usize,
+            height: params.height as usize,
+            bit_depth: params.bit_depth,
+            window: conformance_window(sps),
+        };
+        if is_bla(nal_unit_type) || (is_cra(nal_unit_type) && begin.irap_no_rasl) {
+            self.dpb.generate_unavailable(&sets, &format)?;
+        }
+        let mut frame = self.dpb.take_frame(&format)?;
+        frame.poc = begin.poc;
         self.active = Some(ActivePicture {
-            picture,
+            frame,
             carry: EntropyCarry::default(),
             params,
             output: header.pic_output_flag,
             hash: None,
+            sets,
+            refs: SliceRefs::intra(),
+            limits,
         });
         Ok(())
     }
@@ -142,7 +187,8 @@ impl<S: Sample> PictureDecoder<S> {
     ///
     /// # Errors
     ///
-    /// Any error of the slice data.
+    /// - [`HevcError::MissingReference`] for a list entry the buffer does not hold.
+    /// - Any error of the slice data.
     pub(crate) fn decode_slice(
         &mut self,
         header: &SliceSegmentHeader,
@@ -152,6 +198,11 @@ impl<S: Sample> PictureDecoder<S> {
             return Ok(());
         };
         let params = CodingParams::from_headers(&tables.sps, &tables.pps, header)?;
+        if !header.dependent_slice_segment_flag {
+            let poc = active.frame.poc;
+            active.refs = SliceRefs::build(header, &active.sets, poc, &tables.sps)?;
+            tables.field.begin_slice(active.refs.lists)?;
+        }
         let input = SegmentInput {
             params: &params,
             layout: &tables.layout,
@@ -163,8 +214,11 @@ impl<S: Sample> PictureDecoder<S> {
         let layout = &tables.layout;
         let factors = tables.factors.as_ref();
         let edges = &mut tables.edges;
+        let field = &mut tables.field;
         let reconstructor = &mut self.reconstructor;
-        let picture = &mut active.picture;
+        let refs = &active.refs;
+        let poc = active.frame.poc;
+        let picture = &mut active.frame.picture;
         parse_slice_segment(
             &input,
             &mut tables.maps,
@@ -176,8 +230,21 @@ impl<S: Sample> PictureDecoder<S> {
                     maps,
                     factors,
                 };
-                reconstructor.reconstruct_ctu(&context, records, picture);
-                edges.mark_ctu(&params, layout, maps, records);
+                let mut inter = InterContext {
+                    refs,
+                    field: &mut *field,
+                    poc,
+                };
+                reconstructor.reconstruct_ctu(&context, &mut inter, records, picture);
+                edges.mark_ctu(
+                    &StrengthInput {
+                        params: &params,
+                        layout,
+                        maps,
+                        field: &*field,
+                    },
+                    records,
+                );
                 Ok(())
             },
         )
@@ -190,20 +257,17 @@ impl<S: Sample> PictureDecoder<S> {
         }
     }
 
-    /// Ends the active picture: the in-loop filters (8.7), then the hash check when
-    /// `check_hash` is true and a hash arrived.
+    /// Ends the active picture: the in-loop filters (8.7), the hash check when
+    /// `check_hash` is true and a hash arrived, then the buffer steps of C.5.2.3.
     ///
     /// # Errors
     ///
     /// - [`HevcError::IncompletePicture`] when slices do not cover the picture.
     /// - [`HevcError::PictureHashMismatch`] when a plane differs from its hash.
     /// - [`HevcError::Allocation`] when a buffer does not fit in memory.
-    pub(crate) fn finish(
-        &mut self,
-        check_hash: bool,
-    ) -> Result<Option<FinishedPicture<S>>, HevcError> {
+    pub(crate) fn finish(&mut self, check_hash: bool) -> Result<(), HevcError> {
         let (Some(tables), Some(mut active)) = (&self.tables, self.active.take()) else {
-            return Ok(None);
+            return Ok(());
         };
         let expected = tables.layout.ctb_count();
         if active.carry.decoded_ctbs != expected {
@@ -213,7 +277,7 @@ impl<S: Sample> PictureDecoder<S> {
             });
         }
         deblock_picture(
-            &mut active.picture,
+            &mut active.frame.picture,
             &DeblockContext {
                 params: &active.params,
                 layout: &tables.layout,
@@ -227,33 +291,50 @@ impl<S: Sample> PictureDecoder<S> {
             maps: &tables.maps,
         };
         if sao_is_active(&sao) {
+            let (width, height) = (
+                active.frame.picture.luma().width(),
+                active.frame.picture.luma().height(),
+            );
             let same_size = self.deblocked.as_ref().is_some_and(|picture| {
-                picture.luma().width() == active.picture.luma().width()
-                    && picture.luma().height() == active.picture.luma().height()
+                picture.luma().width() == width && picture.luma().height() == height
             });
             if !same_size {
-                let (width, height) = (
-                    active.picture.luma().width(),
-                    active.picture.luma().height(),
-                );
                 self.deblocked = Some(Picture::new(width, height)?);
             }
             if let Some(deblocked) = &mut self.deblocked {
-                sao_picture(&mut active.picture, deblocked, &sao);
+                sao_picture(&mut active.frame.picture, deblocked, &sao);
             }
         }
         if check_hash && let Some(hash) = &active.hash {
-            check_picture_hash(&active.picture, hash)?;
+            check_picture_hash(&active.frame.picture, hash)?;
         }
-        Ok(Some(FinishedPicture {
-            picture: active.picture,
-            output: active.output,
-        }))
+        let (width, height) = (active.params.width, active.params.height);
+        tables
+            .field
+            .compress(width, height, &mut active.frame.col)?;
+        self.dpb.insert(active.frame, active.output, &active.limits);
+        Ok(())
     }
 
     /// Drops the active picture after an error.
     pub(crate) fn abandon(&mut self) {
         self.active = None;
+    }
+
+    /// Outputs every waiting picture, at the end of the stream.
+    pub(crate) fn flush_output(&mut self) {
+        self.dpb.flush();
+    }
+
+    /// Empties the buffer when the stream moves to the other sample type. With
+    /// `discard`, waiting pictures leave with no output.
+    pub(crate) fn close_sequence(&mut self, discard: bool) {
+        self.dpb.close(discard);
+    }
+
+    /// The oldest output picture.
+    pub(crate) fn pop_output(&mut self) -> Option<Arc<Frame<S>>> {
+        self.dpb.pop_output()
     }
 }
 

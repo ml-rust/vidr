@@ -3,6 +3,8 @@
 use std::fmt;
 
 use super::error::HevcError;
+use crate::decode::cpu::dsp::inter::interp::RefPlane;
+use crate::decode::cpu::dsp::inter::weight::TargetPlane;
 use crate::decode::cpu::dsp::sample::Sample;
 use crate::frame::HostPlanes;
 
@@ -86,6 +88,24 @@ impl<S: Sample> Plane<S> {
     /// Every sample, stride gaps included. Row `y` starts at `y * stride`.
     pub(crate) fn samples_mut(&mut self) -> &mut [S] {
         &mut self.samples
+    }
+
+    /// This plane as the inter kernels read it.
+    pub(crate) fn view(&self) -> RefPlane<'_, S> {
+        RefPlane {
+            samples: &self.samples,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+        }
+    }
+
+    /// This plane as the inter kernels write it.
+    pub(crate) fn target(&mut self) -> TargetPlane<'_, S> {
+        TargetPlane {
+            samples: &mut self.samples,
+            stride: self.stride,
+        }
     }
 
     /// Copies the samples of a plane of the same size. A plane of another size

@@ -99,12 +99,18 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - The coding quadtree, coding unit, prediction unit, transform tree, transform unit, and `residual_coding` parsers, with sign data hiding and transform skip. They write plain records per CTU, for a later reconstruct stage.
   - QP derivation, scaling, scaling lists, the inverse DST and DCT from 4x4 to 32x32, transform skip, and transform bypass.
   - A stream with unequal luma and chroma bit depth, another chroma format, a depth above 10 bits, a range or multilayer extension tool, or a picture above level 6.2 gets a named refusal.
-- `vidr`: the CPU HEVC decoder core behind `cpu-hevc`, crate-internal, intra pictures only. It has no `Decoder` adapter yet, so no public API decodes HEVC on the CPU.
-  - The slice data loop: SAO syntax, CTB address order, `end_of_subset_one_bit`, tiles, wavefronts, and dependent slice segments. A P or B slice returns `HevcError::Unsupported`.
+- `vidr`: the CPU HEVC decoder core behind `cpu-hevc`, crate-internal. It has no `Decoder` adapter yet, so no public API decodes HEVC on the CPU.
+  - The slice data loop: SAO syntax, CTB address order, `end_of_subset_one_bit`, tiles, wavefronts, and dependent slice segments.
   - Intra prediction: reference sample substitution, three-tap and strong smoothing, planar, DC, angular, and the boundary filters. PCM samples and constrained intra prediction.
   - The deblocking filter and SAO, with picture, slice, and tile boundary rules, `pcm_loop_filter_disabled_flag`, and `cu_transquant_bypass_flag`.
   - The decoded picture hash SEI message with MD5, CRC, and checksum. The check is off by default. `DecodeOptions::check_picture_hash` turns it on, and a mismatch returns `HevcError::PictureHashMismatch`.
   - `crates/vidr/tests/fixtures/gen_hevc.py` generates x265 streams and ffmpeg raw video for the comparison tests. The tests print a skip notice without them.
+  - P and B slices. Picture order count, reference picture sets, generated pictures for absent "Foll" entries, reference lists, the collocated picture, and `NoBackwardPredFlag`. Reference pictures sit behind `Arc`, so a slice copies no samples. A list entry the buffer does not hold returns `HevcError::MissingReference`.
+  - The output order buffer: bumping, the latency limit, the buffer size limit, `pic_output_flag`, `no_output_of_prior_pics_flag`, and the conformance window on output. RASL pictures of an IRAP picture with `NoRaslOutputFlag` 1 are skipped. `StreamDecoder::next_output` returns pictures in output order, and `StreamDecoder::flush` outputs what still waits.
+  - Merge mode with the parallel merge level, motion vector prediction, and temporal prediction from motion stored at 16x16 per picture.
+  - Luma and chroma motion compensation through clamped reference coordinates, with default and explicit weighting.
+  - Deblocking `bS` for inter edges: coded transform blocks, reference pictures, and vector distance.
+  - Long-term references follow the spec text, and no test stream exercises them yet.
 
 ### Changed
 

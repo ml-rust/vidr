@@ -76,6 +76,11 @@ pub(crate) enum HevcError {
         /// The value of the decoded plane.
         computed: u128,
     },
+    /// A reference picture list names a picture the buffer does not hold.
+    MissingReference {
+        /// The POC of the picture, or its LSB for a long-term entry with no MSB.
+        poc: i32,
+    },
     /// A syntax element holds a value the specification forbids.
     InvalidSyntax {
         /// The syntax element or derived variable.
@@ -146,6 +151,12 @@ impl fmt::Display for HevcError {
                 "The {method} of plane {c_idx} is {computed:x}, and the picture hash SEI message \
                  holds {expected:x}. The input is corrupt or this decoder has a defect. Decode \
                  the stream with another decoder to tell which."
+            ),
+            Self::MissingReference { poc } => write!(
+                f,
+                "An HEVC picture refers to POC {poc}, which the decoded picture buffer does not \
+                 hold. The input is cut or corrupt. Start from a random access point, or remux \
+                 the source."
             ),
             Self::InvalidSyntax {
                 element,

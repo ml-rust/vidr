@@ -1,11 +1,14 @@
-//! Reconstruction of one CTU from its records (8.4.4.1, 8.6.7).
+//! Reconstruction of one CTU from its records (8.4.4.1, 8.6.7). `recon/inter.rs`
+//! holds the inter coding units.
 
+use crate::decode::cpu::dsp::inter::interp::{InterpScratch, PredSamples};
 use crate::decode::cpu::dsp::intra::angular::{AngularMode, predict_angular};
 use crate::decode::cpu::dsp::intra::planar_dc::{predict_dc, predict_planar};
 use crate::decode::cpu::dsp::intra::refs::{PredBlock, RefSamples};
 use crate::decode::cpu::dsp::sample::Sample;
 use crate::decode::cpu::dsp::transform::TbBlock;
 use crate::decode::cpu::hevc::layout::PicLayout;
+use crate::decode::cpu::hevc::motion::types::PbMotion;
 use crate::decode::cpu::hevc::params::{CodingParams, PcmParams};
 use crate::decode::cpu::hevc::picture::{Picture, Plane};
 use crate::decode::cpu::hevc::qp::{qp_prime_c, qp_prime_y};
@@ -16,6 +19,7 @@ use crate::decode::cpu::hevc::syntax::records::{
     CtuRecords, CuRecord, PredMode, TbRecord, TuRecord,
 };
 
+use super::inter::InterContext;
 use super::neighbours::{Availability, BlockAt, read_neighbours};
 
 const INTRA_PLANAR: u8 = 0;
@@ -49,7 +53,10 @@ struct IntraBlock<'a> {
 pub(crate) struct Reconstructor {
     refs: RefSamples,
     prediction: PredBlock,
-    residual: TbBlock,
+    pub(super) residual: TbBlock,
+    /// `predSamplesL0` and `predSamplesL1` of the current block.
+    pub(super) inter_samples: [PredSamples; 2],
+    pub(super) interp: InterpScratch,
 }
 
 impl Reconstructor {
@@ -59,21 +66,32 @@ impl Reconstructor {
             refs: RefSamples::new(),
             prediction: PredBlock::new(),
             residual: TbBlock::new(),
+            inter_samples: [PredSamples::new(), PredSamples::new()],
+            interp: InterpScratch::new(),
         }
     }
 
-    /// Writes the samples of every intra coding unit in `records` to `picture`.
-    /// A later unit adds the stage for inter coding units.
+    /// Writes the samples of every coding unit in `records` to `picture`, in decoding
+    /// order, and records the motion of each block.
     pub(crate) fn reconstruct_ctu<S: Sample>(
         &mut self,
         context: &ReconContext<'_>,
+        inter: &mut InterContext<'_, S>,
         records: &CtuRecords,
         picture: &mut Picture<S>,
     ) {
+        if let Some(first) = records.cus.first() {
+            inter
+                .field
+                .set_ctb(context.layout.ctb_rs_at(first.x, first.y));
+        }
         for (index, cu) in records.cus.iter().enumerate() {
             if cu.pred_mode != PredMode::Intra {
+                self.inter_coding_unit(context, inter, records, index, picture);
                 continue;
             }
+            let size = 1u32 << cu.log2_size;
+            inter.field.fill(cu.x, cu.y, size, size, PbMotion::NONE);
             if cu.pcm {
                 if let Some(pcm) = context.params.pcm {
                     write_pcm(cu, records, pcm, context.params.bit_depth, picture);
@@ -239,7 +257,7 @@ impl Reconstructor {
 }
 
 /// `qP` of (8-291) to (8-293) for `cIdx`.
-fn component_qp(params: &CodingParams, qp_y: i32, c_idx: usize) -> u32 {
+pub(super) fn component_qp(params: &CodingParams, qp_y: i32, c_idx: usize) -> u32 {
     let bd_offset = params.qp_bd_offset();
     match c_idx {
         0 => qp_prime_y(qp_y, bd_offset),
@@ -305,8 +323,22 @@ fn write_pcm<S: Sample>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode::cpu::hevc::dpb::ref_lists::SliceRefs;
     use crate::decode::cpu::hevc::layout::LayoutSizes;
+    use crate::decode::cpu::hevc::motion::field::MotionField;
     use crate::decode::cpu::hevc::syntax::records::{Coeff, PartMode};
+
+    /// Runs one CTU of an I slice.
+    fn reconstruct<S: Sample>(fixture: &Fixture, records: &CtuRecords, picture: &mut Picture<S>) {
+        let mut field = MotionField::new(16, 16, &fixture.layout).unwrap();
+        let refs = SliceRefs::<S>::intra();
+        let mut inter = InterContext {
+            refs: &refs,
+            field: &mut field,
+            poc: 0,
+        };
+        Reconstructor::new().reconstruct_ctu(&fixture.context(), &mut inter, records, picture);
+    }
 
     fn cu(log2_size: u32) -> CuRecord {
         CuRecord {
@@ -392,7 +424,7 @@ mod tests {
             ..CtuRecords::default()
         };
         let mut picture = Picture::<u8>::new(16, 16).unwrap();
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert!(picture.luma().row(15).unwrap().iter().all(|&s| s == 128));
         assert!(picture.cb().row(7).unwrap().iter().all(|&s| s == 128));
         assert!(picture.cr().row(0).unwrap().iter().all(|&s| s == 128));
@@ -408,7 +440,7 @@ mod tests {
             ..CtuRecords::default()
         };
         let mut picture = Picture::<u16>::new(16, 16).unwrap();
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert_eq!(picture.luma().row(3).unwrap()[3], 512);
         assert_eq!(picture.cr().row(3).unwrap()[3], 512);
     }
@@ -441,7 +473,7 @@ mod tests {
             ..CtuRecords::default()
         };
         let mut picture = Picture::<u8>::new(16, 16).unwrap();
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert_eq!(picture.luma().row(2).unwrap()[5], 28);
         assert_eq!(picture.luma().row(2).unwrap()[6], 128);
     }
@@ -466,7 +498,7 @@ mod tests {
         };
         let mut picture = Picture::<u8>::new(16, 16).unwrap();
         fill(picture.cb_mut(), 7);
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         // The first block is mid-grey, and each later block predicts from it.
         assert_eq!(picture.luma().row(0).unwrap()[0], 128);
         assert_eq!(picture.luma().row(3).unwrap()[7], 128);
@@ -504,7 +536,7 @@ mod tests {
             ..CtuRecords::default()
         };
         let mut picture = Picture::<u8>::new(16, 16).unwrap();
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert_eq!(picture.luma().row(7).unwrap()[7], 3 << 3);
         assert_eq!(picture.luma().row(8).unwrap()[7], 0);
         assert_eq!(picture.cb().row(3).unwrap()[3], 10 << 1);
@@ -530,12 +562,12 @@ mod tests {
         };
         let mut picture = Picture::<u8>::new(16, 16).unwrap();
         fill(picture.luma_mut(), 40);
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert_eq!(picture.luma().row(0).unwrap()[8], 128);
         // The same block reads the left neighbour when that neighbour is intra.
         fixture.maps.set_cu_kind(0, 0, 8, true, false);
         fill(picture.luma_mut(), 40);
-        Reconstructor::new().reconstruct_ctu(&fixture.context(), &records, &mut picture);
+        reconstruct(&fixture, &records, &mut picture);
         assert_eq!(picture.luma().row(0).unwrap()[8], 40);
     }
 }

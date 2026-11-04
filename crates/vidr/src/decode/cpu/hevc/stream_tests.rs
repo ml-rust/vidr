@@ -1,5 +1,5 @@
 //! Real streams from `crates/vidr/tests/fixtures/gen_hevc.py`: byte-exact output
-//! against ffmpeg's raw video, and picture hash SEI messages. A test prints a skip
+//! against ffmpeg's raw video in output order, and picture hash SEI messages. A test prints a skip
 //! notice when its fixture is absent.
 
 use std::path::PathBuf;
@@ -35,19 +35,33 @@ fn fixture(name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     None
 }
 
-/// Every picture of an Annex-B stream, in decoding order.
+/// Every output picture of an Annex-B stream, in output order.
 fn decode_all(stream: &[u8], options: DecodeOptions) -> Result<Vec<DecodedPicture>, HevcError> {
     let mut decoder = StreamDecoder::new(options);
     let mut pictures = Vec::new();
     for nal in split(stream).expect("the fixture is Annex-B") {
-        if let Some(picture) = decoder.decode_nal(nal)? {
-            pictures.push(picture);
-        }
+        decoder.decode_nal(nal)?;
+        pictures.extend(std::iter::from_fn(|| decoder.next_output()));
     }
-    if let Some(picture) = decoder.flush()? {
-        pictures.push(picture);
-    }
+    decoder.flush()?;
+    pictures.extend(std::iter::from_fn(|| decoder.next_output()));
     Ok(pictures)
+}
+
+/// `PicOrderCntVal` of each picture, in output order.
+fn output_pocs(name: &str) -> Option<Vec<i32>> {
+    let (stream, _) = fixture(name)?;
+    let pictures = decode_all(&stream, DecodeOptions::default())
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+    Some(
+        pictures
+            .iter()
+            .map(|picture| match picture {
+                DecodedPicture::Eight(frame) => frame.poc,
+                DecodedPicture::Ten(frame) => frame.poc,
+            })
+            .collect(),
+    )
 }
 
 /// The bytes of one plane's window in ffmpeg's `yuv420p` or `yuv420p10le` layout.
@@ -245,18 +259,219 @@ fn strong_smoothing_equals_ffmpeg() {
     check_stream_equals_ffmpeg("smooth_10");
 }
 
-/// An inter stream stops at its first P or B slice, with the named error.
+// H12: POC, reference picture sets, reference lists, the collocated picture.
 #[test]
-fn an_inter_slice_is_a_named_error() {
-    let Some((stream, _)) = fixture("inter_8") else {
+fn p_and_b_pictures_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("inter_8");
+    check_stream_equals_ffmpeg("p_only_8");
+    check_stream_equals_ffmpeg("p_only_10");
+    check_stream_equals_ffmpeg("p_noisy_8");
+    check_stream_equals_ffmpeg("bframes_8");
+    check_stream_equals_ffmpeg("bframes_10");
+    check_stream_equals_ffmpeg("b_pyramid_8");
+    check_stream_equals_ffmpeg("b_pyramid_10");
+}
+
+#[test]
+fn several_references_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("refs_4_8");
+    check_stream_equals_ffmpeg("long_gop_8");
+}
+
+/// A 4-bit `slice_pic_order_cnt_lsb` wraps twice in 40 frames. A correct MSB gives
+/// the display index as POC.
+#[test]
+fn poc_wraps_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("poc_wrap_8");
+    if let Some(pocs) = output_pocs("poc_wrap_8") {
+        assert_eq!(pocs, (0..40).collect::<Vec<i32>>());
+    }
+}
+
+// H13: output order as a whole-stream check.
+/// Output rises in POC through one sequence, and every encoded frame leaves.
+#[test]
+fn output_order_rises_through_a_sequence() {
+    for (name, count) in [("b_pyramid_8", 24), ("long_gop_8", 90)] {
+        if let Some(pocs) = output_pocs(name) {
+            assert_eq!(pocs, (0..count).collect::<Vec<i32>>(), "{name}");
+        }
+    }
+}
+
+/// Each IDR picture restarts POC after the waiting pictures leave.
+#[test]
+fn scene_cuts_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("scene_cut_8");
+    if let Some(pocs) = output_pocs("scene_cut_8") {
+        assert_eq!(pocs.len(), 24);
+        assert_eq!(pocs.iter().filter(|&&poc| poc == 0).count(), 4);
+    }
+}
+
+/// CRA pictures in mid stream have `NoRaslOutputFlag` 0, so RASL pictures decode.
+#[test]
+fn an_open_gop_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("open_gop_8");
+}
+
+/// The stream starts at a CRA picture. Its RASL pictures lose their references, stay
+/// out of the output, and leave the later pictures intact.
+#[test]
+fn rasl_pictures_of_a_first_cra_are_skipped() {
+    check_stream_equals_ffmpeg("rasl_cut_8");
+    if let Some(pocs) = output_pocs("rasl_cut_8") {
+        assert_eq!(pocs.len(), 28);
+        assert!(pocs.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}
+
+/// C.5.2.2: a CRA picture after an end of sequence NAL unit sets
+/// `NoOutputOfPriorPicsFlag` to 1, so the pictures still waiting are dropped.
+#[test]
+fn a_cra_after_an_end_of_sequence_drops_waiting_pictures() {
+    check_stream_equals_ffmpeg("end_of_sequence_8");
+}
+
+/// C.5.2.2: `no_output_of_prior_pics_flag` 1 on an IDR picture drops waiting pictures.
+#[test]
+fn no_output_of_prior_pics_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("no_output_prior_8");
+}
+
+#[test]
+fn a_conformance_window_on_inter_pictures_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("window_inter_8");
+}
+
+// H14: merge candidates and temporal prediction.
+#[test]
+fn merge_list_sizes_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("merge_5_8");
+    check_stream_equals_ffmpeg("merge_1_8");
+}
+
+#[test]
+fn temporal_prediction_on_and_off_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("tmvp_on_8");
+    check_stream_equals_ffmpeg("tmvp_off_8");
+}
+
+/// x265 has no parallel merge option, so the generator rewrites the PPS. The stream
+/// drifts from its encoder and holds no hash, so ffmpeg alone is the reference.
+#[test]
+fn a_parallel_merge_level_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("parallel_merge_8");
+}
+
+// H15: motion vector prediction over long searches.
+#[test]
+fn motion_ranges_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("merange_8");
+    check_stream_equals_ffmpeg("merange_wide_8");
+}
+
+// H16: motion compensation over each partition shape.
+#[test]
+fn partitions_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("rect_8");
+    check_stream_equals_ffmpeg("amp_8");
+    check_stream_equals_ffmpeg("amp_10");
+}
+
+/// No in-loop filter: a difference here lies in prediction or residual alone.
+#[test]
+fn unfiltered_inter_pictures_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("p_no_filters_8");
+    check_stream_equals_ffmpeg("b_no_filters_8");
+}
+
+#[test]
+fn inter_transform_trees_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("tu_depth_8");
+    check_stream_equals_ffmpeg("tu_depth_1_8");
+    check_stream_equals_ffmpeg("cu_qp_inter_8");
+    check_stream_equals_ffmpeg("lossless_inter_8");
+    check_stream_equals_ffmpeg("cu_lossless_inter_8");
+}
+
+#[test]
+fn inter_block_structures_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("ctu16_inter_8");
+    check_stream_equals_ffmpeg("ctu32_inter_8");
+    check_stream_equals_ffmpeg("wavefront_inter_8");
+    check_stream_equals_ffmpeg("slices_inter_8");
+}
+
+// H17: weighted prediction.
+#[test]
+fn explicit_weights_equal_ffmpeg() {
+    check_stream_equals_ffmpeg("weightp_8");
+    check_stream_equals_ffmpeg("weightp_10");
+    check_stream_equals_ffmpeg("weightb_8");
+    check_stream_equals_ffmpeg("weightb_10");
+}
+
+// `bS` of inter edges (8.7.2.4).
+#[test]
+fn deblocking_of_inter_pictures_equals_ffmpeg() {
+    check_stream_equals_ffmpeg("deblock_only_8");
+    check_stream_equals_ffmpeg("sao_only_inter_8");
+}
+
+/// Cut and corrupt inter streams stay in the error paths, with every picture and
+/// reference still decided by the stream.
+#[test]
+fn corrupt_inter_streams_return_errors() {
+    let Some((stream, _)) = fixture("b_pyramid_8") else {
         return;
     };
+    for length in [stream.len() / 2, stream.len() - 7] {
+        let result = decode_all(&stream[..length], DecodeOptions::default());
+        if let Err(error) = &result {
+            assert!(!error.to_string().is_empty());
+        }
+    }
+    for step in (40..stream.len()).step_by(stream.len() / 60 + 1) {
+        let mut corrupt = stream.clone();
+        corrupt[step] ^= 0x55;
+        let Ok(units) = split(&corrupt) else {
+            continue;
+        };
+        let mut decoder = StreamDecoder::new(DecodeOptions::default());
+        for nal in units {
+            let _ = decoder.decode_nal(nal);
+            while decoder.next_output().is_some() {}
+        }
+        let _ = decoder.flush();
+    }
+}
+
+/// A P slice whose reference never arrived names the missing picture. The first
+/// picture of the stream is removed, and each later picture refers to it or to a
+/// picture that refers to it.
+#[test]
+fn a_lost_reference_is_a_named_error() {
+    let Some((stream, _)) = fixture("p_only_8") else {
+        return;
+    };
+    let units = split(&stream).expect("the fixture is Annex-B");
+    let mut decoder = StreamDecoder::new(DecodeOptions::default());
+    let mut first_error = None;
+    let mut dropped = false;
+    for nal in units {
+        // Types below 32 are slice segments.
+        if nal[0] >> 1 < 32 && !dropped {
+            dropped = true;
+            continue;
+        }
+        if let Err(error) = decoder.decode_nal(nal) {
+            first_error = first_error.or(Some(error));
+        }
+    }
     assert!(matches!(
-        decode_all(&stream, DecodeOptions::default()),
-        Err(HevcError::Unsupported {
-            field: "slice_type",
-            ..
-        })
+        first_error,
+        Some(HevcError::MissingReference { .. })
     ));
 }
 
@@ -300,9 +515,10 @@ fn a_slice_before_its_parameter_sets_is_a_named_error() {
 #[test]
 fn other_layers_and_short_units_are_dropped() {
     let mut decoder = StreamDecoder::new(DecodeOptions::default());
-    assert_eq!(decoder.decode_nal(&[]), Ok(None));
-    assert_eq!(decoder.decode_nal(&[0x42]), Ok(None));
+    assert_eq!(decoder.decode_nal(&[]), Ok(()));
+    assert_eq!(decoder.decode_nal(&[0x42]), Ok(()));
     // nuh_layer_id 1 on an SPS with no payload.
-    assert_eq!(decoder.decode_nal(&[0x42, 0x09]), Ok(None));
-    assert_eq!(decoder.flush(), Ok(None));
+    assert_eq!(decoder.decode_nal(&[0x42, 0x09]), Ok(()));
+    assert_eq!(decoder.flush(), Ok(()));
+    assert_eq!(decoder.next_output(), None);
 }

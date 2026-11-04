@@ -88,6 +88,8 @@ pub(crate) struct CodingParams {
     pub(crate) num_ref_idx_minus1: [u32; 2],
     /// `mvd_l1_zero_flag`.
     pub(crate) mvd_l1_zero: bool,
+    /// `Log2ParMrgLevel` (7-37).
+    pub(crate) log2_par_mrg_level: u32,
     /// `pcm_loop_filter_disabled_flag`.
     pub(crate) pcm_loop_filter_disabled: bool,
     /// `constrained_intra_pred_flag`.
@@ -195,6 +197,7 @@ impl CodingParams {
                 slice.num_ref_idx_l1_active_minus1,
             ],
             mvd_l1_zero: slice.mvd_l1_zero_flag,
+            log2_par_mrg_level: pps.log2_parallel_merge_level_minus2 + 2,
             pcm_loop_filter_disabled: sps.pcm_loop_filter_disabled_flag,
             constrained_intra_pred: pps.constrained_intra_pred_flag,
             strong_intra_smoothing: sps.strong_intra_smoothing_enabled_flag,
@@ -335,6 +338,7 @@ impl CodingParams {
             max_merge_cand: 5,
             num_ref_idx_minus1: [0, 0],
             mvd_l1_zero: false,
+            log2_par_mrg_level: 2,
             pcm_loop_filter_disabled: false,
             constrained_intra_pred: false,
             strong_intra_smoothing: false,

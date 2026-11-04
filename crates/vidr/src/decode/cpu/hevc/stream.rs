@@ -1,18 +1,23 @@
 //! The NAL unit walk of the crate-internal decoder core: parameter sets, slice
-//! segments, access unit boundaries, and hash SEI messages.
+//! segments, access unit boundaries, hash SEI messages, picture order, and output.
 //!
-//! This core decodes intra pictures only, in decoding order. It holds no decoded
-//! picture buffer. A later unit adds inter prediction, then a `Decoder` adapter.
+//! This core decodes Main and Main 10 pictures of every slice type, and returns them
+//! in output order (C.5.2). A later unit adds a `Decoder` adapter.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::bitstream::HevcNalType;
 use crate::bitstream::hevc_pps::PicParameterSet;
-use crate::bitstream::hevc_slice::{SLICE_TYPE_I, SliceSegmentHeader, slice_pic_parameter_set_id};
+use crate::bitstream::hevc_slice::{SliceSegmentHeader, slice_pic_parameter_set_id};
 use crate::bitstream::hevc_sps_full::SeqParameterSet;
 use crate::bitstream::rbsp::unescape;
 
+use super::dpb::buffer::Frame;
+use super::dpb::poc::{PictureFacts, PictureStart, SequenceState, is_cra};
 use super::error::HevcError;
 use super::hash::picture_hash::find_picture_hash;
-use super::picture_decoder::{FinishedPicture, PictureDecoder};
+use super::picture_decoder::{PictureBegin, PictureDecoder};
 
 /// `sps_seq_parameter_set_id` values.
 const SPS_IDS: usize = 16;
@@ -27,16 +32,19 @@ pub(crate) struct DecodeOptions {
     pub(crate) check_picture_hash: bool,
 }
 
-/// A finished picture of either sample type.
+/// A picture in output order, of either sample type. The decoder keeps the same
+/// [`Frame`] while it serves as a reference, so an output holds no copy of its samples.
+/// [`Frame::picture`] carries the conformance window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DecodedPicture {
     /// `BitDepth` 8.
-    Eight(FinishedPicture<u8>),
+    Eight(Arc<Frame<u8>>),
     /// `BitDepth` 9 or 10.
-    Ten(FinishedPicture<u16>),
+    Ten(Arc<Frame<u16>>),
 }
 
-/// Takes NAL units in decoding order, and returns each picture when it ends.
+/// Takes NAL units in decoding order. [`Self::next_output`] returns the pictures in
+/// output order.
 #[derive(Debug)]
 pub(crate) struct StreamDecoder {
     options: DecodeOptions,
@@ -46,6 +54,10 @@ pub(crate) struct StreamDecoder {
     independent: Option<SliceSegmentHeader>,
     eight: PictureDecoder<u8>,
     ten: PictureDecoder<u16>,
+    sequence: SequenceState,
+    /// True through the slice segments of a skipped RASL picture.
+    skip_picture: bool,
+    output: VecDeque<DecodedPicture>,
 }
 
 impl StreamDecoder {
@@ -58,69 +70,85 @@ impl StreamDecoder {
             independent: None,
             eight: PictureDecoder::new(),
             ten: PictureDecoder::new(),
+            sequence: SequenceState::new(),
+            skip_picture: false,
+            output: VecDeque::new(),
         }
     }
 
-    /// Decodes one NAL unit, 2-byte header included and start code excluded. Returns
-    /// the picture that this unit ends, when it ends one. Units of other layers and
-    /// reserved types are dropped. A picture with an error is dropped.
+    /// Decodes one NAL unit, 2-byte header included and start code excluded. Units of
+    /// other layers and reserved types are dropped. A picture with an error is dropped.
     ///
     /// # Errors
     ///
     /// - [`HevcError::Header`] for a parameter set or slice header that fails its
     ///   checks.
     /// - [`HevcError::MissingParameterSet`] for a slice before its parameter sets.
-    /// - [`HevcError::Unsupported`] for a P or B slice, and for a tool outside Main
-    ///   and Main 10 at 4:2:0.
+    /// - [`HevcError::MissingReference`] for a list entry the buffer does not hold.
+    /// - [`HevcError::Unsupported`] for a tool outside Main and Main 10 at 4:2:0.
     /// - [`HevcError::PictureHashMismatch`] with the hash check on.
     /// - Any error of the slice data.
-    pub(crate) fn decode_nal(&mut self, nal: &[u8]) -> Result<Option<DecodedPicture>, HevcError> {
+    pub(crate) fn decode_nal(&mut self, nal: &[u8]) -> Result<(), HevcError> {
         let (Some(&first), Some(&second)) = (nal.first(), nal.get(1)) else {
-            return Ok(None);
+            return Ok(());
         };
         // nuh_layer_id: the low bit of the first byte and the top five of the second.
         if first & 1 != 0 || second >> 3 != 0 {
-            return Ok(None);
+            return Ok(());
         }
         let result = self.dispatch(nal, HevcNalType::from_header(first));
         if result.is_err() {
             self.eight.abandon();
             self.ten.abandon();
         }
+        self.collect_output();
         result
     }
 
-    fn dispatch(
-        &mut self,
-        nal: &[u8],
-        nal_type: HevcNalType,
-    ) -> Result<Option<DecodedPicture>, HevcError> {
+    /// The next picture in output order, when one is ready.
+    pub(crate) fn next_output(&mut self) -> Option<DecodedPicture> {
+        self.output.pop_front()
+    }
+
+    /// Moves output pictures from the sample type decoders into the queue.
+    fn collect_output(&mut self) {
+        while let Some(frame) = self.eight.pop_output() {
+            self.output.push_back(DecodedPicture::Eight(frame));
+        }
+        while let Some(frame) = self.ten.pop_output() {
+            self.output.push_back(DecodedPicture::Ten(frame));
+        }
+    }
+
+    fn dispatch(&mut self, nal: &[u8], nal_type: HevcNalType) -> Result<(), HevcError> {
         match nal_type {
             HevcNalType::SPS => {
-                let finished = self.flush()?;
+                self.end_picture()?;
                 let sps = SeqParameterSet::parse(nal)?;
                 let id = sps.sps_seq_parameter_set_id as usize;
                 if let Some(slot) = self.sps.get_mut(id) {
                     *slot = Some(sps);
                 }
-                Ok(finished)
+                Ok(())
             }
             HevcNalType::PPS => {
-                let finished = self.flush()?;
+                self.end_picture()?;
                 let pps = PicParameterSet::parse(nal)?;
                 let id = pps.pps_pic_parameter_set_id as usize;
                 if let Some(slot) = self.pps.get_mut(id) {
                     *slot = Some(pps);
                 }
-                Ok(finished)
+                Ok(())
             }
             // 7.4.2.4.4: each of these after a picture's last slice starts a new
-            // access unit, or closes the stream.
-            HevcNalType::VPS
-            | HevcNalType::AUD
-            | HevcNalType::SEI_PREFIX
-            | HevcNalType::END_OF_SEQUENCE
-            | HevcNalType::END_OF_BITSTREAM => self.flush(),
+            // access unit.
+            HevcNalType::VPS | HevcNalType::AUD | HevcNalType::SEI_PREFIX => self.end_picture(),
+            // 8.1.3: the next picture restarts POC and NoRaslOutputFlag.
+            HevcNalType::END_OF_SEQUENCE | HevcNalType::END_OF_BITSTREAM => {
+                self.end_picture()?;
+                self.sequence.end_of_sequence();
+                Ok(())
+            }
             HevcNalType::SEI_SUFFIX => {
                 if self.options.check_picture_hash
                     && let Some(hash) = find_picture_hash(&unescape(nal))?
@@ -128,27 +156,38 @@ impl StreamDecoder {
                     self.eight.set_hash(hash);
                     self.ten.set_hash(hash);
                 }
-                Ok(None)
+                Ok(())
             }
             _ => match nal_type.value() {
                 0..=9 | 16..=21 => self.decode_slice(nal),
-                _ => Ok(None),
+                _ => Ok(()),
             },
         }
     }
 
-    /// Ends the current picture, at the end of a stream or a unit boundary.
-    ///
-    /// # Errors
-    ///
-    /// Any error of [`PictureDecoder::finish`].
-    pub(crate) fn flush(&mut self) -> Result<Option<DecodedPicture>, HevcError> {
+    /// Ends the current picture at a unit boundary.
+    fn end_picture(&mut self) -> Result<(), HevcError> {
         let check = self.options.check_picture_hash;
         finish_active(&mut self.eight, &mut self.ten, check)
     }
 
+    /// Ends the stream: finishes the current picture and outputs every waiting
+    /// picture. The next picture starts a new bitstream.
+    ///
+    /// # Errors
+    ///
+    /// Any error of [`PictureDecoder::finish`]. The waiting pictures still leave.
+    pub(crate) fn flush(&mut self) -> Result<(), HevcError> {
+        let result = self.end_picture();
+        self.eight.flush_output();
+        self.ten.flush_output();
+        self.collect_output();
+        self.sequence = SequenceState::new();
+        result
+    }
+
     /// One slice segment NAL unit.
-    fn decode_slice(&mut self, nal: &[u8]) -> Result<Option<DecodedPicture>, HevcError> {
+    fn decode_slice(&mut self, nal: &[u8]) -> Result<(), HevcError> {
         let pps_id = slice_pic_parameter_set_id(nal)?;
         let pps = self
             .pps
@@ -168,24 +207,29 @@ impl StreamDecoder {
                 id: sps_id,
             })?;
         let header = SliceSegmentHeader::parse(nal, pps, sps, self.independent.as_ref())?;
-        if header.slice_type != SLICE_TYPE_I {
-            return Err(HevcError::Unsupported {
-                field: "slice_type",
-                value: header.slice_type.into(),
-                supported: "2, an I slice, because this decoder has no inter prediction yet",
-            });
-        }
-        let mut finished = None;
         if header.first_slice_segment_in_pic_flag {
             let check = self.options.check_picture_hash;
-            finished = finish_active(&mut self.eight, &mut self.ten, check)?;
+            finish_active(&mut self.eight, &mut self.ten, check)?;
             self.independent = None;
-            if sps.bit_depth_y() == 8 {
-                self.eight.begin(sps, pps, &header)?;
-            } else {
-                self.ten.begin(sps, pps, &header)?;
+            let start = self.sequence.begin_picture(PictureFacts {
+                nal_unit_type: header.nal_unit_type,
+                temporal_id: header.temporal_id,
+                poc_lsb: header.slice_pic_order_cnt_lsb,
+                max_poc_lsb: 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4),
+            });
+            self.skip_picture = start == PictureStart::Skip;
+            if let PictureStart::Decode { poc, irap_no_rasl } = start {
+                let begin = PictureBegin { poc, irap_no_rasl };
+                let discard = is_cra(header.nal_unit_type) || header.no_output_of_prior_pics_flag;
+                if sps.bit_depth_y() == 8 {
+                    self.ten.close_sequence(discard);
+                    self.eight.begin(sps, pps, &header, begin)?;
+                } else {
+                    self.eight.close_sequence(discard);
+                    self.ten.begin(sps, pps, &header, begin)?;
+                }
             }
-        } else if !self.eight.is_active() && !self.ten.is_active() {
+        } else if !self.skip_picture && !self.eight.is_active() && !self.ten.is_active() {
             return Err(HevcError::InvalidSyntax {
                 element: "first_slice_segment_in_pic_flag",
                 value: 0,
@@ -195,13 +239,15 @@ impl StreamDecoder {
         if !header.dependent_slice_segment_flag {
             self.independent = Some(header.clone());
         }
+        if self.skip_picture {
+            return Ok(());
+        }
         let data = unescape(nal);
         if self.eight.is_active() {
-            self.eight.decode_slice(&header, &data)?;
+            self.eight.decode_slice(&header, &data)
         } else {
-            self.ten.decode_slice(&header, &data)?;
+            self.ten.decode_slice(&header, &data)
         }
-        Ok(finished)
     }
 }
 
@@ -210,9 +256,9 @@ fn finish_active(
     eight: &mut PictureDecoder<u8>,
     ten: &mut PictureDecoder<u16>,
     check_hash: bool,
-) -> Result<Option<DecodedPicture>, HevcError> {
+) -> Result<(), HevcError> {
     if eight.is_active() {
-        return Ok(eight.finish(check_hash)?.map(DecodedPicture::Eight));
+        return eight.finish(check_hash);
     }
-    Ok(ten.finish(check_hash)?.map(DecodedPicture::Ten))
+    ten.finish(check_hash)
 }

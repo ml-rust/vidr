@@ -2,12 +2,19 @@
 
 use crate::decode::cpu::hevc::error::HevcError;
 use crate::decode::cpu::hevc::layout::PicLayout;
+use crate::decode::cpu::hevc::motion::field::MotionField;
 use crate::decode::cpu::hevc::params::CodingParams;
-use crate::decode::cpu::hevc::syntax::maps::ParseMaps;
-use crate::decode::cpu::hevc::syntax::records::{CtuRecords, CuRecord, PartMode, PredMode};
+use crate::decode::cpu::hevc::syntax::maps::{ParseMaps, filled};
+use crate::decode::cpu::hevc::syntax::records::{
+    CtuRecords, CuRecord, PartMode, PredMode, TuRecord,
+};
+
+use super::strength::{EdgeSide, motion_strength};
 
 /// `bS` when a side of the edge is intra (8.7.2.4).
 const BS_INTRA: u8 = 2;
+/// `bS` at a transform block edge with a coded luma block on a side (8.7.2.4).
+const BS_CODED: u8 = 1;
 /// The grid step in luma samples, as a shift.
 const GRID_LOG2: u32 = 3;
 /// The length of one edge section in luma samples, as a shift.
@@ -20,9 +27,36 @@ const SECTION_LOG2: u32 = 2;
 pub(crate) struct EdgeMap {
     vertical: Vec<u8>,
     horizontal: Vec<u8>,
+    /// 1 where the luma transform block holds a level that is not zero, per 4x4 unit.
+    /// A coding unit writes its area before any later block reads it.
+    coded: Vec<u8>,
     width: u32,
     height: u32,
     any: bool,
+}
+
+/// One edge of a block in an inter coding unit.
+#[derive(Clone, Copy, Debug)]
+struct InterEdge {
+    /// True for a vertical edge.
+    vertical: bool,
+    /// Left end of a horizontal edge, or the column of a vertical one.
+    x: u32,
+    /// Top end of a vertical edge, or the row of a horizontal one.
+    y: u32,
+    /// Length in luma samples.
+    length: u32,
+    /// True when the edge is a transform block edge.
+    transform: bool,
+}
+
+/// What 8.7.2.4 reads besides the coded map.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StrengthInput<'a> {
+    pub(crate) params: &'a CodingParams,
+    pub(crate) layout: &'a PicLayout,
+    pub(crate) maps: &'a ParseMaps,
+    pub(crate) field: &'a MotionField,
 }
 
 /// The side of a block to mark.
@@ -53,9 +87,14 @@ impl EdgeMap {
             (width >> SECTION_LOG2) as usize,
             (height >> GRID_LOG2) as usize,
         )?;
+        let coded = zeroed(
+            (width >> SECTION_LOG2) as usize,
+            (height >> SECTION_LOG2) as usize,
+        )?;
         Ok(Self {
             vertical,
             horizontal,
+            coded,
             width,
             height,
             any: false,
@@ -132,95 +171,237 @@ impl EdgeMap {
         self.horizontal.get(index).copied().unwrap_or(0)
     }
 
-    /// Marks the edges of the intra coding units of one CTU, for a slice with the
-    /// deblocking filter on. Inter units add the rest of 8.7.2.4 here.
-    pub(crate) fn mark_ctu(
-        &mut self,
-        params: &CodingParams,
-        layout: &PicLayout,
-        maps: &ParseMaps,
-        records: &CtuRecords,
-    ) {
-        if params.deblocking_disabled {
+    /// Marks the edges of the coding units of one CTU, for a slice with the
+    /// deblocking filter on. A slice with the filter off records only its coded
+    /// blocks, which a later slice reads across its top and left boundaries.
+    pub(crate) fn mark_ctu(&mut self, input: &StrengthInput<'_>, records: &CtuRecords) {
+        self.record_coded_blocks(records);
+        if input.params.deblocking_disabled {
             return;
         }
         for (index, cu) in records.cus.iter().enumerate() {
-            if cu.pred_mode != PredMode::Intra {
-                continue;
-            }
-            let size = 1u32 << cu.log2_size;
-            let run = |x, y, length| EdgeRun {
-                x,
-                y,
-                length,
-                strength: BS_INTRA,
-            };
-            if filter_across(
-                params,
-                layout,
-                maps,
-                (cu.x, cu.y),
-                cu.x.checked_sub(1),
-                Some(cu.y),
-            ) {
-                self.mark_vertical(run(cu.x, cu.y, size));
-            }
-            if filter_across(
-                params,
-                layout,
-                maps,
-                (cu.x, cu.y),
-                Some(cu.x),
-                cu.y.checked_sub(1),
-            ) {
-                self.mark_horizontal(run(cu.x, cu.y, size));
-            }
             let end = records
                 .cus
                 .get(index + 1)
                 .map_or(records.tus.len(), |next| next.first_tu);
-            for tu in records.tus.get(cu.first_tu..end).unwrap_or_default() {
-                let length = 1u32 << tu.log2_size;
-                if tu.x != cu.x {
-                    self.mark_vertical(run(tu.x, tu.y, length));
-                }
-                if tu.y != cu.y {
-                    self.mark_horizontal(run(tu.x, tu.y, length));
-                }
+            let tus = records.tus.get(cu.first_tu..end).unwrap_or_default();
+            if cu.pred_mode == PredMode::Intra {
+                self.mark_intra_cu(input, cu, tus);
+            } else {
+                self.mark_inter_cu(input, cu, tus);
             }
-            self.mark_partitions(cu);
         }
     }
 
-    /// The prediction block boundary of 8.7.2.3.
-    fn mark_partitions(&mut self, cu: &CuRecord) {
-        let size = 1u32 << cu.log2_size;
-        let run = |x, y| EdgeRun {
-            x,
-            y,
-            length: size,
-            strength: BS_INTRA,
-        };
-        let (half, quarter) = (size / 2, size / 4);
-        let vertical = match cu.part_mode {
-            PartMode::NxTwoN | PartMode::NxN => Some(half),
-            PartMode::NLxTwoN => Some(quarter),
-            PartMode::NRxTwoN => Some(3 * quarter),
-            _ => None,
-        };
-        let horizontal = match cu.part_mode {
-            PartMode::TwoNxN | PartMode::NxN => Some(half),
-            PartMode::TwoNxnU => Some(quarter),
-            PartMode::TwoNxnD => Some(3 * quarter),
-            _ => None,
-        };
-        if let Some(offset) = vertical {
-            self.mark_vertical(run(cu.x + offset, cu.y));
+    /// Writes the coded map for the coding units of one CTU.
+    fn record_coded_blocks(&mut self, records: &CtuRecords) {
+        for cu in &records.cus {
+            self.set_coded(cu.x, cu.y, 1 << cu.log2_size, 0);
         }
-        if let Some(offset) = horizontal {
-            self.mark_horizontal(run(cu.x, cu.y + offset));
+        for tu in &records.tus {
+            if tu.cbf_luma {
+                self.set_coded(tu.x, tu.y, 1 << tu.log2_size, 1);
+            }
         }
     }
+
+    fn set_coded(&mut self, x: u32, y: u32, size: u32, value: u8) {
+        let stride = self.horizontal_stride();
+        let count = (size >> SECTION_LOG2) as usize;
+        let (left, top) = ((x >> SECTION_LOG2) as usize, (y >> SECTION_LOG2) as usize);
+        for row in top..top + count {
+            let start = row * stride + left;
+            let end = (start + count).min((row + 1) * stride);
+            if let Some(cells) = self.coded.get_mut(start..end) {
+                cells.fill(value);
+            }
+        }
+    }
+
+    fn is_coded(&self, x: u32, y: u32) -> bool {
+        let index =
+            (y >> SECTION_LOG2) as usize * self.horizontal_stride() + (x >> SECTION_LOG2) as usize;
+        self.coded.get(index).is_some_and(|&value| value != 0)
+    }
+
+    /// Every edge of an intra coding unit has `bS` 2.
+    fn mark_intra_cu(&mut self, input: &StrengthInput<'_>, cu: &CuRecord, tus: &[TuRecord]) {
+        let size = 1u32 << cu.log2_size;
+        let run = |x, y, length| EdgeRun {
+            x,
+            y,
+            length,
+            strength: BS_INTRA,
+        };
+        let (filter_left, filter_top) = filter_cb_edges(input, cu);
+        if filter_left {
+            self.mark_vertical(run(cu.x, cu.y, size));
+        }
+        if filter_top {
+            self.mark_horizontal(run(cu.x, cu.y, size));
+        }
+        for tu in tus {
+            let length = 1u32 << tu.log2_size;
+            if tu.x != cu.x {
+                self.mark_vertical(run(tu.x, tu.y, length));
+            }
+            if tu.y != cu.y {
+                self.mark_horizontal(run(tu.x, tu.y, length));
+            }
+        }
+        let (vertical, horizontal) = partition_offsets(cu);
+        if let Some(offset) = vertical {
+            self.mark_vertical(run(cu.x + offset, cu.y, size));
+        }
+        if let Some(offset) = horizontal {
+            self.mark_horizontal(run(cu.x, cu.y + offset, size));
+        }
+    }
+
+    /// The edges of an inter coding unit: the coding block, each transform block, and
+    /// each prediction block (8.7.2.2, 8.7.2.3). A coding block edge is a transform
+    /// block edge, also with no transform tree.
+    fn mark_inter_cu(&mut self, input: &StrengthInput<'_>, cu: &CuRecord, tus: &[TuRecord]) {
+        let size = 1u32 << cu.log2_size;
+        let vertical_edge = |x, y, length, transform| InterEdge {
+            vertical: true,
+            x,
+            y,
+            length,
+            transform,
+        };
+        let horizontal_edge = |x, y, length, transform| InterEdge {
+            vertical: false,
+            x,
+            y,
+            length,
+            transform,
+        };
+        let (filter_left, filter_top) = filter_cb_edges(input, cu);
+        if filter_left {
+            self.mark_inter_edge(input, vertical_edge(cu.x, cu.y, size, true));
+        }
+        if filter_top {
+            self.mark_inter_edge(input, horizontal_edge(cu.x, cu.y, size, true));
+        }
+        for tu in tus {
+            let length = 1u32 << tu.log2_size;
+            if tu.x != cu.x {
+                self.mark_inter_edge(input, vertical_edge(tu.x, tu.y, length, true));
+            }
+            if tu.y != cu.y {
+                self.mark_inter_edge(input, horizontal_edge(tu.x, tu.y, length, true));
+            }
+        }
+        let (vertical, horizontal) = partition_offsets(cu);
+        if let Some(offset) = vertical {
+            self.mark_inter_edge(input, vertical_edge(cu.x + offset, cu.y, size, false));
+        }
+        if let Some(offset) = horizontal {
+            self.mark_inter_edge(input, horizontal_edge(cu.x, cu.y + offset, size, false));
+        }
+    }
+
+    /// `bS` of each section of one edge on the grid. The largest value of a section
+    /// holds, because a prediction edge can lie over a transform edge.
+    fn mark_inter_edge(&mut self, input: &StrengthInput<'_>, edge: InterEdge) {
+        let across = if edge.vertical { edge.x } else { edge.y };
+        if across & ((1 << GRID_LOG2) - 1) != 0 || across == 0 {
+            return;
+        }
+        for offset in (0..edge.length).step_by(1 << SECTION_LOG2) {
+            let (q, p) = if edge.vertical {
+                ((edge.x, edge.y + offset), (edge.x - 1, edge.y + offset))
+            } else {
+                ((edge.x + offset, edge.y), (edge.x + offset, edge.y - 1))
+            };
+            let strength = self.section_strength(input, p, q, edge.transform);
+            if strength > 0 {
+                self.raise_section(edge.vertical, q, strength);
+            }
+        }
+    }
+
+    /// The conditions of 8.7.2.4 for one section with sides `p` and `q`.
+    fn section_strength(
+        &self,
+        input: &StrengthInput<'_>,
+        p: (u32, u32),
+        q: (u32, u32),
+        transform: bool,
+    ) -> u8 {
+        if input.maps.cu_intra(p.0, p.1) || input.maps.cu_intra(q.0, q.1) {
+            return BS_INTRA;
+        }
+        if transform && (self.is_coded(p.0, p.1) || self.is_coded(q.0, q.1)) {
+            return BS_CODED;
+        }
+        let side = |at: (u32, u32)| {
+            let motion = input.field.at(at.0, at.1);
+            EdgeSide {
+                motion,
+                ref_poc: input.field.ref_pocs(at.0, at.1, &motion),
+            }
+        };
+        motion_strength(&side(p), &side(q))
+    }
+
+    /// Raises `bS` of the section with `q0` at `q`.
+    fn raise_section(&mut self, vertical: bool, q: (u32, u32), strength: u8) {
+        let (map, index) = if vertical {
+            let stride = self.vertical_stride();
+            let index = (q.1 >> SECTION_LOG2) as usize * stride + (q.0 >> GRID_LOG2) as usize;
+            (&mut self.vertical, index)
+        } else {
+            let stride = self.horizontal_stride();
+            let index = (q.1 >> GRID_LOG2) as usize * stride + (q.0 >> SECTION_LOG2) as usize;
+            (&mut self.horizontal, index)
+        };
+        if let Some(entry) = map.get_mut(index)
+            && *entry < strength
+        {
+            *entry = strength;
+            self.any = true;
+        }
+    }
+}
+
+/// The prediction block edges of 8.7.2.3 inside a coding block: the vertical offset,
+/// then the horizontal offset.
+fn partition_offsets(cu: &CuRecord) -> (Option<u32>, Option<u32>) {
+    let size = 1u32 << cu.log2_size;
+    let (half, quarter) = (size / 2, size / 4);
+    let vertical = match cu.part_mode {
+        PartMode::NxTwoN | PartMode::NxN => Some(half),
+        PartMode::NLxTwoN => Some(quarter),
+        PartMode::NRxTwoN => Some(3 * quarter),
+        _ => None,
+    };
+    let horizontal = match cu.part_mode {
+        PartMode::TwoNxN | PartMode::NxN => Some(half),
+        PartMode::TwoNxnU => Some(quarter),
+        PartMode::TwoNxnD => Some(3 * quarter),
+        _ => None,
+    };
+    (vertical, horizontal)
+}
+
+/// `filterLeftCbEdgeFlag` and `filterTopCbEdgeFlag` (8.7.2.1) of a coding block.
+fn filter_cb_edges(input: &StrengthInput<'_>, cu: &CuRecord) -> (bool, bool) {
+    let at = |x_nb, y_nb| {
+        filter_across(
+            input.params,
+            input.layout,
+            input.maps,
+            (cu.x, cu.y),
+            x_nb,
+            y_nb,
+        )
+    };
+    (
+        at(cu.x.checked_sub(1), Some(cu.y)),
+        at(Some(cu.x), cu.y.checked_sub(1)),
+    )
 }
 
 /// `filterLeftCbEdgeFlag` or `filterTopCbEdgeFlag` (8.7.2.1) for the neighbouring
@@ -255,240 +436,9 @@ fn zeroed(columns: usize, rows: usize) -> Result<Vec<u8>, HevcError> {
             count: usize::MAX,
         });
     };
-    let mut map = Vec::new();
-    map.try_reserve_exact(count)
-        .map_err(|_| HevcError::Allocation {
-            what: "deblocking edges",
-            count,
-        })?;
-    map.resize(count, 0);
-    Ok(map)
+    filled(count, 0, "deblocking edges")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::decode::cpu::hevc::layout::LayoutSizes;
-    use crate::decode::cpu::hevc::syntax::records::TuRecord;
-
-    fn cu(x: u32, y: u32, log2_size: u32, first_tu: usize) -> CuRecord {
-        CuRecord {
-            x,
-            y,
-            log2_size,
-            pred_mode: PredMode::Intra,
-            part_mode: PartMode::TwoNxTwoN,
-            transquant_bypass: false,
-            pcm: false,
-            qp_y: 26,
-            intra_luma: [1; 4],
-            intra_chroma: 1,
-            first_pu: 0,
-            first_tu,
-            first_pcm_sample: 0,
-        }
-    }
-
-    fn tu(x: u32, y: u32, log2_size: u32) -> TuRecord {
-        TuRecord {
-            x,
-            y,
-            x_base: x,
-            y_base: y,
-            log2_size,
-            depth: 0,
-            blk_idx: 0,
-            cbf_luma: false,
-            cbf_cb: false,
-            cbf_cr: false,
-            cu: 0,
-            first_tb: 0,
-            tb_count: 0,
-        }
-    }
-
-    struct Fixture {
-        params: CodingParams,
-        layout: PicLayout,
-        maps: ParseMaps,
-    }
-
-    /// 32x32 luma with 16x16 CTBs in `columns` tile columns, every CTB in slice 0.
-    fn fixture(columns: &[u32]) -> Fixture {
-        let params = CodingParams {
-            width: 32,
-            height: 32,
-            deblocking_disabled: false,
-            ..CodingParams::for_tests()
-        };
-        let layout = PicLayout::new(&LayoutSizes {
-            width: 32,
-            height: 32,
-            ctb_log2: 4,
-            min_tb_log2: 2,
-            column_widths: columns,
-            row_heights: &[2],
-        })
-        .unwrap();
-        let mut maps = ParseMaps::new(&params, &layout).unwrap();
-        for rs in 0..4 {
-            maps.set_ctb_slice(rs, 0);
-        }
-        Fixture {
-            params,
-            layout,
-            maps,
-        }
-    }
-
-    fn mark(fixture: &Fixture, records: &CtuRecords) -> EdgeMap {
-        let mut edges = EdgeMap::new(32, 32).unwrap();
-        edges.mark_ctu(&fixture.params, &fixture.layout, &fixture.maps, records);
-        edges
-    }
-
-    #[test]
-    fn picture_boundaries_take_no_edge() {
-        let fixture = fixture(&[2]);
-        let records = CtuRecords {
-            cus: vec![cu(0, 0, 4, 0)],
-            tus: vec![tu(0, 0, 4)],
-            ..CtuRecords::default()
-        };
-        let edges = mark(&fixture, &records);
-        assert_eq!(edges.vertical_at(0, 0), 0);
-        assert_eq!(edges.horizontal_at(0, 0), 0);
-        assert!(!edges.has_edges());
-    }
-
-    #[test]
-    fn a_unit_marks_its_left_and_top_edges_with_strength_2() {
-        let fixture = fixture(&[2]);
-        let records = CtuRecords {
-            cus: vec![cu(16, 16, 4, 0)],
-            tus: vec![tu(16, 16, 4)],
-            ..CtuRecords::default()
-        };
-        let edges = mark(&fixture, &records);
-        for offset in (0..16).step_by(4) {
-            assert_eq!(edges.vertical_at(16, 16 + offset), 2);
-            assert_eq!(edges.horizontal_at(16 + offset, 16), 2);
-        }
-        assert_eq!(edges.vertical_at(16, 12), 0);
-        assert_eq!(edges.horizontal_at(12, 16), 0);
-        assert!(edges.has_edges());
-    }
-
-    /// Inside a unit, a transform edge on the grid is marked, and one off the grid
-    /// is not (8.7.2.1).
-    #[test]
-    fn transform_edges_keep_to_the_grid() {
-        let fixture = fixture(&[2]);
-        let records = CtuRecords {
-            cus: vec![cu(0, 0, 4, 0)],
-            tus: vec![
-                tu(0, 0, 3),
-                tu(8, 0, 2),
-                tu(12, 0, 2),
-                tu(8, 4, 2),
-                tu(12, 4, 2),
-                tu(0, 8, 3),
-                tu(8, 8, 3),
-            ],
-            ..CtuRecords::default()
-        };
-        let edges = mark(&fixture, &records);
-        assert_eq!(edges.vertical_at(8, 0), 2);
-        assert_eq!(edges.vertical_at(8, 4), 2);
-        assert_eq!(edges.vertical_at(8, 12), 2);
-        assert_eq!(edges.horizontal_at(0, 8), 2);
-        assert_eq!(edges.horizontal_at(12, 8), 2);
-        // y = 4 lies off the grid, and no edge holds row 0 of the picture.
-        assert_eq!(edges.horizontal_at(8, 4), 0);
-    }
-
-    #[test]
-    fn an_edge_off_the_grid_is_dropped() {
-        let mut edges = EdgeMap::new(16, 16).unwrap();
-        let run = EdgeRun {
-            x: 12,
-            y: 4,
-            length: 4,
-            strength: 2,
-        };
-        edges.mark_vertical(run);
-        edges.mark_horizontal(run);
-        assert!(!edges.has_edges());
-    }
-
-    #[test]
-    fn a_disabled_slice_marks_nothing() {
-        let mut fixture = fixture(&[2]);
-        fixture.params.deblocking_disabled = true;
-        let records = CtuRecords {
-            cus: vec![cu(16, 16, 4, 0)],
-            tus: vec![tu(16, 16, 4)],
-            ..CtuRecords::default()
-        };
-        assert!(!mark(&fixture, &records).has_edges());
-    }
-
-    /// The current slice's flag decides its left and top boundaries (8.7.2.1).
-    #[test]
-    fn a_slice_boundary_follows_the_current_slice_flag() {
-        let mut fixture = fixture(&[2]);
-        fixture.maps.set_ctb_slice(1, 1);
-        fixture.params.loop_filter_across_slices = false;
-        let records = CtuRecords {
-            cus: vec![cu(16, 0, 4, 0)],
-            tus: vec![tu(16, 0, 4)],
-            ..CtuRecords::default()
-        };
-        assert_eq!(mark(&fixture, &records).vertical_at(16, 0), 0);
-        fixture.params.loop_filter_across_slices = true;
-        assert_eq!(mark(&fixture, &records).vertical_at(16, 0), 2);
-    }
-
-    #[test]
-    fn a_tile_boundary_follows_the_pps_flag() {
-        let mut fixture = fixture(&[1, 1]);
-        fixture.params.loop_filter_across_tiles = false;
-        let records = CtuRecords {
-            cus: vec![cu(16, 0, 4, 0)],
-            tus: vec![tu(16, 0, 4)],
-            ..CtuRecords::default()
-        };
-        assert_eq!(mark(&fixture, &records).vertical_at(16, 0), 0);
-        fixture.params.loop_filter_across_tiles = true;
-        assert_eq!(mark(&fixture, &records).vertical_at(16, 0), 2);
-    }
-
-    #[test]
-    fn nxn_marks_the_middle_of_a_large_unit() {
-        let fixture = fixture(&[2]);
-        let mut unit = cu(0, 0, 4, 0);
-        unit.part_mode = PartMode::NxN;
-        let records = CtuRecords {
-            cus: vec![unit],
-            ..CtuRecords::default()
-        };
-        let edges = mark(&fixture, &records);
-        assert_eq!(edges.vertical_at(8, 12), 2);
-        assert_eq!(edges.horizontal_at(12, 8), 2);
-    }
-
-    #[test]
-    fn reset_removes_every_edge() {
-        let mut edges = EdgeMap::new(16, 16).unwrap();
-        edges.mark_vertical(EdgeRun {
-            x: 8,
-            y: 0,
-            length: 16,
-            strength: 2,
-        });
-        assert_eq!(edges.vertical_at(8, 12), 2);
-        edges.reset();
-        assert_eq!(edges.vertical_at(8, 12), 0);
-        assert!(!edges.has_edges());
-    }
-}
+#[path = "edges_tests.rs"]
+mod tests;

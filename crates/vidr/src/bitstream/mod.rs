@@ -58,12 +58,12 @@ mod hevc_params;
 pub(crate) mod hevc_pps;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_pred_weight;
+pub(crate) mod hevc_pred_weight;
 #[cfg(feature = "hevc")]
 mod hevc_ptl;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_rps;
+pub(crate) mod hevc_rps;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
 pub(crate) mod hevc_scaling;

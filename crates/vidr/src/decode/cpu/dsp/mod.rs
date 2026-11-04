@@ -2,6 +2,7 @@
 //! the compiler vectorises the inner loops, with exact integer output.
 
 pub(crate) mod deblock;
+pub(crate) mod inter;
 pub(crate) mod intra;
 pub(crate) mod sample;
 pub(crate) mod sao;
