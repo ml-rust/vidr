@@ -38,6 +38,28 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// The error for a `field` that holds a forbidden `value`.
+    #[cfg(any(feature = "hevc", feature = "vp9"))]
+    pub(crate) const fn invalid(
+        &self,
+        field: &'static str,
+        value: u64,
+        allowed: &'static str,
+    ) -> BitstreamError {
+        BitstreamError::InvalidField {
+            structure: self.structure,
+            field,
+            value,
+            allowed,
+        }
+    }
+
+    /// Bits read so far.
+    #[cfg(any(feature = "hevc", feature = "vp9"))]
+    pub(crate) const fn position(&self) -> u64 {
+        self.pos
+    }
+
     /// Reads one bit.
     pub(crate) fn bit(&mut self, field: &'static str) -> Result<bool, BitstreamError> {
         let byte = self
@@ -109,6 +131,42 @@ impl<'a> BitReader<'a> {
         } else {
             -(code / 2)
         })
+    }
+
+    /// Reads a `ue(v)` and refuses a value above `max`.
+    #[cfg(feature = "hevc")]
+    pub(crate) fn ue_max(
+        &mut self,
+        field: &'static str,
+        max: u32,
+        allowed: &'static str,
+    ) -> Result<u32, BitstreamError> {
+        let value = self.ue(field)?;
+        if value > max {
+            return Err(self.invalid(field, u64::from(value), allowed));
+        }
+        Ok(value)
+    }
+
+    /// Reads a `se(v)` and refuses a value outside `min..=max`.
+    #[cfg(feature = "hevc")]
+    pub(crate) fn se_range(
+        &mut self,
+        field: &'static str,
+        min: i64,
+        max: i64,
+        allowed: &'static str,
+    ) -> Result<i64, BitstreamError> {
+        let value = self.se(field)?;
+        if !(min..=max).contains(&value) {
+            return Err(BitstreamError::InvalidSignedField {
+                structure: self.structure,
+                field,
+                value,
+                allowed,
+            });
+        }
+        Ok(value)
     }
 
     /// Reads an AV1 `uvlc()` value.

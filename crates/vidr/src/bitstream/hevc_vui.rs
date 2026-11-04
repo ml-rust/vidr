@@ -1,6 +1,7 @@
 //! HEVC `vui_parameters()` (ITU-T H.265 E.2.1) and `hrd_parameters()`
-//! (E.2.2), read up to `min_spatial_segmentation_idc`. The colour fields
-//! come from [`vui::read_signal`].
+//! (E.2.2). [`parse`] reads up to `min_spatial_segmentation_idc`, and
+//! [`read_restriction_tail`] reads the rest. The colour fields come from
+//! [`vui::read_signal`].
 
 use super::bits::BitReader;
 use super::hevc_sps::STRUCTURE;
@@ -39,7 +40,7 @@ pub(crate) fn parse(
             reader.ue("vui_num_ticks_poc_diff_one_minus1")?;
         }
         if reader.bit("vui_hrd_parameters_present_flag")? {
-            skip_hrd_parameters(reader, max_sub_layers_minus1)?;
+            skip_hrd_parameters(reader, None, max_sub_layers_minus1)?;
         }
     }
     let min_spatial_segmentation_idc = if reader.bit("bitstream_restriction_flag")? {
@@ -54,11 +55,75 @@ pub(crate) fn parse(
     })
 }
 
-/// Reads `hrd_parameters(1, max_sub_layers_minus1)`.
-fn skip_hrd_parameters(
+/// Reads the bitstream restriction fields after
+/// `min_spatial_segmentation_idc`, which [`parse`] leaves unread. It reads
+/// nothing without `bitstream_restriction_flag`.
+pub(crate) fn read_restriction_tail(
     reader: &mut BitReader<'_>,
-    max_sub_layers_minus1: u8,
+    vui: &Vui,
 ) -> Result<(), BitstreamError> {
+    if vui.min_spatial_segmentation_idc.is_some() {
+        for field in [
+            "max_bytes_per_pic_denom",
+            "max_bits_per_min_cu_denom",
+            "log2_max_mv_length_horizontal",
+            "log2_max_mv_length_vertical",
+        ] {
+            reader.ue(field)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `hrd_parameters()` flags common to all sub-layers that later syntax
+/// reads. A structure with `commonInfPresentFlag` 0 takes them from the
+/// structure before it (7.4.3.1, `cprms_present_flag`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HrdCommon {
+    nal: bool,
+    vcl: bool,
+    sub_pic: bool,
+}
+
+/// Reads `hrd_parameters()`. `inherited` is `None` for `commonInfPresentFlag`
+/// 1. It holds the flags of the previous structure for 0.
+pub(crate) fn skip_hrd_parameters(
+    reader: &mut BitReader<'_>,
+    inherited: Option<HrdCommon>,
+    max_sub_layers_minus1: u8,
+) -> Result<HrdCommon, BitstreamError> {
+    let common = match inherited {
+        Some(common) => common,
+        None => read_hrd_common(reader)?,
+    };
+    let HrdCommon { nal, vcl, sub_pic } = common;
+    for _ in 0..=max_sub_layers_minus1 {
+        let fixed_general = reader.bit("fixed_pic_rate_general_flag")?;
+        let fixed_within_cvs = fixed_general || reader.bit("fixed_pic_rate_within_cvs_flag")?;
+        let low_delay = if fixed_within_cvs {
+            reader.ue("elemental_duration_in_tc_minus1")?;
+            false
+        } else {
+            reader.bit("low_delay_hrd_flag")?
+        };
+        let mut cpb_cnt_minus1 = 0;
+        if !low_delay {
+            cpb_cnt_minus1 = reader.ue("cpb_cnt_minus1")?;
+            if cpb_cnt_minus1 > 31 {
+                return Err(reader.invalid("cpb_cnt_minus1", u64::from(cpb_cnt_minus1), "0 to 31"));
+            }
+        }
+        for present in [nal, vcl] {
+            if present {
+                skip_sub_layer_hrd(reader, cpb_cnt_minus1, sub_pic)?;
+            }
+        }
+    }
+    Ok(common)
+}
+
+/// Reads the fields of `hrd_parameters()` that `commonInfPresentFlag` guards.
+fn read_hrd_common(reader: &mut BitReader<'_>) -> Result<HrdCommon, BitstreamError> {
     let nal = reader.bit("nal_hrd_parameters_present_flag")?;
     let vcl = reader.bit("vcl_hrd_parameters_present_flag")?;
     let mut sub_pic = false;
@@ -73,34 +138,7 @@ fn skip_hrd_parameters(
         }
         reader.skip(15, "dpb_output_delay_length_minus1")?;
     }
-    for _ in 0..=max_sub_layers_minus1 {
-        let fixed_general = reader.bit("fixed_pic_rate_general_flag")?;
-        let fixed_within_cvs = fixed_general || reader.bit("fixed_pic_rate_within_cvs_flag")?;
-        let low_delay = if fixed_within_cvs {
-            reader.ue("elemental_duration_in_tc_minus1")?;
-            false
-        } else {
-            reader.bit("low_delay_hrd_flag")?
-        };
-        let mut cpb_cnt_minus1 = 0;
-        if !low_delay {
-            cpb_cnt_minus1 = reader.ue("cpb_cnt_minus1")?;
-            if cpb_cnt_minus1 > 31 {
-                return Err(BitstreamError::InvalidField {
-                    structure: STRUCTURE,
-                    field: "cpb_cnt_minus1",
-                    value: u64::from(cpb_cnt_minus1),
-                    allowed: "0 to 31",
-                });
-            }
-        }
-        for present in [nal, vcl] {
-            if present {
-                skip_sub_layer_hrd(reader, cpb_cnt_minus1, sub_pic)?;
-            }
-        }
-    }
-    Ok(())
+    Ok(HrdCommon { nal, vcl, sub_pic })
 }
 
 /// Reads `sub_layer_hrd_parameters()`.
@@ -181,6 +219,55 @@ mod tests {
             })
         );
         assert_eq!(vui.min_spatial_segmentation_idc, None);
+    }
+
+    #[test]
+    fn restriction_tail_reads_four_codes_only_with_the_flag() {
+        let vui = Vui {
+            signal: VuiSignal::default(),
+            min_spatial_segmentation_idc: Some(0),
+        };
+        // Four `1` codes, then one spare bit.
+        let bytes = [0b1111_1000];
+        let mut reader = BitReader::new(&bytes, "test");
+        assert_eq!(read_restriction_tail(&mut reader, &vui), Ok(()));
+        assert_eq!(reader.position(), 4);
+        // A cut inside the codes is a truncation.
+        let mut reader = BitReader::new(&[], "test");
+        assert!(read_restriction_tail(&mut reader, &vui).is_err());
+        // No restriction flag: no bits.
+        let none = Vui {
+            signal: VuiSignal::default(),
+            min_spatial_segmentation_idc: None,
+        };
+        let mut reader = BitReader::new(&[], "test");
+        assert_eq!(read_restriction_tail(&mut reader, &none), Ok(()));
+    }
+
+    #[test]
+    fn inherited_hrd_flags_select_the_sub_layer_syntax() {
+        // nal 1, vcl 0, sub_pic 0, 8 + 15 bits.
+        let bits = "100".to_owned()
+            + &"0".repeat(23)
+            // fixed_general 1, elemental `1`, cpb_cnt `1`, one NAL entry:
+            // bit rate `1`, cpb size `1`, cbr 0.
+            + "1"
+            + "1"
+            + "1"
+            + "110";
+        let bytes = pack_bits(&bits);
+        let mut reader = BitReader::new(&bytes, "test");
+        let common =
+            skip_hrd_parameters(&mut reader, None, 0).unwrap_or_else(|error| panic!("{error}"));
+        assert!(common.nal && !common.vcl && !common.sub_pic);
+        // The same flags with no common fields: only the sub-layer syntax.
+        let bytes = pack_bits("111110");
+        let mut reader = BitReader::new(&bytes, "test");
+        assert_eq!(
+            skip_hrd_parameters(&mut reader, Some(common), 0),
+            Ok(common)
+        );
+        assert_eq!(reader.position(), 6);
     }
 
     #[test]

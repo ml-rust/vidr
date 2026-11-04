@@ -18,6 +18,10 @@
 //! VP9 has no config record the decoder needs and no filter. The `vp9`
 //! feature holds `vp9_color` and `vp9_packet_color`, which read
 //! `color_space` and `color_range` from a frame header.
+//!
+//! Crate-internal parsers read whole headers for software and Vulkan decoders:
+//! HEVC VPS, SPS, PPS, and slice segment headers, and the VP9 uncompressed
+//! header.
 
 mod bits;
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1"))]
@@ -50,9 +54,30 @@ mod h264_vui;
 #[cfg(feature = "hevc")]
 mod hevc_params;
 #[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_pps;
+#[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_pred_weight;
+#[cfg(feature = "hevc")]
 mod hevc_ptl;
 #[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_rps;
+#[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_scaling;
+#[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_slice;
+#[cfg(feature = "hevc")]
 mod hevc_sps;
+#[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_sps_full;
+#[cfg(feature = "hevc")]
+#[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
+mod hevc_vps;
 #[cfg(feature = "hevc")]
 mod hevc_vui;
 #[cfg(feature = "hevc")]
@@ -67,6 +92,14 @@ mod vui;
 pub mod av1;
 #[cfg(feature = "vp9")]
 mod vp9;
+#[cfg(feature = "vp9")]
+#[allow(dead_code, reason = "read by the Vulkan VP9 unit")]
+mod vp9_header;
+
+#[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
+mod header_oracle;
+#[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
+mod test_bits;
 
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use annexb::StartCode;

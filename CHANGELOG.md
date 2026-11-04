@@ -85,6 +85,11 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 - `vidr`: `Decoder` and `Encoder` impls for `Box<T>`, with `T` unsized, so a run takes `Box<dyn Decoder<R> + Send>`.
 - `vidr`: CPU codecs, each with one host copy per frame that `FrameRoute` declares. `Dav1dDecoder` behind `dav1d` decodes AV1 at 4:2:0, 8 or 10 bits, on libdav1d 1.3.0 or newer. `Openh264Decoder` and `Openh264Encoder` run on OpenH264 compiled from source behind `openh264`, or on Cisco's binary at a caller's path behind `openh264-cisco`. The decoder takes Baseline only and refuses 10 bits, interlaced streams, and other profiles by name. The encoder writes 8-bit Constrained Baseline and refuses P010 and B-frames by name. A source build gets no Cisco patent cover, and Cisco's cover applies only to its own binary. `h264_sps_facts`, `av1_sequence_facts`, `upload_route`, and `download_route` support them.
 - `vidr`: host plane copies in `frame`, for a CPU codec. `upload_planes` interleaves I420 to NV12, writes I010 as `value << 6`, and packs to words on a word-form backend. `download_planes` reverses it into a `HostFrame`, whose buffers a same-size frame reuses. `HostPlanes` takes pitched sources, odd sizes round chroma up, and `FrameError` gains `HostFrameSize`, `HostStride`, `HostPlaneShort`, and `HostSampleRange`.
+- `vidr`: crate-internal header parsers behind `hevc` and `vp9`, for the CPU HEVC decoder and the Vulkan path. They have no public API yet.
+  - HEVC VPS, full SPS, PPS, and slice segment header, with `profile_tier_level`, `scaling_list_data`, `st_ref_pic_set`, `pred_weight_table`, dependent slice segments, entry points, and the range extension flags. A value outside the range H.265 V11 states returns a named error.
+  - VP9 `uncompressed_header` in a parser that keeps the state the syntax needs: colour, loop filter deltas, segmentation features, and the last frame size. The caller holds the reference frame table.
+  - `tests/fixtures/gen_headers.py` writes the sidecars. It takes each value from ffmpeg's `trace_headers`, over libx265, libvpx, vpxenc, and hand-built streams. The tests compare every element the parsers keep.
+- `vidr`: `BitstreamError::InvalidSignedField` for a signed syntax element outside its range.
 
 ### Changed
 
@@ -95,6 +100,7 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 
 ### Fixed
 
+- `vidr`: an HEVC SPS with an inter-predicted `st_ref_pic_set` read the wrong number of flags in the next set when a source entry landed on delta 0. `NumDeltaPocs` now follows (7-61) and (7-62).
 - `vidr-remaster`: a second signal removes the temporary directory before `process::exit`. `TempOutput` registers its directory, and `remove_temp_directories` removes every registered one. `ctrlc` calls the handler on its own thread, outside signal context, so the removal runs there.
 - `vidr-remaster`: the provenance sidecar is written beside the temporary output before the publish, and renames into place after it. A failure to hash or write it now leaves no output. Only the rename can fail after the publish, and that gives `RunOutcome::OutputWithoutSidecar`, report status `output_without_sidecar`, exit code 1, and an error that names both paths. The sidecar bytes are unchanged, since a record holds no output path.
 - `vidr-remaster`: a report that does not write after the publish keeps the run complete. The command prints a warning with the report path and the cause, and exits 0.

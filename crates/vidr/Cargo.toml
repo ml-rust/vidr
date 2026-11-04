@@ -16,7 +16,8 @@ default = []
 h264 = []
 hevc = []
 av1 = []
-# VP9 uncompressed-header colour: `color_space` and `color_range`.
+# VP9 uncompressed-header colour: `color_space` and `color_range`. Crate-internal
+# parsers read the whole header.
 vp9 = []
 # Backend-neutral decode API: the `Decoder` trait and `DecodedFrame`, over
 # numr tensors. Builds on any numr backend.

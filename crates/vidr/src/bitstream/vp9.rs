@@ -12,11 +12,11 @@
 use super::bits::BitReader;
 use crate::error::BitstreamError;
 
-const STRUCTURE: &str = "VP9 uncompressed header";
+pub(super) const STRUCTURE: &str = "VP9 uncompressed header";
 const SUPERFRAME: &str = "VP9 superframe index";
 
 /// `color_space` 7: sRGB. The range is full and the matrix is identity.
-const CS_RGB: u8 = 7;
+pub(super) const CS_RGB: u8 = 7;
 /// The three bytes of `frame_sync_code`.
 const SYNC_CODE: [u8; 3] = [0x49, 0x83, 0x42];
 
@@ -89,10 +89,27 @@ pub fn vp9_color(frame: &[u8]) -> Result<Option<Vp9Color>, BitstreamError> {
 /// As [`vp9_color`], for the first frame that fails, and
 /// [`BitstreamError::InvalidField`] for a frame size that runs into the index.
 pub fn vp9_packet_color(packet: &[u8]) -> Result<Option<Vp9Color>, BitstreamError> {
-    let Some(index) = SuperframeIndex::of(packet) else {
-        return vp9_color(packet);
-    };
     let mut found = None;
+    for frame in split_superframe(packet)? {
+        if let Some(color) = vp9_color(frame)? {
+            found = Some(color);
+        }
+    }
+    Ok(found)
+}
+
+/// Splits a chunk into its frames (Annex B of the VP9 specification). A chunk
+/// whose last byte is not a superframe marker is one frame. A frame of size 0
+/// is dropped.
+///
+/// # Errors
+///
+/// [`BitstreamError::InvalidField`] for a frame size that runs into the index.
+pub(super) fn split_superframe(packet: &[u8]) -> Result<Vec<&[u8]>, BitstreamError> {
+    let Some(index) = SuperframeIndex::of(packet) else {
+        return Ok(vec![packet]);
+    };
+    let mut frames = Vec::with_capacity(index.frames);
     let mut start = 0usize;
     for position in 0..index.frames {
         let size = index.size(packet, position);
@@ -106,14 +123,11 @@ pub fn vp9_packet_color(packet: &[u8]) -> Result<Option<Vp9Color>, BitstreamErro
                 allowed: "frame sizes that end before the superframe index",
             })?;
         start += size;
-        if frame.is_empty() {
-            continue;
-        }
-        if let Some(color) = vp9_color(frame)? {
-            found = Some(color);
+        if !frame.is_empty() {
+            frames.push(frame);
         }
     }
-    Ok(found)
+    Ok(frames)
 }
 
 fn invalid(field: &'static str, value: u64, allowed: &'static str) -> BitstreamError {
@@ -132,7 +146,8 @@ const SYNC_FIELDS: [(&str, &str); 3] = [
     ("frame_sync_byte_2", "0x42"),
 ];
 
-fn sync_code(reader: &mut BitReader<'_>) -> Result<(), BitstreamError> {
+/// Reads `frame_sync_code()` (6.2.1).
+pub(super) fn sync_code(reader: &mut BitReader<'_>) -> Result<(), BitstreamError> {
     for (expected, (field, allowed)) in SYNC_CODE.into_iter().zip(SYNC_FIELDS) {
         let byte = reader.u8(8, field)?;
         if byte != expected {
@@ -531,6 +546,20 @@ mod tests {
         for length in 0..=chunk.len() {
             let _ = vp9_packet_color(&chunk[..length]);
         }
+    }
+
+    #[test]
+    fn splitting_a_superframe_returns_each_frame_and_drops_empty_ones() {
+        let first = key_frame(0, 1, 0);
+        let second = key_frame(0, 2, 0);
+        let chunk = superframe(&[first.clone(), second.clone()], 2);
+        assert_eq!(
+            split_superframe(&chunk),
+            Ok(vec![first.as_slice(), second.as_slice()])
+        );
+        assert_eq!(split_superframe(&first), Ok(vec![first.as_slice()]));
+        let chunk = superframe(&[first.clone(), Vec::new()], 1);
+        assert_eq!(split_superframe(&chunk), Ok(vec![first.as_slice()]));
     }
 
     #[test]

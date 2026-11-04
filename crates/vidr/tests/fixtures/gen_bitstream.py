@@ -5,7 +5,7 @@ Run from any directory:
 
     python3 crates/vidr/tests/fixtures/gen_bitstream.py [--out DIR]
 
-ffmpeg with libx264, libx265 and libaom-av1 must be on PATH. The default
+ffmpeg with libx264, libx265, libaom-av1 and libvpx-vp9 must be on PATH. The default
 output directory is `crates/vidr/tests/fixtures/bitstream/`, which git
 ignores. Never commit its contents.
 
@@ -24,6 +24,9 @@ For each stream NAME the script writes:
 - `NAME.sar`: only for the `*_sar*` streams. The sample aspect ratio that
   ffprobe reads from `NAME.raw`, as `W:H`. That file carries the SPS VUI and
   no container box, so the value comes from the VUI.
+
+- `NAME.headers`: for the `headers_*` streams of `gen_headers.py`. Each header
+  in the stream with its bytes and ffmpeg's `trace_headers` values.
 
 The tests read `VIDR_BITSTREAM_FIXTURES` first, then the default directory.
 """
@@ -247,6 +250,10 @@ def main():
         if "_sar" in name:
             write_sar(args.out / f"{name}.raw", args.out / f"{name}.sar")
         print(f"{name}: {mp4}")
+    # Imported here because `gen_nvdec.py` imports this module without needing it.
+    sys.dont_write_bytecode = True
+    from gen_headers import generate
+    generate(args.out, extract)
 
 
 if __name__ == "__main__":

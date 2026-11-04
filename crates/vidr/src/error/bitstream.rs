@@ -33,6 +33,17 @@ pub enum BitstreamError {
         /// The values the specification allows.
         allowed: &'static str,
     },
+    /// A signed field holds a value its specification forbids.
+    InvalidSignedField {
+        /// The structure.
+        structure: &'static str,
+        /// The field.
+        field: &'static str,
+        /// The value read.
+        value: i64,
+        /// The values the specification allows.
+        allowed: &'static str,
+    },
     /// Bytes follow the last field of a structure.
     TrailingBytes {
         /// The structure.
@@ -108,6 +119,17 @@ impl fmt::Display for BitstreamError {
                  remux reports the same error."
             ),
             Self::InvalidField {
+                structure,
+                field,
+                value,
+                allowed,
+            } => write!(
+                f,
+                "{structure} field `{field}` is {value}. It must be {allowed}. \
+                 The input is corrupt or does not follow its specification. Remux the source, \
+                 and re-encode it if the remux reports the same error."
+            ),
+            Self::InvalidSignedField {
                 structure,
                 field,
                 value,

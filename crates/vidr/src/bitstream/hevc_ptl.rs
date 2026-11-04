@@ -5,7 +5,7 @@ use super::bits::BitReader;
 use crate::error::BitstreamError;
 
 /// The general profile, tier, and level fields.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GeneralPtl {
     pub(crate) profile_space: u8,
     pub(crate) tier_flag: bool,
@@ -17,13 +17,50 @@ pub(crate) struct GeneralPtl {
     pub(crate) level_idc: u8,
 }
 
+/// The fields of one sub-layer. The profile fields are 0 without
+/// `sub_layer_profile_present_flag`, and the level is 0 without
+/// `sub_layer_level_present_flag`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code, reason = "read by the Vulkan parameter set unit")]
+pub(crate) struct SubLayerPtl {
+    pub(crate) sub_layer_profile_present_flag: bool,
+    pub(crate) sub_layer_level_present_flag: bool,
+    pub(crate) sub_layer_profile_space: u8,
+    pub(crate) sub_layer_tier_flag: bool,
+    pub(crate) sub_layer_profile_idc: u8,
+    /// `sub_layer_profile_compatibility_flag[ j ]` at bit `31 - j`.
+    pub(crate) compatibility_flags: u32,
+    /// The 48 bits from `sub_layer_progressive_source_flag` to
+    /// `sub_layer_inbld_flag` or its reserved bit.
+    pub(crate) constraint_flags: u64,
+    pub(crate) sub_layer_level_idc: u8,
+}
+
+/// `profile_tier_level()` with `profilePresentFlag` 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(dead_code, reason = "read by the Vulkan parameter set unit")]
+pub(crate) struct ProfileTierLevel {
+    pub(crate) general: GeneralPtl,
+    /// The first `maxNumSubLayersMinus1` entries hold sub-layers 0 and up.
+    pub(crate) sub_layers: [SubLayerPtl; 6],
+}
+
 /// Reads `profile_tier_level(1, max_sub_layers_minus1)` and returns its
-/// general fields. Sub-layer fields are read and dropped.
+/// general fields.
 pub(crate) fn parse(
     reader: &mut BitReader<'_>,
     max_sub_layers_minus1: u8,
 ) -> Result<GeneralPtl, BitstreamError> {
-    let ptl = GeneralPtl {
+    Ok(parse_full(reader, max_sub_layers_minus1)?.general)
+}
+
+/// Reads `profile_tier_level(1, max_sub_layers_minus1)`. The caller refuses a
+/// `max_sub_layers_minus1` above 6.
+pub(crate) fn parse_full(
+    reader: &mut BitReader<'_>,
+    max_sub_layers_minus1: u8,
+) -> Result<ProfileTierLevel, BitstreamError> {
+    let general = GeneralPtl {
         profile_space: reader.u8(2, "general_profile_space")?,
         tier_flag: reader.bit("general_tier_flag")?,
         profile_idc: reader.u8(5, "general_profile_idc")?,
@@ -31,27 +68,32 @@ pub(crate) fn parse(
         constraint_flags: reader.bits(48, "general_constraint_indicator_flags")?,
         level_idc: reader.u8(8, "general_level_idc")?,
     };
-    let sub_layers = usize::from(max_sub_layers_minus1);
-    let mut present = [(false, false); 7];
-    for flags in present.iter_mut().take(sub_layers) {
-        *flags = (
-            reader.bit("sub_layer_profile_present_flag")?,
-            reader.bit("sub_layer_level_present_flag")?,
-        );
+    let count = usize::from(max_sub_layers_minus1.min(6));
+    let mut sub_layers = [SubLayerPtl::default(); 6];
+    for layer in sub_layers.iter_mut().take(count) {
+        layer.sub_layer_profile_present_flag = reader.bit("sub_layer_profile_present_flag")?;
+        layer.sub_layer_level_present_flag = reader.bit("sub_layer_level_present_flag")?;
     }
-    if sub_layers > 0 {
-        reader.skip(2 * (8 - sub_layers as u64), "reserved_zero_2bits")?;
+    if count > 0 {
+        reader.skip(2 * (8 - count as u64), "reserved_zero_2bits")?;
     }
-    for &(profile, level) in present.iter().take(sub_layers) {
-        if profile {
-            // Space, tier, idc, 32 compatibility flags, 48 constraint bits.
-            reader.skip(88, "sub_layer_profile_idc")?;
+    for layer in sub_layers.iter_mut().take(count) {
+        if layer.sub_layer_profile_present_flag {
+            layer.sub_layer_profile_space = reader.u8(2, "sub_layer_profile_space")?;
+            layer.sub_layer_tier_flag = reader.bit("sub_layer_tier_flag")?;
+            layer.sub_layer_profile_idc = reader.u8(5, "sub_layer_profile_idc")?;
+            layer.compatibility_flags =
+                reader.bits(32, "sub_layer_profile_compatibility_flag")? as u32;
+            layer.constraint_flags = reader.bits(48, "sub_layer_constraint_flags")?;
         }
-        if level {
-            reader.skip(8, "sub_layer_level_idc")?;
+        if layer.sub_layer_level_present_flag {
+            layer.sub_layer_level_idc = reader.u8(8, "sub_layer_level_idc")?;
         }
     }
-    Ok(ptl)
+    Ok(ProfileTierLevel {
+        general,
+        sub_layers,
+    })
 }
 
 #[cfg(test)]
@@ -90,6 +132,43 @@ mod tests {
         let mut reader = BitReader::new(&bytes, "test");
         assert_eq!(parse(&mut reader, 2).map(|p| p.level_idc), Ok(90));
         assert_eq!(reader.bits_left(), 0);
+    }
+
+    #[test]
+    fn keeps_sub_layer_fields() {
+        let mut bytes = MAIN_L30.to_vec();
+        // First sub-layer: profile and level. Second: level only.
+        bytes.extend_from_slice(&[0b1101_0000, 0]);
+        // Space 1, tier 1, idc 2, compatibility, and constraint bits.
+        bytes.push(0b0110_0010);
+        bytes.extend_from_slice(&[0x20, 0, 0, 0]);
+        bytes.extend_from_slice(&[0x90, 0, 0, 0, 0, 0x01]);
+        bytes.push(93);
+        bytes.push(60);
+        let mut reader = BitReader::new(&bytes, "test");
+        let ptl = parse_full(&mut reader, 2).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(reader.bits_left(), 0);
+        assert_eq!(
+            ptl.sub_layers[0],
+            SubLayerPtl {
+                sub_layer_profile_present_flag: true,
+                sub_layer_level_present_flag: true,
+                sub_layer_profile_space: 1,
+                sub_layer_tier_flag: true,
+                sub_layer_profile_idc: 2,
+                compatibility_flags: 0x2000_0000,
+                constraint_flags: 0x9000_0000_0001,
+                sub_layer_level_idc: 93,
+            }
+        );
+        assert_eq!(
+            ptl.sub_layers[1],
+            SubLayerPtl {
+                sub_layer_level_present_flag: true,
+                sub_layer_level_idc: 60,
+                ..SubLayerPtl::default()
+            }
+        );
     }
 
     #[test]
