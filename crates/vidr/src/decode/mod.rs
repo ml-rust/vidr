@@ -26,17 +26,21 @@ pub(crate) mod cpu;
 pub mod dav1d;
 #[cfg(feature = "cpu-hevc")]
 pub mod hevc;
+#[cfg(any(feature = "cpu-hevc", feature = "vulkan-video"))]
+pub(crate) mod hevc_order;
 #[cfg(feature = "nvdec")]
 pub mod nvdec;
 #[cfg(any(feature = "openh264", feature = "openh264-cisco"))]
 pub mod openh264;
 #[cfg(feature = "cpu-vp9")]
 pub mod rusty_vp9;
+#[cfg(any(feature = "cpu-vp9", feature = "vulkan-video"))]
+pub(crate) mod vp9_frame;
 
 pub use codec::{ChromaFormat, DecodeCodec, PixelFormat};
 #[cfg(any(feature = "openh264", feature = "openh264-cisco"))]
 pub(crate) use color::unspecified_color;
-#[cfg(any(feature = "nvdec", feature = "cpu-vp9"))]
+#[cfg(any(feature = "nvdec", feature = "cpu-vp9", feature = "vulkan-video"))]
 pub(crate) use color::vp9_matrix;
 #[cfg(any(
     feature = "openh264",

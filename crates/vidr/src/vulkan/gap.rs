@@ -1,10 +1,14 @@
 //! Vulkan structures that `ash` 0.38 lacks, written from `vulkan_core.h`.
 //!
-//! This holds the VP9 decode session's `pNext` layouts. The VP9 unit adds the
-//! `StdVideo` picture structures behind `VkVideoDecodeVP9PictureInfoKHR`, and
-//! `p_std_picture_info` stays an untyped pointer until then.
+//! This holds the VP9 decode session's `pNext` layouts and the `StdVideo` picture structures
+//! of `vulkan_video_codec_vp9std.h` and `vulkan_video_codec_vp9std_decode.h`. One test checks
+//! the `pNext` offsets against values worked by hand from `vulkan_core.h`. The other checks
+//! the `StdVideo` offsets against values a C compiler reports for those headers.
 
-#![allow(dead_code, reason = "read by the Vulkan VP9 unit")]
+#![allow(
+    dead_code,
+    reason = "the driver reads these fields, and vidr only writes them"
+)]
 
 use std::ffi::{CStr, c_void};
 
@@ -53,12 +57,86 @@ pub(super) struct VideoDecodeVp9Capabilities {
 pub(super) struct VideoDecodeVp9PictureInfo {
     pub(super) s_type: vk::StructureType,
     pub(super) p_next: *const c_void,
-    /// `const StdVideoDecodeVP9PictureInfo*`.
-    pub(super) p_std_picture_info: *const c_void,
+    pub(super) p_std_picture_info: *const StdVideoDecodeVp9PictureInfo,
     pub(super) reference_name_slot_indices: [i32; MAX_VP9_REFERENCES],
     pub(super) uncompressed_header_offset: u32,
     pub(super) compressed_header_offset: u32,
     pub(super) tiles_offset: u32,
+}
+
+// SAFETY: `p_next` stays null and nothing reads through it, so a move to another thread
+// carries no shared pointer.
+unsafe impl Send for VideoDecodeVp9ProfileInfo {}
+
+/// `StdVideoVP9ColorConfig`. Bit 0 of `flags` is `color_range`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StdVideoVp9ColorConfig {
+    pub(super) flags: u32,
+    pub(super) bit_depth: u8,
+    pub(super) subsampling_x: u8,
+    pub(super) subsampling_y: u8,
+    pub(super) reserved1: u8,
+    /// `StdVideoVP9ColorSpace`.
+    pub(super) color_space: u32,
+}
+
+/// `StdVideoVP9LoopFilter`. In `flags`, bit 0 is `loop_filter_delta_enabled` and bit 1 is
+/// `loop_filter_delta_update`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StdVideoVp9LoopFilter {
+    pub(super) flags: u32,
+    pub(super) loop_filter_level: u8,
+    pub(super) loop_filter_sharpness: u8,
+    pub(super) update_ref_delta: u8,
+    pub(super) loop_filter_ref_deltas: [i8; 4],
+    pub(super) update_mode_delta: u8,
+    pub(super) loop_filter_mode_deltas: [i8; 2],
+}
+
+/// `StdVideoVP9Segmentation`. In `flags`, bits 0 to 3 are `segmentation_update_map`,
+/// `segmentation_temporal_update`, `segmentation_update_data`, and
+/// `segmentation_abs_or_delta_update`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StdVideoVp9Segmentation {
+    pub(super) flags: u32,
+    pub(super) segmentation_tree_probs: [u8; 7],
+    pub(super) segmentation_pred_prob: [u8; 3],
+    /// One bit per feature, for each segment.
+    pub(super) feature_enabled: [u8; 8],
+    pub(super) feature_data: [[i16; 4]; 8],
+}
+
+/// `StdVideoDecodeVP9PictureInfo`. In `flags`, bits 0 to 7 are `error_resilient_mode`,
+/// `intra_only`, `allow_high_precision_mv`, `refresh_frame_context`,
+/// `frame_parallel_decoding_mode`, `segmentation_enabled`, `show_frame`, and
+/// `UsePrevFrameMvs`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct StdVideoDecodeVp9PictureInfo {
+    pub(super) flags: u32,
+    /// `StdVideoVP9Profile`.
+    pub(super) profile: u32,
+    /// `StdVideoVP9FrameType`.
+    pub(super) frame_type: u32,
+    pub(super) frame_context_idx: u8,
+    pub(super) reset_frame_context: u8,
+    pub(super) refresh_frame_flags: u8,
+    pub(super) ref_frame_sign_bias_mask: u8,
+    /// `StdVideoVP9InterpolationFilter`.
+    pub(super) interpolation_filter: u32,
+    pub(super) base_q_idx: u8,
+    pub(super) delta_q_y_dc: i8,
+    pub(super) delta_q_uv_dc: i8,
+    pub(super) delta_q_uv_ac: i8,
+    pub(super) tile_cols_log2: u8,
+    pub(super) tile_rows_log2: u8,
+    pub(super) reserved1: [u16; 3],
+    pub(super) p_color_config: *const StdVideoVp9ColorConfig,
+    pub(super) p_loop_filter: *const StdVideoVp9LoopFilter,
+    pub(super) p_segmentation: *const StdVideoVp9Segmentation,
 }
 
 /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_DECODE_VP9_FEATURES_KHR`.
@@ -110,6 +188,49 @@ mod tests {
             40
         );
         assert_eq!(offset_of!(VideoDecodeVp9PictureInfo, tiles_offset), 44);
+    }
+
+    /// Offsets a C compiler reports for `vulkan_video_codec_vp9std*.h`.
+    #[test]
+    fn std_layouts_match_the_headers() {
+        assert_eq!(size_of::<StdVideoVp9ColorConfig>(), 12);
+        assert_eq!(offset_of!(StdVideoVp9ColorConfig, bit_depth), 4);
+        assert_eq!(offset_of!(StdVideoVp9ColorConfig, color_space), 8);
+        assert_eq!(size_of::<StdVideoVp9LoopFilter>(), 16);
+        assert_eq!(offset_of!(StdVideoVp9LoopFilter, loop_filter_ref_deltas), 7);
+        assert_eq!(offset_of!(StdVideoVp9LoopFilter, update_mode_delta), 11);
+        assert_eq!(
+            offset_of!(StdVideoVp9LoopFilter, loop_filter_mode_deltas),
+            12
+        );
+        assert_eq!(size_of::<StdVideoVp9Segmentation>(), 88);
+        assert_eq!(
+            offset_of!(StdVideoVp9Segmentation, segmentation_pred_prob),
+            11
+        );
+        assert_eq!(offset_of!(StdVideoVp9Segmentation, feature_enabled), 14);
+        assert_eq!(offset_of!(StdVideoVp9Segmentation, feature_data), 22);
+        assert_eq!(size_of::<StdVideoDecodeVp9PictureInfo>(), 56);
+        assert_eq!(align_of::<StdVideoDecodeVp9PictureInfo>(), 8);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, profile), 4);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, frame_type), 8);
+        assert_eq!(
+            offset_of!(StdVideoDecodeVp9PictureInfo, frame_context_idx),
+            12
+        );
+        assert_eq!(
+            offset_of!(StdVideoDecodeVp9PictureInfo, ref_frame_sign_bias_mask),
+            15
+        );
+        assert_eq!(
+            offset_of!(StdVideoDecodeVp9PictureInfo, interpolation_filter),
+            16
+        );
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, base_q_idx), 20);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, tile_cols_log2), 24);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, p_color_config), 32);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, p_loop_filter), 40);
+        assert_eq!(offset_of!(StdVideoDecodeVp9PictureInfo, p_segmentation), 48);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::task::{Context, Poll, Waker};
 use ash::vk;
 use wgpu::hal::api::Vulkan;
 
+use super::gap::{self, PhysicalDeviceVideoDecodeVp9Features};
 use crate::error::DecodeError;
 
 /// The family wgpu-hal opens its queue on.
@@ -22,6 +23,16 @@ pub(super) const REQUIRED_EXTENSIONS: [&CStr; 4] = [
     ash::khr::video_decode_queue::NAME,
     ash::khr::video_decode_h264::NAME,
     ash::khr::synchronization2::NAME,
+];
+
+/// Device extensions for one more codec. A device can lack them, and a stream of that codec
+/// is then refused by name.
+pub(super) const CODEC_EXTENSIONS: [(&CStr, vk::VideoCodecOperationFlagsKHR); 2] = [
+    (
+        ash::khr::video_decode_h265::NAME,
+        vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+    ),
+    (gap::VIDEO_DECODE_VP9_NAME, gap::DECODE_VP9),
 ];
 
 /// One queue family as the driver lists it.
@@ -43,6 +54,8 @@ pub(super) struct DeviceFacts {
     pub(super) families: Vec<FamilyFacts>,
     pub(super) synchronization2: bool,
     pub(super) timeline_semaphore: bool,
+    /// The `videoDecodeVP9` feature.
+    pub(super) video_decode_vp9: bool,
 }
 
 /// Where a device's video work runs.
@@ -54,6 +67,8 @@ pub(super) struct Placement {
     pub(super) video_queue_index: u32,
     /// Whether the family reports decode status through queries.
     pub(super) status_queries: bool,
+    /// The codecs that family decodes and whose extensions the device lists.
+    pub(super) decode_ops: vk::VideoCodecOperationFlagsKHR,
 }
 
 /// Places H.264 decode on `facts`, or states what the device lacks.
@@ -114,7 +129,26 @@ pub(super) fn place(facts: &DeviceFacts) -> Result<Placement, String> {
         video_family,
         video_queue_index: u32::from(shares_general),
         status_queries: family.status_queries,
+        decode_ops: usable_ops(facts, family.video_ops),
     })
+}
+
+/// The codecs of `family_ops` that the device can turn on: H.264, which [`place`] requires,
+/// and each other codec whose extension the device lists. VP9 also needs its feature.
+fn usable_ops(
+    facts: &DeviceFacts,
+    family_ops: vk::VideoCodecOperationFlagsKHR,
+) -> vk::VideoCodecOperationFlagsKHR {
+    let mut ops = vk::VideoCodecOperationFlagsKHR::DECODE_H264;
+    for (name, op) in CODEC_EXTENSIONS {
+        let name = name.to_string_lossy();
+        let listed = facts.extensions.iter().any(|listed| *listed == *name);
+        let enabled = op != gap::DECODE_VP9 || facts.video_decode_vp9;
+        if listed && enabled && family_ops.contains(op) {
+            ops |= op;
+        }
+    }
+    ops
 }
 
 /// Runs a future that never waits on an event. wgpu's adapter list on native is one.
@@ -151,6 +185,19 @@ pub(super) fn read_facts(
 
     let mut synchronization2 = vk::PhysicalDeviceSynchronization2Features::default();
     let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+    let mut vp9 = PhysicalDeviceVideoDecodeVp9Features {
+        s_type: gap::TYPE_VP9_FEATURES,
+        p_next: std::ptr::null_mut(),
+        video_decode_vp9: vk::FALSE,
+    };
+    // A driver without the extension does not know this structure, so it stays out.
+    let lists_vp9 = listed
+        .iter()
+        .filter_map(|extension| extension.extension_name_as_c_str().ok())
+        .any(|name| name == gap::VIDEO_DECODE_VP9_NAME);
+    if lists_vp9 {
+        timeline.p_next = std::ptr::from_mut(&mut vp9).cast();
+    }
     let mut features = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut synchronization2)
         .push_next(&mut timeline);
@@ -165,6 +212,7 @@ pub(super) fn read_facts(
         families: read_families(instance, physical),
         synchronization2: synchronization2.synchronization2 == vk::TRUE,
         timeline_semaphore: timeline.timeline_semaphore == vk::TRUE,
+        video_decode_vp9: vp9.video_decode_vp9 == vk::TRUE,
     })
 }
 
@@ -277,6 +325,7 @@ mod tests {
             families,
             synchronization2: true,
             timeline_semaphore: true,
+            video_decode_vp9: false,
         }
     }
 
@@ -294,6 +343,7 @@ mod tests {
                 video_family: 2,
                 video_queue_index: 0,
                 status_queries: true,
+                decode_ops: vk::VideoCodecOperationFlagsKHR::DECODE_H264,
             })
         );
     }
@@ -311,6 +361,36 @@ mod tests {
         let single = FamilyFacts { count: 1, ..both };
         let refused = place(&device(vec![single])).expect_err("refused");
         assert!(refused.contains("one queue"), "{refused}");
+    }
+
+    #[test]
+    fn other_codecs_need_the_family_the_extension_and_the_feature() {
+        let hevc_vp9 = vk::VideoCodecOperationFlagsKHR::DECODE_H264
+            | vk::VideoCodecOperationFlagsKHR::DECODE_H265
+            | gap::DECODE_VP9;
+        let family = FamilyFacts {
+            video_ops: hevc_vp9,
+            ..decode_family()
+        };
+        let mut facts = device(vec![general(), family]);
+        let ops = |facts: &DeviceFacts| place(facts).expect("placed").decode_ops;
+        assert_eq!(ops(&facts), vk::VideoCodecOperationFlagsKHR::DECODE_H264);
+
+        facts.extensions.push("VK_KHR_video_decode_h265".to_owned());
+        facts.extensions.push("VK_KHR_video_decode_vp9".to_owned());
+        assert_eq!(
+            ops(&facts),
+            vk::VideoCodecOperationFlagsKHR::DECODE_H264
+                | vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+            "VP9 waits for its feature"
+        );
+        facts.video_decode_vp9 = true;
+        assert_eq!(ops(&facts), hevc_vp9);
+
+        // A family that lists fewer codecs than the device's extensions gives fewer.
+        let mut narrow = facts.clone();
+        narrow.families[1].video_ops = vk::VideoCodecOperationFlagsKHR::DECODE_H264;
+        assert_eq!(ops(&narrow), vk::VideoCodecOperationFlagsKHR::DECODE_H264);
     }
 
     #[test]

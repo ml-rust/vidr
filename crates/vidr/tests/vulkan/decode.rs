@@ -13,12 +13,12 @@ use vidr::frame::to_rgb;
 use vidr::vulkan::{DpbPreference, VulkanDecoder};
 
 use super::support::{
-    annexb_units, assert_no_validation_errors, assert_same_bytes, decode_all, device, nv12_bytes,
+    annexb_units, assert_no_validation_errors, assert_same_bytes, decode_all, device, frame_bytes,
     samples,
 };
 use crate::decode_fixtures::{Stream, load};
 
-/// Baseline, Main, High, B-frames, a B pyramid, reference marking commands, several
+/// Baseline, Main, High, B-frames, a B pyramid, and reference marking commands. Also several
 /// slices per picture, scaling lists, a VUI chroma location, and CAVLC with POC type 2.
 const STREAMS: [&str; 8] = [
     "h264_baseline",
@@ -57,7 +57,7 @@ fn check_stream(stream: &Stream, frames: &[DecodedFrame<numr::runtime::wgpu::Wgp
     let Some(yuv) = &stream.yuv else {
         panic!("{name}: the fixture has no .yuv");
     };
-    assert_same_bytes(&nv12_bytes(frames, name), yuv, name);
+    assert_same_bytes(&frame_bytes(frames, name), yuv, name);
 }
 
 /// Container samples in each DPB mode the driver lists.
@@ -134,7 +134,7 @@ fn decode_joined(
 }
 
 /// High, then Main at an IDR picture, with one size and one `max_dec_frame_buffering`.
-/// The SPS changes the profile, so a new session opens, every frame of the first sequence
+/// The SPS changes the profile, so a new session opens. Every frame of the first sequence
 /// leaves first, and both stay byte-exact.
 #[test]
 fn a_parameter_set_change_at_idr_opens_a_new_session() {
@@ -156,7 +156,7 @@ fn a_parameter_set_change_at_idr_opens_a_new_session() {
     };
     let mut yuv = first_yuv.clone();
     yuv.extend_from_slice(second_yuv);
-    assert_same_bytes(&nv12_bytes(&frames, name), &yuv, name);
+    assert_same_bytes(&frame_bytes(&frames, name), &yuv, name);
     assert_no_validation_errors(&device, name);
 }
 
@@ -182,7 +182,7 @@ fn a_new_buffer_size_at_idr_keeps_each_waiting_frame() {
     };
     let mut yuv = first_yuv.clone();
     yuv.extend_from_slice(second_yuv);
-    assert_same_bytes(&nv12_bytes(&frames, name), &yuv, name);
+    assert_same_bytes(&frame_bytes(&frames, name), &yuv, name);
     assert_no_validation_errors(&device, name);
 }
 

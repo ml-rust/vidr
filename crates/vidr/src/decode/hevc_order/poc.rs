@@ -2,7 +2,7 @@
 //! classes they read.
 
 /// True for `nal_unit_type` from `BLA_W_LP` to `RSV_IRAP_VCL23`.
-const fn is_irap(nal_unit_type: u8) -> bool {
+pub(crate) const fn is_irap(nal_unit_type: u8) -> bool {
     matches!(nal_unit_type, 16..=23)
 }
 
@@ -12,7 +12,7 @@ pub(crate) const fn is_bla(nal_unit_type: u8) -> bool {
 }
 
 /// True for `IDR_W_RADL` and `IDR_N_LP`.
-const fn is_idr(nal_unit_type: u8) -> bool {
+pub(crate) const fn is_idr(nal_unit_type: u8) -> bool {
     matches!(nal_unit_type, 19 | 20)
 }
 

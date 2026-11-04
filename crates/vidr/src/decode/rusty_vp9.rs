@@ -12,13 +12,10 @@ use ::rusty_vp9::{DecodedFrame as Picture, Error as LibraryError, Vp9Decoder as 
 use numr::dtype::DType;
 use numr::runtime::Runtime;
 
-use super::{
-    ColorFacts, DecodedFrame, Decoder, MATRIX_UNSPECIFIED, PRIMARIES_UNSPECIFIED, PixelFormat,
-    TRANSFER_UNSPECIFIED, vp9_matrix,
-};
+use super::vp9_frame::{VP9_UNSTATED, check_layout, vp9_color_facts};
+use super::{ColorFacts, DecodedFrame, Decoder, PixelFormat};
 use crate::bitstream::{
-    ColorConfig, NUM_REF_FRAMES, RefFrameTable, UncompressedHeader, Vp9HeaderParser,
-    split_superframe,
+    NUM_REF_FRAMES, RefFrameTable, UncompressedHeader, Vp9HeaderParser, split_superframe,
 };
 use crate::error::DecodeError;
 use crate::frame::{HostPlanes, upload_planes, upload_route};
@@ -26,15 +23,6 @@ use crate::geometry::Dimensions;
 use crate::route::FrameRoute;
 
 const DECODER: &str = "rusty_vp9";
-
-/// Colour before any frame states one.
-const UNSTATED: ColorFacts = ColorFacts {
-    matrix_coefficients: MATRIX_UNSPECIFIED,
-    transfer_characteristics: TRANSFER_UNSPECIFIED,
-    colour_primaries: PRIMARIES_UNSPECIFIED,
-    full_range: false,
-    chroma_location: None,
-};
 
 /// VP9 software decode into numr tensors on any backend.
 ///
@@ -92,7 +80,7 @@ where
             library: Library::new(),
             parser: Vp9HeaderParser::new(),
             refs: RefFrameTable::default(),
-            slots: [UNSTATED; NUM_REF_FRAMES],
+            slots: [VP9_UNSTATED; NUM_REF_FRAMES],
             frames: VecDeque::new(),
             flushed: false,
             error: None,
@@ -116,11 +104,11 @@ where
         let mut shown = None;
         for frame in coded {
             let header = self.parser.parse(frame, &self.refs)?;
-            check_layout(&header)?;
+            check_layout(DECODER, &header)?;
             let color = if header.show_existing_frame {
                 self.slots[usize::from(header.frame_to_show_map_idx)]
             } else {
-                color_facts(&header.color_config)
+                vp9_color_facts(&header.color_config)
             };
             if let Some(picture) = self.decode_one(frame, &header, pts)? {
                 shown = Some((picture, color));
@@ -170,38 +158,6 @@ where
                 *stored = color;
             }
         }
-    }
-}
-
-/// Refuses a frame header with no vidr frame. A `show_existing_frame` header
-/// states no layout, and the frame it repeats passed this check.
-fn check_layout(header: &UncompressedHeader) -> Result<(), DecodeError> {
-    if header.show_existing_frame {
-        return Ok(());
-    }
-    let color = &header.color_config;
-    let takes = matches!(header.profile, 0 | 2)
-        && color.subsampling_x
-        && color.subsampling_y
-        && PixelFormat::for_bit_depth(color.bit_depth).is_some();
-    if takes {
-        return Ok(());
-    }
-    Err(DecodeError::Vp9Layout {
-        decoder: DECODER,
-        profile: header.profile,
-        bit_depth: color.bit_depth,
-        subsampling_x: color.subsampling_x,
-        subsampling_y: color.subsampling_y,
-    })
-}
-
-/// Colour from the header parser. The crate exposes no range on its frames.
-fn color_facts(color: &ColorConfig) -> ColorFacts {
-    ColorFacts {
-        matrix_coefficients: vp9_matrix(color.color_space),
-        full_range: color.color_range,
-        ..UNSTATED
     }
 }
 
@@ -335,6 +291,8 @@ mod tests {
     use numr::runtime::cpu::CpuRuntime;
 
     use super::*;
+    use crate::bitstream::ColorConfig;
+    use crate::decode::{PRIMARIES_UNSPECIFIED, TRANSFER_UNSPECIFIED};
 
     fn header(profile: u8, bit_depth: u8, x: bool, y: bool) -> UncompressedHeader {
         UncompressedHeader {
@@ -352,8 +310,8 @@ mod tests {
 
     #[test]
     fn profiles_0_and_2_at_8_or_10_bits_pass() {
-        assert_eq!(check_layout(&header(0, 8, true, true)), Ok(()));
-        assert_eq!(check_layout(&header(2, 10, true, true)), Ok(()));
+        assert_eq!(check_layout(DECODER, &header(0, 8, true, true)), Ok(()));
+        assert_eq!(check_layout(DECODER, &header(2, 10, true, true)), Ok(()));
     }
 
     #[test]
@@ -367,7 +325,7 @@ mod tests {
             (3, 12, true, false),
         ] {
             assert_eq!(
-                check_layout(&header(profile, depth, x, y)),
+                check_layout(DECODER, &header(profile, depth, x, y)),
                 Err(DecodeError::Vp9Layout {
                     decoder: DECODER,
                     profile,
@@ -386,7 +344,7 @@ mod tests {
             show_existing_frame: true,
             ..UncompressedHeader::default()
         };
-        assert_eq!(check_layout(&repeat), Ok(()));
+        assert_eq!(check_layout(DECODER, &repeat), Ok(()));
     }
 
     #[test]
@@ -399,7 +357,7 @@ mod tests {
             subsampling_y: true,
         };
         assert_eq!(
-            color_facts(&color),
+            vp9_color_facts(&color),
             ColorFacts {
                 matrix_coefficients: 5,
                 transfer_characteristics: TRANSFER_UNSPECIFIED,

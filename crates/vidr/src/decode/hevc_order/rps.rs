@@ -37,7 +37,7 @@ impl<T: Copy + Default> PocList<T> {
     }
 
     /// Appends an entry from a test in another module.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cpu-hevc"))]
     pub(crate) fn push_for_tests(&mut self, entry: T) {
         self.push(entry);
     }
@@ -181,7 +181,7 @@ mod tests {
 
     /// (8-5): an entry with no MSB keeps its LSB. `Spec::default` gives a
     /// MaxPicOrderCntLsb of 256. An entry with the MSB is at POC
-    /// 3 + 40 - 1 * 256 - ( 40 & 255 ), which is -253.
+    /// 3 + 40 - 1 * 256 - ( 40 & 255 ). That POC is -253.
     #[test]
     fn long_term_entries_follow_the_msb_flag() {
         let mut header = header();

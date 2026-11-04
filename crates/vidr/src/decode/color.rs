@@ -44,7 +44,7 @@ pub const PRIMARIES_UNSPECIFIED: u8 = 2;
 /// | 5 | BT.2020 | 9 |
 /// | 6 | reserved | 2 |
 /// | 7 | sRGB | 0 |
-#[cfg(any(feature = "nvdec", feature = "cpu-vp9"))]
+#[cfg(any(feature = "nvdec", feature = "cpu-vp9", feature = "vulkan-video"))]
 pub(crate) const fn vp9_matrix(color_space: u8) -> u8 {
     match color_space {
         1 => MATRIX_BT470BG,

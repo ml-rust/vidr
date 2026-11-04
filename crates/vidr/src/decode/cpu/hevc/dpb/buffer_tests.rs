@@ -83,22 +83,25 @@ fn the_rps_finds_short_term_pictures_and_marks_the_rest_unused() {
     store(&mut dpb, 0, false);
     store(&mut dpb, 1, false);
     store(&mut dpb, 2, false);
-    let sets = dpb
-        .apply_rps(&rps(3, &[-1], &[-3]), MAX_LSB, false)
-        .unwrap();
+    let sets = dpb.apply_rps(&rps(3, &[-1], &[-3]), MAX_LSB, false);
     assert_eq!(sets.before.len(), 1);
     assert_eq!(sets.before[0].frame.as_ref().unwrap().poc, 2);
     assert!(sets.missing_foll.is_empty());
     // POC 1 is out of the set and waits for no output, so it leaves.
     dpb.before_picture(false, false, &LIMITS);
-    let pocs: Vec<i32> = dpb.entries.iter().map(|entry| entry.frame.poc).collect();
+    let pocs: Vec<i32> = dpb
+        .core
+        .entries
+        .iter()
+        .map(|entry| entry.frame.poc)
+        .collect();
     assert!(pocs.contains(&0) && pocs.contains(&2) && !pocs.contains(&1));
 }
 
 #[test]
 fn a_missing_current_entry_holds_no_picture() {
     let mut dpb = Dpb::<u8>::new();
-    let sets = dpb.apply_rps(&rps(3, &[-1], &[1]), MAX_LSB, false).unwrap();
+    let sets = dpb.apply_rps(&rps(3, &[-1], &[1]), MAX_LSB, false);
     assert!(sets.before[0].frame.is_none());
     assert_eq!(sets.before[0].poc, 2);
     assert_eq!(sets.missing_foll, vec![(4, false)]);
@@ -109,7 +112,7 @@ fn a_missing_current_entry_holds_no_picture() {
 fn an_irap_picture_marks_every_picture_unused() {
     let mut dpb = Dpb::<u8>::new();
     store(&mut dpb, 0, false);
-    let sets = dpb.apply_rps(&rps(3, &[-3], &[]), MAX_LSB, true).unwrap();
+    let sets = dpb.apply_rps(&rps(3, &[-3], &[]), MAX_LSB, true);
     assert!(sets.before[0].frame.is_none());
 }
 
@@ -123,13 +126,11 @@ fn a_long_term_entry_matches_its_lsb_and_changes_the_marking() {
         poc: 5,
         msb_present: false,
     });
-    let sets = dpb.apply_rps(&lists, MAX_LSB, false).unwrap();
+    let sets = dpb.apply_rps(&lists, MAX_LSB, false);
     assert_eq!(sets.long_term[0].frame.as_ref().unwrap().poc, 261);
-    assert_eq!(dpb.entries[0].marking, Marking::LongTerm);
+    assert_eq!(dpb.core.entries[0].marking, Marking::LongTerm);
     // A short-term search no longer finds it.
-    let sets = dpb
-        .apply_rps(&rps(300, &[-39], &[]), MAX_LSB, false)
-        .unwrap();
+    let sets = dpb.apply_rps(&rps(300, &[-39], &[]), MAX_LSB, false);
     assert!(sets.before[0].frame.is_none());
 }
 
@@ -157,7 +158,7 @@ fn a_picture_with_no_output_flag_is_never_output() {
     store(&mut dpb, 1, true);
     dpb.flush();
     assert_eq!(outputs(&mut dpb), vec![1]);
-    assert_eq!(dpb.entries.len(), 2);
+    assert_eq!(dpb.core.entries.len(), 2);
 }
 
 /// C.5.2.2: the DPB size forces a picture out before the reorder limit does.
@@ -174,10 +175,10 @@ fn a_full_buffer_bumps_before_the_next_picture() {
     let second = frame(&mut dpb, 2);
     dpb.insert(second, true, &limits);
     assert_eq!(outputs(&mut dpb), Vec::<i32>::new());
-    dpb.apply_rps(&rps(3, &[], &[]), MAX_LSB, false).unwrap();
+    dpb.apply_rps(&rps(3, &[], &[]), MAX_LSB, false);
     dpb.before_picture(false, false, &limits);
     assert_eq!(outputs(&mut dpb), vec![1]);
-    assert_eq!(dpb.entries.len(), 1);
+    assert_eq!(dpb.core.entries.len(), 1);
 }
 
 /// C.5.2.2: a full buffer with nothing to output stops the bumping loop.
@@ -192,7 +193,7 @@ fn a_full_buffer_of_references_does_not_loop() {
     let first = frame(&mut dpb, 1);
     dpb.insert(first, false, &limits);
     dpb.before_picture(false, false, &limits);
-    assert_eq!(dpb.entries.len(), 1);
+    assert_eq!(dpb.core.entries.len(), 1);
 }
 
 /// C.5.2.3: `PicLatencyCount` grows only for waiting pictures that follow the current
@@ -224,23 +225,23 @@ fn prior_pictures_follow_the_flag() {
     store(&mut dpb, 6, true);
     dpb.before_picture(true, false, &LIMITS);
     assert_eq!(outputs(&mut dpb), vec![5, 6]);
-    assert!(dpb.entries.is_empty());
+    assert!(dpb.core.entries.is_empty());
 
     store(&mut dpb, 5, true);
     store(&mut dpb, 6, true);
     dpb.before_picture(true, true, &LIMITS);
     assert_eq!(outputs(&mut dpb), Vec::<i32>::new());
-    assert!(dpb.entries.is_empty());
+    assert!(dpb.core.entries.is_empty());
 }
 
 /// 8.3.3: a missing "Foll" entry gets a grey picture with no output and no motion.
 #[test]
 fn a_missing_foll_entry_gets_a_grey_picture() {
     let mut dpb = Dpb::<u8>::new();
-    let sets = dpb.apply_rps(&rps(8, &[], &[-4]), MAX_LSB, true).unwrap();
+    let sets = dpb.apply_rps(&rps(8, &[], &[-4]), MAX_LSB, true);
     dpb.generate_unavailable(&sets, &FORMAT).unwrap();
-    assert_eq!(dpb.entries.len(), 1);
-    let entry = &dpb.entries[0];
+    assert_eq!(dpb.core.entries.len(), 1);
+    let entry = &dpb.core.entries[0];
     assert_eq!(entry.frame.poc, 4);
     assert_eq!(entry.marking, Marking::ShortTerm);
     assert!(!entry.needed_for_output);
@@ -257,9 +258,9 @@ fn a_missing_foll_entry_gets_a_grey_picture() {
 fn a_finished_buffer_is_reused() {
     let mut dpb = Dpb::<u8>::new();
     store(&mut dpb, 0, false);
-    dpb.apply_rps(&rps(1, &[], &[]), MAX_LSB, false).unwrap();
+    dpb.apply_rps(&rps(1, &[], &[]), MAX_LSB, false);
     dpb.before_picture(false, false, &LIMITS);
-    assert!(dpb.entries.is_empty());
+    assert!(dpb.core.entries.is_empty());
     assert_eq!(dpb.free.len(), 1);
     let _reused = dpb.take_frame(&FORMAT).unwrap();
     assert!(dpb.free.is_empty());
@@ -270,7 +271,7 @@ fn a_finished_buffer_is_reused() {
 fn a_held_output_is_not_reused() {
     let mut dpb = Dpb::<u8>::new();
     store(&mut dpb, 0, true);
-    dpb.apply_rps(&rps(1, &[], &[]), MAX_LSB, false).unwrap();
+    dpb.apply_rps(&rps(1, &[], &[]), MAX_LSB, false);
     dpb.flush();
     let held = dpb.pop_output();
     assert!(held.is_some());

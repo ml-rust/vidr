@@ -46,6 +46,9 @@ INTER = ["--frame-threads", "1", "--hash", "1", "--crf", "30"]
 
 # (name, size, bit depth, frames, source, x265 arguments).
 STREAMS = [
+    # The default scaling lists of Tables 7-5 and 7-6.
+    ("scaling_default_8", "128x96", 8, 8, MOVING, [*INTER, "--scaling-list", "default"]),
+    ("scaling_default_10", "128x96", 10, 8, MOVING, [*INTER, "--scaling-list", "default"]),
     # H8: no in-loop filters.
     ("intra_8", "128x96", 8, 3, BUSY, [*INTRA, *NO_FILTERS, *NO_WPP, "--crf", "30"]),
     ("intra_10", "128x96", 10, 3, BUSY, [*INTRA, *NO_FILTERS, *NO_WPP, "--crf", "30"]),
@@ -337,7 +340,30 @@ EDITS = {
 
 # The streams ffmpeg 9.0.2 decodes wrongly in chroma. The hash SEI message, NVDEC, and dec265
 # agree with x265's reconstruction, so that reconstruction is the reference.
-RECON_REFERENCE = {"wavefront_inter_8", "slices_inter_8"}
+RECON_REFERENCE = {
+    "wavefront_inter_8", "slices_inter_8", "ctu16_inter_8_vk", "cu_lossless_inter_8_vk",
+}
+
+# The streams Vulkan Video tests read. Drivers state a minimum coded size, so each gets a
+# copy named `NAME_vk` with both sides scaled to reach this shorter side. x265 labels short
+# all-intra streams with a range extensions profile, and Vulkan Video refuses that, so those
+# stay out.
+VULKAN_MIN_SIDE = 144
+VULKAN_STREAMS = {
+    "inter_8", "bframes_8", "bframes_10", "b_pyramid_8", "b_pyramid_10", "p_only_8", "p_only_10",
+    "slices_inter_8", "wavefront_8", "wavefront_inter_8", "weightp_8", "weightp_10", "weightb_8",
+    "weightb_10", "scaling_default_8", "scaling_default_10", "window_inter_8", "open_gop_8",
+    "end_of_sequence_8", "poc_wrap_8", "long_gop_8", "refs_4_8", "amp_8", "amp_10", "tmvp_off_8",
+    "cu_lossless_inter_8", "rect_8", "ctu16_inter_8", "rasl_cut_8", "no_output_prior_8",
+}
+
+
+def vulkan_copy(stream):
+    """The same stream at a size every driver takes."""
+    name, size, depth, frames, source, x265_args = stream
+    width, height = (int(side) for side in size.split("x"))
+    scale = -(-VULKAN_MIN_SIDE // min(width, height))
+    return (f"{name}_vk", f"{width * scale}x{height * scale}", depth, frames, source, x265_args)
 
 
 def run(tool, args):
@@ -350,21 +376,23 @@ def run(tool, args):
 def generate(out, stream):
     """Writes one stream and ffmpeg's decode of it."""
     name, size, depth, frames, source, x265_args = stream
+    base = name.removesuffix("_vk")
+    recon = name in RECON_REFERENCE or base in RECON_REFERENCE
     pix_fmt = "yuv420p" if depth == 8 else "yuv420p10le"
     raw = out / f"{name}.source.raw"
     hevc = out / f"{name}.hevc"
     run("ffmpeg", [*QUIET, "-f", "lavfi", "-i", f"{source.format(size=size)},format={pix_fmt}",
                    "-frames:v", str(frames), "-f", "rawvideo", str(raw)])
     yuv = out / f"{name}.yuv"
-    recon_args = ["--recon", str(yuv), "--recon-depth", str(depth)] if name in RECON_REFERENCE else []
+    recon_args = ["--recon", str(yuv), "--recon-depth", str(depth)] if recon else []
     run("x265", ["--input", str(raw), "--input-res", size, "--fps", "25",
                  "--input-depth", str(depth), "--input-csp", "i420", "--output-depth", str(depth),
                  "--frames", str(frames), "--log-level", "error", *x265_args, *recon_args,
                  "-o", str(hevc)])
     raw.unlink()
-    if name in EDITS:
-        hevc.write_bytes(join_nals(EDITS[name](split_nals(hevc.read_bytes()))))
-    if name not in RECON_REFERENCE:
+    if base in EDITS:
+        hevc.write_bytes(join_nals(EDITS[base](split_nals(hevc.read_bytes()))))
+    if not recon:
         run("ffmpeg", [*QUIET, "-i", str(hevc), "-fps_mode", "passthrough", "-f", "rawvideo",
                        "-pix_fmt", pix_fmt, str(yuv)])
 
@@ -379,7 +407,8 @@ def main():
         sys.exit(f"skipping: {', '.join(missing)} not on PATH. Install it to generate the "
                  "HEVC fixtures.")
     args.out.mkdir(parents=True, exist_ok=True)
-    for stream in STREAMS:
+    copies = [vulkan_copy(stream) for stream in STREAMS if stream[0] in VULKAN_STREAMS]
+    for stream in [*STREAMS, *copies]:
         if args.only is None or stream[0] in args.only:
             generate(args.out, stream)
 

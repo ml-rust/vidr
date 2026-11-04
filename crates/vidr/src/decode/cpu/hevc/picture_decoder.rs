@@ -135,7 +135,7 @@ pub(crate) fn start_in_buffer<S: Sample, P: StoredPicture<Sample = S>>(
     let max_poc_lsb = 1u32 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
     let rps = RpsPocs::derive(header, sps, begin.poc);
     check_dpb_count(rps.entry_count(), params.width, params.height)?;
-    let sets = dpb.apply_rps(&rps, max_poc_lsb, begin.irap_no_rasl)?;
+    let sets = dpb.apply_rps(&rps, max_poc_lsb, begin.irap_no_rasl);
     let nal_unit_type = header.nal_unit_type;
     // C.5.2.2: a CRA picture sets NoOutputOfPriorPicsFlag to 1.
     let no_output = is_cra(nal_unit_type) || header.no_output_of_prior_pics_flag;

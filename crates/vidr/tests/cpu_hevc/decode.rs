@@ -2,7 +2,6 @@
 //! decoding is bit-exact by specification.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
 use vidr::bitstream::{HevcConfig, ToAnnexB};
@@ -12,7 +11,7 @@ use vidr::{DecodeError, FrameRoute};
 
 use super::packets::nal_packets;
 use crate::decode_fixtures::cpu::{check_frames, decode_all, samples};
-use crate::decode_fixtures::{Stream, load};
+use crate::decode_fixtures::{Stream, load, raw_hevc as raw_fixture};
 
 fn open(config: &[u8], name: &str) -> HevcDecoder<CpuRuntime> {
     HevcDecoder::new(&CpuDevice::new(), config)
@@ -120,26 +119,6 @@ fn a_sample_that_does_not_split_leaves_the_decoder_usable() {
     ));
     let frames = decode_all(&mut decoder, samples(&stream), name);
     check_frames(&stream, &frames, location(&stream));
-}
-
-/// The bytes of `NAME.hevc` and `NAME.yuv`, or `None` after a notice.
-fn raw_fixture(name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-    let dir = std::env::var_os("VIDR_HEVC_FIXTURES").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hevc"),
-        PathBuf::from,
-    );
-    let stream = std::fs::read(dir.join(format!("{name}.hevc"))).ok();
-    let reference = std::fs::read(dir.join(format!("{name}.yuv"))).ok();
-    if let (Some(stream), Some(reference)) = (stream, reference) {
-        return Some((stream, reference));
-    }
-    eprintln!(
-        "skipping: HEVC fixture `{name}` is missing in {}. Run \
-         crates/vidr/tests/fixtures/gen_hevc.py, or set VIDR_HEVC_FIXTURES to its output \
-         directory.",
-        dir.display()
-    );
-    None
 }
 
 /// The planar bytes one frame holds in the fixture's `.yuv`.

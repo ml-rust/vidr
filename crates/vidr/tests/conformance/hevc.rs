@@ -147,11 +147,11 @@ pub(super) fn unzip(flag: &str, zip: &Path, member: Option<&str>) -> Result<Stri
 }
 
 /// The bitstream bytes, and the hash member with its kind.
-#[cfg(feature = "cpu-hevc")]
+#[cfg(any(feature = "cpu-hevc", feature = "vulkan-video"))]
 pub(super) type StreamMembers = (Vec<u8>, Option<(String, HashKind)>);
 
 /// The bitstream of a zip, and the hash member that goes with it.
-#[cfg(feature = "cpu-hevc")]
+#[cfg(any(feature = "cpu-hevc", feature = "vulkan-video"))]
 pub(super) fn read_stream(zip: &Path) -> Result<StreamMembers, String> {
     let listing = unzip("-Z1", zip, None)?;
     let layout = lookup(listing.lines());
@@ -164,7 +164,7 @@ pub(super) fn read_stream(zip: &Path) -> Result<StreamMembers, String> {
 
 /// The zips that `VIDR_HEVC_CONFORMANCE` and `VIDR_HEVC_ONLY` select, or `None` with a
 /// skip notice when the first is unset.
-#[cfg(feature = "cpu-hevc")]
+#[cfg(any(feature = "cpu-hevc", feature = "vulkan-video"))]
 pub(super) fn selected_zips() -> Option<Vec<PathBuf>> {
     let Some(directory) = std::env::var_os("VIDR_HEVC_CONFORMANCE") else {
         eprintln!(

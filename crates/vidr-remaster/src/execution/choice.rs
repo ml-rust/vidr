@@ -170,7 +170,7 @@ pub enum Openh264Build {
 pub enum DecoderBackend {
     /// NVDEC. Frames stay in device memory.
     Nvdec,
-    /// Vulkan Video, H.264. Frames stay in device memory.
+    /// Vulkan Video, H.264, HEVC, or VP9. Frames stay in device memory.
     Vulkan,
     /// `Dav1dDecoder`, AV1.
     Dav1d,

@@ -68,12 +68,14 @@ pipeline = ["decode", "encode", "frame"]
 wgpu = ["numr/wgpu"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
-# Hardware decode on Vulkan Video, H.264 for now, on numr's WebGPU device. vidr
+# Hardware decode on Vulkan Video, H.264, HEVC, and VP9, on numr's WebGPU device. vidr
 # opens that device through wgpu-hal with the video extensions and queue, then
 # numr adopts it. The Vulkan loader loads at run time, so the build links no driver.
 vulkan-video = [
   "frame",
   "h264",
+  "hevc",
+  "vp9",
   "wgpu",
   "dep:ash",
   "dep:h264-reader",

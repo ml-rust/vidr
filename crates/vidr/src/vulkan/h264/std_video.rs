@@ -20,13 +20,7 @@ use h264_reader::nal::sps::{
 };
 
 use super::dpb::RefFrame;
-
-/// A plain C structure for which all-zero bytes are a valid value.
-///
-/// # Safety
-///
-/// Every field of the type accepts all-zero bytes: integers, bitfields, and raw pointers.
-unsafe trait AllZero: Sized {}
+use crate::vulkan::zeroed::{AllZero, zeroed};
 
 // SAFETY: integers, bitfield units, and raw pointers only.
 unsafe impl AllZero for StdVideoH264SequenceParameterSet {}
@@ -44,11 +38,6 @@ unsafe impl AllZero for StdVideoH264PictureParameterSet {}
 unsafe impl AllZero for StdVideoDecodeH264PictureInfoFlags {}
 // SAFETY: as above.
 unsafe impl AllZero for StdVideoDecodeH264ReferenceInfoFlags {}
-
-fn zeroed<T: AllZero>() -> T {
-    // SAFETY: `AllZero` states that all-zero bytes are a valid `T`.
-    unsafe { std::mem::zeroed() }
-}
 
 /// The `StdVideoH264LevelIdc` of `level_idc`, or `None` for a level with no value.
 /// Level 1b, which `level_idc` 9 states in High profiles, takes level 1.1's value.

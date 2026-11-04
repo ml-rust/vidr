@@ -22,7 +22,7 @@ use crate::bitstream::{AvcConfig, H264NalType, ToAnnexB, annexb, h264_sps_vui};
 use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, PixelFormat, vui_color};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
-use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, choose_dpb_mode};
+use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
 use crate::vulkan::copy::copy_planes;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
@@ -160,12 +160,14 @@ fn decode_frame(
         .iter()
         .map(|info| vk::VideoDecodeH264DpbSlotInfoKHR::default().std_reference_info(info))
         .collect();
+    let coded = active.facts.coded;
     let references: Vec<_> = held
         .iter()
         .zip(&dpb_infos)
         .map(|(frame, info)| SlotRef {
             slot: frame.slot,
             codec_info: ptr::from_ref(info).cast(),
+            coded,
         })
         .collect();
     // The setup slot holds the picture as its marking leaves it. The picture info above
@@ -178,15 +180,17 @@ fn decode_frame(
         setup: SlotRef {
             slot: current.slot,
             codec_info: ptr::from_ref(&setup_dpb).cast(),
+            coded,
         },
         references: &references,
         reference,
+        output: true,
         pts,
     };
     // SAFETY: each pointer in `request` names a H.264 structure above, for this H.264
     // session, and each one lives through the call.
     let source = unsafe { active.engine.decode(&request) }?;
-    let (y, uv) = copy_planes(device, &source, active.facts.area)?;
+    let (y, uv) = copy_planes(device, &source, active.facts.area, PixelFormat::Nv12)?;
     Ok(DecodedFrame::from_packed_planes(
         y,
         uv,
@@ -280,17 +284,7 @@ impl H264Decoder {
         let facts = sequence_facts(sps)?;
         let key = SessionKey::of(&facts);
         let nal = self.sps_bytes.get(&id).cloned().unwrap_or_default();
-        let display = Dimensions::new(facts.area.width, facts.area.height).map_err(|_| {
-            DecodeError::DisplayArea {
-                rect: (
-                    facts.area.left as i32,
-                    facts.area.top as i32,
-                    (facts.area.left + facts.area.width) as i32,
-                    (facts.area.top + facts.area.height) as i32,
-                ),
-                coded: facts.coded,
-            }
-        })?;
+        let display = facts.area.display(facts.coded)?;
         let color = vui_color(&h264_sps_vui(&nal)?);
         // The driver answers for every sequence, also for one that keeps its session.
         let profile = VideoProfile::h264(facts.profile_idc);
@@ -337,13 +331,7 @@ impl H264Decoder {
         profile: VideoProfile,
         caps: &DecodeCaps,
     ) -> Result<DecodeEngine, DecodeError> {
-        let mode = choose_dpb_mode(caps.decode_flags, self.preference).map_err(|reason| {
-            DecodeError::VulkanRefused {
-                codec: DecodeCodec::H264,
-                what: "a DPB mode".to_owned(),
-                reason,
-            }
-        })?;
+        let mode = dpb_mode(DecodeCodec::H264, caps.decode_flags, self.preference)?;
         DecodeEngine::new(
             &self.device,
             profile,
@@ -353,6 +341,7 @@ impl H264Decoder {
                 coded: facts.coded,
                 slots: facts.slots(),
                 active_references: facts.max_references,
+                readable_slots: false,
             },
         )
     }

@@ -55,7 +55,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - Frame timing model and output checks
 - H.264, HEVC, and AV1 bitstream filters
 - NVDEC hardware decode and NVENC hardware encode
-- Vulkan Video H.264 decode on numr's WebGPU device, 8-bit 4:2:0 Baseline, Main, and High, frames only. Real-GPU tests pass on NVIDIA's driver only. No AMD or Intel GPU has run it
+- Vulkan Video decode on numr's WebGPU device, frames only: H.264 8-bit 4:2:0 Baseline, Main, and High. HEVC Main, Main 10, and Main Still Picture at 8 or 10 bits. VP9 profiles 0 and 2 at 8 or 10 bits. Real-GPU tests pass on NVIDIA's driver only, in its coincident DPB mode. The HEVC_v1 and libvpx VP9 sweeps show no failure there, and refuse some streams by name at driver limits. No AMD or Intel GPU has run any of it, and no validation layer has run on it
 - CPU codecs, each with one host copy per frame: AV1 decode on dav1d, H.264 Baseline decode and encode on OpenH264. A source build of OpenH264 (`openh264`) gets no Cisco patent cover. Cisco's cover applies only to its own binary, which `openh264-cisco` loads from a path the caller supplies
 - AV1 encode on rav1r, VP9 decode on `rusty_vp9`, and HEVC Main and Main 10 decode on this crate's own core, each with one host copy per frame. See [CPU codecs](#cpu-codecs)
 - Conversion between NV12 or P010 planes and float RGB
@@ -65,7 +65,7 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - Threaded decode, transform, and encode pump
 - The `vidr-remaster` command, on NVDEC and NVENC or on the CPU codecs
 
-Vulkan Video H.264 decode is the only hardware path off NVIDIA, and no GPU off NVIDIA has run it. On WebGPU, a real GPU has run `vidr-remaster` only with `--from-upscaled`, Vulkan H.264 decode, and a CPU encoder. No model has run on WebGPU on a real GPU. The rest of [Scope](#scope) does not work yet.
+Vulkan Video decode is the only hardware path off NVIDIA, and no GPU off NVIDIA has run it. On WebGPU, a real GPU has run `vidr-remaster` only with `--from-upscaled`, Vulkan H.264, HEVC, or VP9 decode, and a CPU encoder. No model has run on WebGPU on a real GPU. The rest of [Scope](#scope) does not work yet.
 
 ## Crates
 
@@ -86,7 +86,7 @@ The output is `clip.fast.restored.mp4` beside the source. It keeps the source's 
 
 ### Requirements
 
-- A decoder and an encoder: the `cuda` build on an NVIDIA GPU, a CPU codec for each side, one of each, or the `vulkan-video` build for H.264 decode with a CPU encoder. NVENC needs driver support for API 13.1. numr's CUDA backend needs `nvcc` at build time.
+- A decoder and an encoder: the `cuda` build on an NVIDIA GPU, a CPU codec for each side, one of each, or the `vulkan-video` build for H.264, HEVC, or VP9 decode with a CPU encoder. NVENC needs driver support for API 13.1. numr's CUDA backend needs `nvcc` at build time.
 - A CPU build holds only the codecs its features name. See [CPU codecs](#cpu-codecs).
 - A model directory that holds the catalog's directory names. Pass it with `--models-dir`, or set `VIDR_MODELS_DIR`.
 
@@ -134,10 +134,10 @@ Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<s
 | Runtime | Decoders | Encoders |
 | ------- | -------- | -------- |
 | `cuda` | NVDEC, CPU | NVENC, CPU |
-| `wgpu` | Vulkan Video for H.264, CPU | CPU |
+| `wgpu` | Vulkan Video for H.264, HEVC, and VP9, CPU | CPU |
 | `cpu` | CPU | CPU |
 
-`auto` prefers CUDA, then WebGPU, then the CPU, and NVDEC and NVENC over CPU codecs. When a library or device is missing, or a hardware decoder refuses the stream, `auto` falls through. Refusals of H.264 slice groups, data partitioning, a `frame_num` gap, field coding, and bit depth count. A stalled GPU queue does not fall through. The run ends with the error that names the stall. An explicit `--decoder nvdec`, `--decoder vulkan`, or `--encoder nvenc` then ends in an error naming what is missing. Under `auto` on `wgpu`, HEVC, AV1, and VP9 take their CPU decoders, and `--decoder vulkan` on them states that the codec is not supported yet. A pair outside the table is refused, and the error names both sides and the pair that works.
+`auto` prefers CUDA, then WebGPU, then the CPU, and NVDEC and NVENC over CPU codecs. When a library or device is missing, or a hardware decoder refuses the stream, `auto` falls through. Refusals of H.264 slice groups, data partitioning, a `frame_num` gap, field coding, and bit depth count. A stalled GPU queue does not fall through. The run ends with the error that names the stall. An explicit `--decoder nvdec`, `--decoder vulkan`, or `--encoder nvenc` then ends in an error naming what is missing. Under `auto` on `wgpu`, AV1 takes its CPU decoder, and `--decoder vulkan` on AV1 states that the codec is not supported yet. A pair outside the table is refused, and the error names both sides and the pair that works.
 
 The output check decodes the output. The run's decoder does this when it reads the output codec, and otherwise NVDEC or the CPU decoder of that codec does. With no such decoder the run stops before any work.
 
@@ -173,6 +173,8 @@ Each refusal ends the run with exit code 1 and leaves no output.
 | An H.264 source that is not Baseline, on OpenH264       | OpenH264's B-slice output differs from the reference        | Use NVDEC or Vulkan Video, or re-encode as Baseline |
 | Vulkan Video with `--runtime cuda` or `--encoder nvenc` | Its frames live on WebGPU tensors                           | Pass `--runtime wgpu`, with `--encoder cpu` |
 | H.264 slice groups, data partitioning, or a `frame_num` gap on Vulkan Video | Vulkan Video has no form for the first two, and vidr does not infer missing frames | Use another decoder, or re-encode |
+| An HEVC picture that binds a reference the DPB lacks, on Vulkan Video | Vulkan Video activates a DPB slot only through a decode | Use another decoder, or start at an earlier IRAP picture |
+| A VP9 frame that grows past its session and keeps references, on Vulkan Video | A new session holds none of the references | Use another decoder, or call `VulkanDecoder::with_max_coded_size` in library code |
 | An H.264 IDR picture that drops waiting frames on Vulkan Video: `no_output_of_prior_pics_flag` 1, or a new size or `max_dec_frame_buffering` | ITU-T H.264 C.4.4 removes them, so frames no longer match packets and the scan refuses the count | Use another decoder, or re-encode |
 | A codec, a runtime, or `--openh264-library` not in the build | The feature is off                                     | Rebuild with the feature the error names  |
 | A candidate from another encoder                        | The sidecar names another encoder                           | Pass `--from-upscaled` or `--force-ai`    |

@@ -10,13 +10,18 @@
 //! | `session` | Profiles, queries, the video session, its memory, and its parameters |
 //! | `pictures` | DPB images in the form the capabilities require |
 //! | `engine` | One submit per picture: bitstream, images, barriers, status |
+//! | `barriers` | Image barriers of a decode and a plane copy, as plain values |
 //! | `copy` | Image planes into numr buffers, on the device |
 //! | `h264` | H.264 parameter sets, picture order, DPB, and output order |
+//! | `hevc` | HEVC parameter sets, sessions, and pictures on the shared picture order |
+//! | `vp9` | VP9 frame headers, the reference pool, and frames shown again |
 //! | `decoder` | [`VulkanDecoder`] behind the `Decoder` trait |
 //! | `gap` | Structures that `ash` 0.38 lacks |
+//! | `zeroed` | All-zero values of plain C structures |
 //!
 //! All `unsafe` of this backend sits in this tree.
 
+mod barriers;
 mod caps;
 mod copy;
 mod decoder;
@@ -25,11 +30,14 @@ mod engine;
 mod error;
 mod gap;
 mod h264;
+mod hevc;
 mod objects;
 mod pictures;
 mod probe;
 mod session;
 mod validation;
+mod vp9;
+mod zeroed;
 
 pub use caps::DpbPreference;
 pub use decoder::VulkanDecoder;

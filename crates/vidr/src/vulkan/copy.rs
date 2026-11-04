@@ -6,7 +6,7 @@
 //!
 //! wgpu tracks whether each buffer holds data, and it zeroes a buffer before its first
 //! read otherwise. A raw copy is invisible to that tracking. So `clear_buffer` first
-//! marks the buffer as written, which also gives the zeros past each row that the word
+//! marks the buffer as written. It also gives the zeros past each row that the word
 //! form states. A second encoder then holds the raw copy, because wgpu refuses both
 //! kinds of command in one encoder.
 
@@ -19,9 +19,12 @@ use numr::tensor::Tensor;
 use wgpu::hal::api::Vulkan;
 use wgpu::hal::vulkan as hal_vulkan;
 
+use super::barriers::image_barrier;
 use super::device::VulkanDevice;
-use super::engine::{CopySource, image_barrier};
+use super::engine::CopySource;
+use crate::decode::PixelFormat;
 use crate::error::DecodeError;
+use crate::geometry::Dimensions;
 
 /// How long a copy, or the end of a session, waits before it stops waiting.
 pub(super) const WAIT: Duration = Duration::from_secs(60);
@@ -34,6 +37,21 @@ pub(super) struct FrameArea {
     pub(super) top: u32,
     pub(super) width: u32,
     pub(super) height: u32,
+}
+
+impl FrameArea {
+    /// The display size of this area, or the refusal that names it inside `coded`.
+    pub(super) fn display(self, coded: (u32, u32)) -> Result<Dimensions, DecodeError> {
+        Dimensions::new(self.width, self.height).map_err(|_| DecodeError::DisplayArea {
+            rect: (
+                self.left as i32,
+                self.top as i32,
+                (self.left + self.width) as i32,
+                (self.top + self.height) as i32,
+            ),
+            coded,
+        })
+    }
 }
 
 /// One plane's shape as words and its copy region.
@@ -71,6 +89,30 @@ pub(super) fn nv12_layout(area: FrameArea) -> [PlaneLayout; 2] {
     ]
 }
 
+/// The luma and chroma layouts of 10-bit 4:2:0 in `PlaneForm::Words`. Each luma texel holds
+/// 2 bytes and each chroma texel 4, as P010 lays them out.
+pub(super) fn p010_layout(area: FrameArea) -> [PlaneLayout; 2] {
+    let (width, height) = (area.width as usize, area.height as usize);
+    let luma_words = (width * 2).div_ceil(WORD_BYTES);
+    let chroma_words = width.div_ceil(2);
+    [
+        PlaneLayout {
+            shape: [height, luma_words],
+            row_texels: (luma_words * WORD_BYTES / 2) as u32,
+            offset: (area.left as i32, area.top as i32),
+            extent: (area.width, area.height),
+            aspect: vk::ImageAspectFlags::PLANE_0,
+        },
+        PlaneLayout {
+            shape: [height.div_ceil(2), chroma_words],
+            row_texels: chroma_words as u32,
+            offset: (area.left as i32 / 2, area.top as i32 / 2),
+            extent: (area.width.div_ceil(2), area.height.div_ceil(2)),
+            aspect: vk::ImageAspectFlags::PLANE_1,
+        },
+    ]
+}
+
 fn allocate(
     device: &VulkanDevice,
     plane: &'static str,
@@ -97,13 +139,18 @@ fn raw_buffer(buffer: &wgpu::Buffer) -> Result<vk::Buffer, DecodeError> {
     })
 }
 
-/// Copies both planes to new tensors and waits for the copy.
+/// Copies both planes of an image in `format` to new tensors and waits for the copy.
 pub(super) fn copy_planes(
     device: &VulkanDevice,
     source: &CopySource,
     area: FrameArea,
+    format: PixelFormat,
 ) -> Result<(Tensor<WgpuRuntime>, Tensor<WgpuRuntime>), DecodeError> {
-    let [luma, chroma] = nv12_layout(area);
+    device.check_live("a plane copy")?;
+    let [luma, chroma] = match format {
+        PixelFormat::Nv12 => nv12_layout(area),
+        PixelFormat::P010 => p010_layout(area),
+    };
     let y = allocate(device, "luma", luma.shape)?;
     let uv = allocate(device, "chroma", chroma.shape)?;
     let missing = || DecodeError::VulkanUnavailable {
@@ -153,15 +200,7 @@ pub(super) fn copy_planes(
         );
     }
     let submission = device.wgpu_queue.submit([clear.finish(), copy.finish()]);
-    wgpu_device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(WAIT),
-        })
-        .map_err(|error| DecodeError::VulkanCopyTimeout {
-            seconds: WAIT.as_secs(),
-            reason: error.to_string(),
-        })?;
+    device.wait_general_queue(Some(submission), "a plane copy")?;
     Ok((y, uv))
 }
 
@@ -176,8 +215,37 @@ unsafe fn record_copy(
     source: &CopySource,
     copies: &[(vk::Buffer, PlaneLayout); 2],
 ) {
-    let picture = source.picture;
-    let transfers = device.transfers_ownership();
+    // SAFETY: the caller states `cmd` is recording, and each object is live.
+    unsafe { record_before_copy(device, cmd, source, copies) };
+    for (buffer, plane) in copies {
+        let region = plane_region(plane, source.picture.layer);
+        // SAFETY: the image sits in the transfer layout, and the region fits the buffer.
+        // The buffer's rows hold `row_texels` texels over `shape[0]` rows.
+        unsafe {
+            device.raw.cmd_copy_image_to_buffer(
+                cmd,
+                source.picture.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                *buffer,
+                &[region],
+            );
+        }
+    }
+    // SAFETY: as above.
+    unsafe { record_after_copy(device, cmd, source, copies) };
+}
+
+/// The barrier after the clear, and the image's acquire when the families differ.
+///
+/// # Safety
+///
+/// As [`record_copy`].
+unsafe fn record_before_copy(
+    device: &VulkanDevice,
+    cmd: vk::CommandBuffer,
+    source: &CopySource,
+    copies: &[(vk::Buffer, PlaneLayout); 2],
+) {
     let cleared = copies.map(|(buffer, _)| {
         whole_buffer(
             buffer,
@@ -187,9 +255,9 @@ unsafe fn record_copy(
             vk::AccessFlags2::TRANSFER_WRITE,
         )
     });
-    let acquire = transfers.then(|| {
+    let acquire = device.transfers_ownership().then(|| {
         image_barrier(
-            picture,
+            source.picture,
             // The decode's release states the same two layouts. The pair runs one
             // transition.
             (
@@ -210,42 +278,44 @@ unsafe fn record_copy(
         .image_memory_barriers(acquire.as_slice());
     // SAFETY: the caller states `cmd` is recording, and each barrier names a live object.
     unsafe { device.sync2.cmd_pipeline_barrier2(cmd, &info) };
+}
 
-    for (buffer, plane) in copies {
-        let region = vk::BufferImageCopy {
-            buffer_offset: 0,
-            buffer_row_length: plane.row_texels,
-            buffer_image_height: 0,
-            image_subresource: vk::ImageSubresourceLayers {
-                aspect_mask: plane.aspect,
-                mip_level: 0,
-                base_array_layer: picture.layer,
-                layer_count: 1,
-            },
-            image_offset: vk::Offset3D {
-                x: plane.offset.0,
-                y: plane.offset.1,
-                z: 0,
-            },
-            image_extent: vk::Extent3D {
-                width: plane.extent.0,
-                height: plane.extent.1,
-                depth: 1,
-            },
-        };
-        // SAFETY: the image sits in the transfer layout, and the region fits the buffer,
-        // whose rows hold `row_texels` texels over `shape[0]` rows.
-        unsafe {
-            device.raw.cmd_copy_image_to_buffer(
-                cmd,
-                picture.image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                *buffer,
-                &[region],
-            );
-        }
+/// The copy of one plane of the image layer.
+fn plane_region(plane: &PlaneLayout, layer: u32) -> vk::BufferImageCopy {
+    vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: plane.row_texels,
+        buffer_image_height: 0,
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: plane.aspect,
+            mip_level: 0,
+            base_array_layer: layer,
+            layer_count: 1,
+        },
+        image_offset: vk::Offset3D {
+            x: plane.offset.0,
+            y: plane.offset.1,
+            z: 0,
+        },
+        image_extent: vk::Extent3D {
+            width: plane.extent.0,
+            height: plane.extent.1,
+            depth: 1,
+        },
     }
+}
 
+/// The barrier after the copy, and the image's release when it returns across families.
+///
+/// # Safety
+///
+/// As [`record_copy`].
+unsafe fn record_after_copy(
+    device: &VulkanDevice,
+    cmd: vk::CommandBuffer,
+    source: &CopySource,
+    copies: &[(vk::Buffer, PlaneLayout); 2],
+) {
     let written = copies.map(|(buffer, _)| {
         whole_buffer(
             buffer,
@@ -255,9 +325,9 @@ unsafe fn record_copy(
             vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
         )
     });
-    let release = (source.returns_image && transfers).then(|| {
+    let release = (source.returns_image && device.transfers_ownership()).then(|| {
         image_barrier(
-            picture,
+            source.picture,
             (
                 vk::PipelineStageFlags2::TRANSFER,
                 vk::AccessFlags2::TRANSFER_READ,
@@ -274,7 +344,7 @@ unsafe fn record_copy(
     let info = vk::DependencyInfo::default()
         .buffer_memory_barriers(&written)
         .image_memory_barriers(release.as_slice());
-    // SAFETY: as above.
+    // SAFETY: the caller states `cmd` is recording, and each barrier names a live object.
     unsafe { device.sync2.cmd_pipeline_barrier2(cmd, &info) };
 }
 
@@ -318,6 +388,38 @@ mod tests {
         assert_eq!(chroma.row_texels, 160);
         assert_eq!(chroma.extent, (160, 90));
         assert_eq!(chroma.aspect, vk::ImageAspectFlags::PLANE_1);
+    }
+
+    #[test]
+    fn p010_rows_hold_two_byte_luma_and_four_byte_chroma_texels() {
+        let [luma, chroma] = p010_layout(FrameArea {
+            left: 0,
+            top: 0,
+            width: 320,
+            height: 180,
+        });
+        assert_eq!(luma.shape, [180, 160]);
+        assert_eq!(luma.row_texels, 320);
+        assert_eq!(chroma.shape, [90, 160]);
+        assert_eq!(chroma.row_texels, 160);
+        assert_eq!(chroma.extent, (160, 90));
+    }
+
+    #[test]
+    fn an_odd_p010_size_pads_each_row_to_a_word() {
+        let [luma, chroma] = p010_layout(FrameArea {
+            left: 4,
+            top: 2,
+            width: 325,
+            height: 181,
+        });
+        assert_eq!(luma.shape, [181, 163]);
+        assert_eq!(luma.row_texels, 326);
+        assert_eq!(luma.offset, (4, 2));
+        assert_eq!(chroma.shape, [91, 163]);
+        assert_eq!(chroma.row_texels, 163);
+        assert_eq!(chroma.offset, (2, 1));
+        assert_eq!(chroma.extent, (163, 91));
     }
 
     #[test]

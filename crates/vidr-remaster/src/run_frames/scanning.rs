@@ -417,6 +417,21 @@ mod tests {
                 name: "ERROR",
                 pts: 1,
             },
+            DecodeError::VulkanTooManyReferences {
+                pts: 1,
+                references: 3,
+                limit: 2,
+            },
+            DecodeError::VulkanDuplicateSlot { pts: 1, slot: 2 },
+            DecodeError::VulkanNoTileBytes {
+                pts: 1,
+                tiles_offset: 9,
+                frame_bytes: 9,
+            },
+            DecodeError::VulkanDeviceLost {
+                call: "vkQueueSubmit2",
+                input: "the picture at pts 1".to_owned(),
+            },
             DecodeError::H264References {
                 decoder: DECODER,
                 pts: 1,

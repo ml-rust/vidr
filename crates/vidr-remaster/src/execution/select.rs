@@ -3,7 +3,7 @@
 //! | Runtime | Decoders | Encoders |
 //! | --- | --- | --- |
 //! | CUDA | NVDEC, CPU | NVENC, CPU |
-//! | WebGPU | Vulkan Video for H.264, CPU | CPU |
+//! | WebGPU | Vulkan Video for H.264, HEVC, and VP9, CPU | CPU |
 //! | CPU | CPU | CPU |
 //!
 //! `auto` prefers the hardware path, then the CPU. A library check says only that
@@ -341,11 +341,12 @@ impl Selector {
                 .map_err(|reason| format!("NVDEC is out: {reason}")),
             RuntimeKind::Wgpu => match (&self.machine.vulkan, codec) {
                 (Err(reason), _) => Err(format!("Vulkan Video is out: {reason}")),
-                (Ok(()), SourceCodec::H264) => Ok(DecoderBackend::Vulkan),
-                (Ok(()), other) => Err(format!(
-                    "{} on Vulkan Video is not supported yet",
-                    other.name()
-                )),
+                (Ok(()), SourceCodec::H264 | SourceCodec::Hevc | SourceCodec::Vp9) => {
+                    Ok(DecoderBackend::Vulkan)
+                }
+                (Ok(()), SourceCodec::Av1) => {
+                    Err("AV1 on Vulkan Video is not supported yet".to_owned())
+                }
             },
             RuntimeKind::Cpu => Err("the CPU runtime has no hardware decoder".to_owned()),
         }
@@ -446,7 +447,7 @@ impl Selector {
                         feature: "vulkan-video",
                     });
                 }
-                if video.codec != SourceCodec::H264 {
+                if video.codec == SourceCodec::Av1 {
                     return Err(ExecutionError::VulkanCodec { codec: video.codec });
                 }
                 self.machine

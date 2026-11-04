@@ -8,6 +8,15 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 
 ### Added
 
+- `vidr`: HEVC and VP9 decode on Vulkan Video behind `vulkan-video`, on the shared `DecodeEngine`. Real-GPU tests pass on NVIDIA's driver, in its coincident DPB mode. The HEVC_v1 and libvpx VP9 sweeps show no failure there, and refuse some streams by name at driver limits. No AMD or Intel GPU has run them, and no validation layer has run on them.
+  - HEVC Main, Main 10, and Main Still Picture at 8 or 10 bits, with several slice segments, tiles, WPP, scaling lists, and long-term references. RASL pictures of a first CRA picture skip. `pic_output_flag` and `NoOutputOfPriorPicsFlag` hold. A picture that binds a reference the DPB lacks is refused by name, because Vulkan Video activates a slot only through a decode.
+  - VP9 profiles 0 and 2 at 8 or 10 bits. A hidden frame fills a slot with no copy, `show_existing_frame` copies the slot again, and a chunk returns its last shown frame, as libvpx does. A frame that grows past its session while it keeps references is refused by name. `VulkanDecoder::with_max_coded_size` sizes that session.
+  - `decode::hevc_order` holds POC, RPS, marking, and bumping with no samples, and the CPU decoder and Vulkan Video share it.
+  - The shared engine refuses a picture past its session's active references, or one that names a slot twice, before any driver call. `DecodeError::VulkanTooManyReferences` and `DecodeError::VulkanDuplicateSlot` name them. `DecodeError::VulkanNoTileBytes` names a VP9 frame with no tile bytes on this path. The shared parser and `RustyVp9Decoder` do not change.
+  - `DecodeError::VulkanDeviceLost` names a lost device, and `VulkanDevice::is_lost` states it. wgpu's panic on a lost device in `poll` becomes this error. `VulkanDevice::open_shared` opens a new device on the next numr index after a loss.
+  - After an error, each later `send` and `flush` returns that error, also after a flush.
+  - `hevc_vulkan_mutations_stay_safe` and `vp9_vulkan_mutations_stay_safe` run seeded damage through `VulkanDecoder` on one device, and report each lost device.
+- `vidr-remaster`: `auto` and `--decoder vulkan` on WebGPU take HEVC and VP9 sources through Vulkan Video. AV1 stays on the CPU.
 - `vidr`: exact frame timing model. `Rational` time values with checked arithmetic and named rounding modes, `rescale`, `TrackTiming` with the last-frame duration chain and total duration, and `EditTimeline` for MP4-style edit lists at rate 1.
 - `vidr`: frame geometry. `Rotation` in multiples of 90 degrees from degrees or a `tkhd` display matrix, sample and display aspect ratios.
 - `vidr`: bitstream filters behind the `h264`, `hevc`, and `av1` features.
@@ -144,8 +153,8 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `no_output_of_prior_pics_flag` follows ITU-T H.264 C.4.4: the flag, or a new frame size or `max_dec_frame_buffering` at an IDR picture, removes each waiting frame with no output.
   - Dropping a decoder waits for its last decode and for wgpu's queue, each for at most 60 s. After a timeout or a lost device, its Vulkan objects stay allocated for the life of the process.
   - Slices stay in the packet until the decode, and go straight into a bitstream buffer that stays mapped. A write to non-coherent memory still ends with a flush.
-  - It depends on `ash` 0.38, `wgpu` 30, and `h264-reader` 0.9. `vulkan::gap` holds the VP9 decode `pNext` layouts `ash` lacks, for a later unit.
-- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264. The encoder stays on the CPU, and other codecs take CPU decoders.
+  - It depends on `ash` 0.38, `wgpu` 30, and `h264-reader` 0.9. `vulkan::gap` holds the VP9 decode `pNext` layouts `ash` lacks.
+- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264, HEVC, and VP9. The encoder stays on the CPU, and AV1 takes a CPU decoder.
 - `vidr-remaster`: under `--decoder auto`, the refusals `H264Tool`, `H264Interlaced`, `H264BitDepth`, and `VulkanNoMemoryType` fall through to a CPU decoder. `VulkanCopyTimeout` ends the run.
 
 ### Changed

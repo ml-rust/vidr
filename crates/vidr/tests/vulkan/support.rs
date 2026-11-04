@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use numr::runtime::wgpu::WgpuRuntime;
 use numr::tensor::Tensor;
-use vidr::bitstream::{AvcConfig, ToAnnexB};
-use vidr::decode::{DecodedFrame, Decoder};
-use vidr::vulkan::{VulkanDevice, VulkanOptions, vulkan_video_available};
+use vidr::bitstream::{AvcConfig, HevcNalType, StartCode, ToAnnexB, annexb};
+use vidr::decode::{DecodeCodec, DecodedFrame, Decoder, PixelFormat};
+use vidr::vulkan::{
+    DpbPreference, VulkanDecoder, VulkanDevice, VulkanOptions, vulkan_video_available,
+};
+use vidr::{BitstreamError, DecodeError};
 
 use crate::decode_fixtures::Stream;
 
@@ -95,6 +98,78 @@ pub(crate) fn decode_all(
     frames
 }
 
+/// One stream through each DPB mode the driver lists, as `(mode, frames)`. A mode the driver
+/// lacks prints a notice, and a run with no mode fails.
+pub(crate) fn decode_in_each_mode(
+    device: &Arc<VulkanDevice>,
+    codec: DecodeCodec,
+    config: &[u8],
+    packets: &[(Vec<u8>, i64)],
+    name: &str,
+) -> Vec<(DpbPreference, Vec<DecodedFrame<WgpuRuntime>>)> {
+    let mut runs = Vec::new();
+    for preference in [DpbPreference::Coincide, DpbPreference::Distinct] {
+        let opened = VulkanDecoder::with_dpb_preference(device, codec, config, preference);
+        let mut decoder = match opened {
+            Ok(decoder) => decoder,
+            Err(error) if lacks_mode(&error) => {
+                eprintln!("notice: {name}: {preference:?} does not run here: {error}");
+                continue;
+            }
+            Err(error) => panic!("{name}: open: {error}"),
+        };
+        let mut frames = Vec::new();
+        let mut lacking = false;
+        for (packet, pts) in packets {
+            match decoder.send(packet, *pts) {
+                Ok(()) => {}
+                // A session opens at the first picture, when `config` holds no sequence.
+                Err(error) if frames.is_empty() && lacks_mode(&error) => {
+                    eprintln!("notice: {name}: {preference:?} does not run here: {error}");
+                    lacking = true;
+                    break;
+                }
+                Err(error) => panic!("{name}: {preference:?}: send at pts {pts}: {error}"),
+            }
+            while let Some(frame) = decoder.receive() {
+                frames.push(frame);
+            }
+        }
+        if lacking {
+            continue;
+        }
+        decoder
+            .flush()
+            .unwrap_or_else(|error| panic!("{name}: {preference:?}: flush: {error}"));
+        while let Some(frame) = decoder.receive() {
+            frames.push(frame);
+        }
+        runs.push((preference, frames));
+    }
+    assert!(!runs.is_empty(), "{name}: no DPB mode ran");
+    runs
+}
+
+/// Whether an error states that the driver lacks a DPB mode, or the image usage it needs.
+fn lacks_mode(error: &DecodeError) -> bool {
+    matches!(
+        error,
+        DecodeError::VulkanRefused { what, .. }
+            if what.contains("DPB mode") || what.contains("images with usage")
+    )
+}
+
+/// Whether the device decodes `codec`. Prints a notice when it does not.
+pub(crate) fn codec_present(device: &Arc<VulkanDevice>, codec: DecodeCodec) -> bool {
+    match VulkanDecoder::new(device, codec, &[]) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("skipping: {error}");
+            false
+        }
+    }
+}
+
 /// The bytes of a word plane without what pads each row. `row_bytes` is the width in
 /// bytes that `-f rawvideo` holds.
 fn dense_rows(plane: &Tensor<WgpuRuntime>, row_bytes: usize, name: &str) -> Vec<u8> {
@@ -116,15 +191,104 @@ fn dense_rows(plane: &Tensor<WgpuRuntime>, row_bytes: usize, name: &str) -> Vec<
     dense
 }
 
-/// Each frame's NV12 bytes, in `-f rawvideo` form.
-pub(crate) fn nv12_bytes(frames: &[DecodedFrame<WgpuRuntime>], name: &str) -> Vec<u8> {
+/// One frame's dense luma and interleaved chroma bytes, in `nv12` or `p010le` form.
+fn dense_planes(frame: &DecodedFrame<WgpuRuntime>, name: &str) -> (Vec<u8>, Vec<u8>) {
+    let width = frame.display().width() as usize;
+    let sample = frame.format().bytes_per_sample();
+    (
+        dense_rows(frame.y(), width * sample, name),
+        dense_rows(frame.uv(), width.div_ceil(2) * 2 * sample, name),
+    )
+}
+
+/// Each frame's bytes, in `-f rawvideo` form: `nv12` or `p010le`.
+pub(crate) fn frame_bytes(frames: &[DecodedFrame<WgpuRuntime>], name: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     for frame in frames {
-        let width = frame.display().width() as usize;
-        bytes.extend(dense_rows(frame.y(), width, name));
-        bytes.extend(dense_rows(frame.uv(), width.div_ceil(2) * 2, name));
+        let (y, uv) = dense_planes(frame, name);
+        bytes.extend(y);
+        bytes.extend(uv);
     }
     bytes
+}
+
+/// One frame's planes as `yuv420p` or `yuv420p10le` holds them: Y, then U, then V, with a
+/// 10-bit sample in two little-endian bytes holding its value.
+pub(crate) fn planar_planes(
+    frame: &DecodedFrame<WgpuRuntime>,
+    name: &str,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (mut y, uv) = dense_planes(frame, name);
+    let sample = frame.format().bytes_per_sample();
+    let mut u = Vec::with_capacity(uv.len() / 2);
+    let mut v = Vec::with_capacity(uv.len() / 2);
+    for pair in uv.chunks_exact(2 * sample) {
+        let (cb, cr) = pair.split_at(sample);
+        u.extend_from_slice(cb);
+        v.extend_from_slice(cr);
+    }
+    if frame.format() == PixelFormat::P010 {
+        for plane in [&mut y, &mut u, &mut v] {
+            for stored in plane.as_chunks_mut::<2>().0.iter_mut() {
+                let value = u16::from_le_bytes([stored[0], stored[1]]) >> 6;
+                stored.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    (y, u, v)
+}
+
+/// Each frame's bytes in `yuv420p` or `yuv420p10le` form.
+pub(crate) fn planar_bytes(frames: &[DecodedFrame<WgpuRuntime>], name: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        let (y, u, v) = planar_planes(frame, name);
+        bytes.extend(y);
+        bytes.extend(u);
+        bytes.extend(v);
+    }
+    bytes
+}
+
+/// An Annex-B HEVC stream as packets of one access unit each. A packet's pts counts its
+/// pictures. A VPS, SPS, PPS, AUD, or prefix SEI after a picture's slices starts the next
+/// unit. The first slice segment of the next picture does too (7.4.2.4.4).
+pub(crate) fn hevc_units(stream: &[u8], name: &str) -> Vec<(Vec<u8>, i64)> {
+    try_hevc_units(stream).unwrap_or_else(|error| panic!("{name}: split: {error}"))
+}
+
+/// As [`hevc_units`], with the error of a stream that does not start at a start code.
+pub(crate) fn try_hevc_units(stream: &[u8]) -> Result<Vec<(Vec<u8>, i64)>, BitstreamError> {
+    let units = annexb::split(stream)?;
+    let mut packets: Vec<(Vec<u8>, i64)> = Vec::new();
+    let mut current = Vec::new();
+    let mut has_slice = false;
+    for nal in units {
+        // An end of sequence unit is two bytes long, and it still reaches the decoder.
+        let [first, second, rest @ ..] = nal else {
+            continue;
+        };
+        let kind = HevcNalType::from_header(*first);
+        let base_layer = first & 1 == 0 && second >> 3 == 0;
+        let slice = base_layer && matches!(kind.value(), 0..=9 | 16..=21);
+        let starts_picture = slice && rest.first().is_some_and(|byte| byte & 0x80 != 0);
+        let prefix = kind == HevcNalType::VPS
+            || kind == HevcNalType::SPS
+            || kind == HevcNalType::PPS
+            || kind == HevcNalType::AUD
+            || kind == HevcNalType::SEI_PREFIX;
+        if has_slice && (starts_picture || prefix) {
+            packets.push((std::mem::take(&mut current), packets.len() as i64));
+            has_slice = false;
+        }
+        has_slice |= slice;
+        current.extend_from_slice(StartCode::Four.bytes());
+        current.extend_from_slice(nal);
+    }
+    if !current.is_empty() {
+        packets.push((current, packets.len() as i64));
+    }
+    Ok(packets)
 }
 
 /// Checks `decoded` against `expected`, naming the first byte that differs.

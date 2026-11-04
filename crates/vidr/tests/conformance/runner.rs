@@ -1,11 +1,15 @@
 //! The worker pool of the conformance tests.
 
 use std::any::Any;
+#[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 use std::sync::Mutex;
+#[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 use std::thread;
 
 /// `VIDR_CONFORMANCE_JOBS`, or half the logical CPUs.
+#[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 fn job_count() -> usize {
     let half = thread::available_parallelism().map_or(1, |count| count.get() / 2);
     std::env::var("VIDR_CONFORMANCE_JOBS")
@@ -17,6 +21,7 @@ fn job_count() -> usize {
 
 /// Runs `run` on every item, each worker taking the next one, and keeps the input
 /// order in the results.
+#[cfg(any(feature = "cpu-hevc", all(feature = "cpu-vp9", feature = "mkv")))]
 pub(super) fn run_each<T, O>(items: &[T], run: impl Fn(&T) -> O + Sync) -> Vec<O>
 where
     T: Sync,

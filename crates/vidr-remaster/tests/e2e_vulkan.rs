@@ -14,6 +14,8 @@
 #[path = "e2e_cpu/harness.rs"]
 mod harness;
 
+use vidr::decode::DecodeCodec;
+use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanOptions};
 use vidr_remaster::ResolutionMode;
 
 use harness::{Case, Run, assert_complete};
@@ -47,8 +49,12 @@ fn assert_vulkan_path(run: &Run, frames: u64) {
 }
 
 fn from_upscaled(case: &mut Case, decoder: &str) -> Run {
-    let source = case.source("clip.mp4", FRAMES, &HIGH);
-    let enhanced = case.enhanced("up.mp4", FRAMES, &HIGH);
+    from_upscaled_with(case, decoder, &HIGH)
+}
+
+fn from_upscaled_with(case: &mut Case, decoder: &str, codec: &[&str]) -> Run {
+    let source = case.source("clip.mp4", FRAMES, codec);
+    let enhanced = case.enhanced("up.mp4", FRAMES, codec);
     let output = case.path("out.mp4");
     let run = case.run_on(
         "wgpu",
@@ -88,16 +94,61 @@ fn auto_on_webgpu_picks_vulkan_for_h264() {
     assert_vulkan_path(&run, u64::from(FRAMES));
 }
 
-/// An explicit request on another codec names the absence, before any work.
+/// Whether this device lists `codec`. Prints a notice when it does not.
+fn device_decodes(codec: DecodeCodec) -> bool {
+    let opened = VulkanDevice::open_shared(VulkanOptions::default())
+        .and_then(|device| VulkanDecoder::new(&device, codec, &[]));
+    if let Err(error) = &opened {
+        eprintln!("skipping: {error}");
+    }
+    opened.is_ok()
+}
+
+/// `--runtime wgpu --decoder vulkan --encoder cpu` on a source from `encoder`: the whole path,
+/// with frames and timing kept.
+fn run_source_on_vulkan(label: &str, codec: DecodeCodec, encoder: &str, args: &[&str]) {
+    let Some(mut case) = start(label) else {
+        return;
+    };
+    if case.first_encoder(&[encoder]).is_none() || !device_decodes(codec) {
+        return;
+    }
+    let mut flags = vec!["-c:v", encoder];
+    flags.extend_from_slice(args);
+    let run = from_upscaled_with(&mut case, "vulkan", &flags);
+    assert_vulkan_path(&run, u64::from(FRAMES));
+}
+
 #[test]
-fn an_explicit_request_on_hevc_is_not_supported_yet() {
-    let Some(mut case) = start("vulkan_hevc") else {
+fn an_explicit_vulkan_decoder_runs_an_hevc_source() {
+    run_source_on_vulkan(
+        "vulkan_hevc",
+        DecodeCodec::Hevc,
+        "libx265",
+        &["-tag:v", "hvc1"],
+    );
+}
+
+#[test]
+fn an_explicit_vulkan_decoder_runs_a_vp9_source() {
+    run_source_on_vulkan(
+        "vulkan_vp9",
+        DecodeCodec::Vp9,
+        "libvpx-vp9",
+        &["-b:v", "0", "-crf", "30"],
+    );
+}
+
+/// An explicit request on AV1 names the absence, before any work.
+#[test]
+fn an_explicit_request_on_av1_is_not_supported_yet() {
+    let Some(mut case) = start("vulkan_av1") else {
         return;
     };
-    let Some(encoder) = case.first_encoder(&["libx265"]) else {
+    let Some(encoder) = case.first_encoder(&["libsvtav1", "libaom-av1"]) else {
         return;
     };
-    let source = case.source("clip.mp4", FRAMES, &["-c:v", encoder, "-tag:v", "hvc1"]);
+    let source = case.source("clip.mp4", FRAMES, &["-c:v", encoder]);
     let output = case.path("out.mp4");
     let run = case.run_on(
         "wgpu",

@@ -12,9 +12,8 @@ use crate::bitstream::rbsp::unescape;
 use crate::decode::{ChromaFormat, DecodeCodec};
 use crate::error::DecodeError;
 use crate::vulkan::copy::FrameArea;
+pub(super) use crate::vulkan::error::DECODER;
 
-/// The decoder's name in errors.
-pub(super) const DECODER: &str = "Vulkan Video";
 /// The profiles the driver's H.264 decode names: Baseline, Main, High.
 const PROFILES: [u8; 3] = [66, 77, 100];
 const SUPPORTED_PROFILES: &str = "66 (Baseline), 77 (Main), and 100 (High)";

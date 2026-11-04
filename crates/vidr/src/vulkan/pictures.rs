@@ -26,12 +26,13 @@ pub(super) enum SlotState {
     Returning,
 }
 
-/// The state of the setup slot after its decode and copy.
-pub(super) const fn state_after_copy(mode: DpbMode, reference: bool) -> SlotState {
-    match (mode, reference) {
-        (_, false) => SlotState::Empty,
-        (DpbMode::Coincide, true) => SlotState::Returning,
-        (DpbMode::Distinct, true) => SlotState::Written,
+/// The state of the setup slot after its decode and its copy, when `output` asks for one.
+/// A decode with no output leaves the slot in the DPB layout on the video queue.
+pub(super) const fn state_after_copy(mode: DpbMode, reference: bool, output: bool) -> SlotState {
+    match (mode, reference, output) {
+        (_, false, _) => SlotState::Empty,
+        (_, true, false) | (DpbMode::Distinct, true, true) => SlotState::Written,
+        (DpbMode::Coincide, true, true) => SlotState::Returning,
     }
 }
 
@@ -40,15 +41,19 @@ pub(super) const fn copy_returns_image(mode: DpbMode, reference: bool) -> bool {
     matches!(mode, DpbMode::Coincide) && reference
 }
 
-/// The image usage of a slot.
-fn slot_usage(mode: DpbMode) -> vk::ImageUsageFlags {
-    match mode {
-        DpbMode::Coincide => {
+/// The image usage of a slot. `readable` adds the copy source, for a codec that shows a
+/// stored slot again.
+fn slot_usage(mode: DpbMode, readable: bool) -> vk::ImageUsageFlags {
+    match (mode, readable) {
+        (DpbMode::Coincide, _) => {
             vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
                 | vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
                 | vk::ImageUsageFlags::TRANSFER_SRC
         }
-        DpbMode::Distinct => vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
+        (DpbMode::Distinct, false) => vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
+        (DpbMode::Distinct, true) => {
+            vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR | vk::ImageUsageFlags::TRANSFER_SRC
+        }
     }
 }
 
@@ -83,7 +88,7 @@ pub(super) struct PictureStore {
 
 impl PictureStore {
     /// `extent` is the size of each image. With `separate` false, every slot is a layer
-    /// of one image.
+    /// of one image. `readable` lets a copy read a slot's image in either mode.
     pub(super) fn new(
         device: &Arc<VulkanDevice>,
         profile: &VideoProfile,
@@ -91,8 +96,10 @@ impl PictureStore {
         slot_count: u32,
         separate: bool,
         extent: (u32, u32),
+        readable: bool,
     ) -> Result<Self, DecodeError> {
-        let slot_format = query_format(device, profile, slot_usage(mode))?;
+        let usage = slot_usage(mode, readable);
+        let slot_format = query_format(device, profile, usage)?;
         let info = profile.info();
         let infos = [info];
         let make = |layers: u32,
@@ -120,7 +127,6 @@ impl PictureStore {
             Image::new(device, &create, what)
         };
 
-        let usage = slot_usage(mode);
         let (image_count, layers) = if separate {
             (slot_count, 1)
         } else {
@@ -182,21 +188,45 @@ mod tests {
         assert!(!copy_returns_image(DpbMode::Coincide, false));
         assert!(!copy_returns_image(DpbMode::Distinct, true));
         assert_eq!(
-            state_after_copy(DpbMode::Coincide, true),
+            state_after_copy(DpbMode::Coincide, true, true),
             SlotState::Returning
         );
         assert_eq!(
-            state_after_copy(DpbMode::Distinct, true),
+            state_after_copy(DpbMode::Distinct, true, true),
             SlotState::Written
         );
-        assert_eq!(state_after_copy(DpbMode::Coincide, false), SlotState::Empty);
-        assert_eq!(state_after_copy(DpbMode::Distinct, false), SlotState::Empty);
+        assert_eq!(
+            state_after_copy(DpbMode::Coincide, false, true),
+            SlotState::Empty
+        );
+        assert_eq!(
+            state_after_copy(DpbMode::Distinct, false, true),
+            SlotState::Empty
+        );
+    }
+
+    /// A hidden frame takes no copy, so no copy queue moves its image.
+    #[test]
+    fn a_reference_with_no_output_stays_on_the_video_queue() {
+        assert_eq!(
+            state_after_copy(DpbMode::Coincide, true, false),
+            SlotState::Written
+        );
+        assert_eq!(
+            state_after_copy(DpbMode::Distinct, true, false),
+            SlotState::Written
+        );
+        assert_eq!(
+            state_after_copy(DpbMode::Coincide, false, false),
+            SlotState::Empty
+        );
     }
 
     #[test]
     fn each_image_holds_the_usage_of_its_role() {
-        assert!(slot_usage(DpbMode::Coincide).contains(vk::ImageUsageFlags::TRANSFER_SRC));
-        assert!(!slot_usage(DpbMode::Distinct).contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        assert!(slot_usage(DpbMode::Coincide, false).contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        assert!(!slot_usage(DpbMode::Distinct, false).contains(vk::ImageUsageFlags::TRANSFER_SRC));
+        assert!(slot_usage(DpbMode::Distinct, true).contains(vk::ImageUsageFlags::TRANSFER_SRC));
         assert!(output_usage().contains(vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR));
     }
 }

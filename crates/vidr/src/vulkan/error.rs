@@ -4,12 +4,26 @@ use ash::vk;
 
 use crate::error::DecodeError;
 
-/// The error of `call` for `input`.
+/// The decoder's name in errors.
+pub(super) const DECODER: &str = "Vulkan Video";
+
+/// The error of a picture at `pts` that this backend cannot decode.
+pub(super) fn request_error(pts: i64, reason: String) -> DecodeError {
+    DecodeError::VulkanDecodeRequest { pts, reason }
+}
+
+/// The error of `call` for `input`. A lost device has its own name.
 pub(super) fn vk_error(
     call: &'static str,
     result: vk::Result,
     input: impl Into<String>,
 ) -> DecodeError {
+    if result == vk::Result::ERROR_DEVICE_LOST {
+        return DecodeError::VulkanDeviceLost {
+            call,
+            input: input.into(),
+        };
+    }
     DecodeError::Vulkan {
         call,
         code: result.as_raw(),
@@ -56,6 +70,25 @@ mod tests {
         assert_eq!(code, -1);
         assert_eq!(name, "ERROR_OUT_OF_HOST_MEMORY");
         assert_eq!(input, "a 4-byte buffer");
+    }
+
+    #[test]
+    fn a_lost_device_has_its_own_name() {
+        let error = vk_error(
+            "vkQueueSubmit2",
+            vk::Result::ERROR_DEVICE_LOST,
+            "the picture at pts 4",
+        );
+        assert_eq!(
+            error,
+            DecodeError::VulkanDeviceLost {
+                call: "vkQueueSubmit2",
+                input: "the picture at pts 4".to_owned(),
+            }
+        );
+        let text = error.to_string();
+        assert!(text.contains("lost Vulkan device"), "{text}");
+        assert!(text.contains("pts 4"), "{text}");
     }
 
     #[test]

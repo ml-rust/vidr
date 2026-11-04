@@ -10,15 +10,27 @@ use ash::vk;
 use super::caps::DecodeCaps;
 use super::device::VulkanDevice;
 use super::error::{is_refusal, vk_error};
+use super::gap::{self, VideoDecodeVp9Capabilities, VideoDecodeVp9ProfileInfo};
 use super::objects::Memory;
-use crate::decode::DecodeCodec;
+use crate::decode::{DecodeCodec, PixelFormat};
 use crate::error::DecodeError;
 
-/// A decode profile: 4:2:0, 8 bits, with the codec's own structure behind it. Later
-/// codecs add a variant.
+/// A decode profile: 4:2:0, with the codec's own structure behind it.
 pub(super) enum VideoProfile {
-    /// H.264, progressive pictures.
+    /// H.264, progressive pictures, 8 bits.
     H264(vk::VideoDecodeH264ProfileInfoKHR<'static>),
+    /// HEVC at 8 or 10 bits.
+    Hevc(vk::VideoDecodeH265ProfileInfoKHR<'static>, PixelFormat),
+    /// VP9 at 8 or 10 bits. It uses no session parameters.
+    Vp9(VideoDecodeVp9ProfileInfo, PixelFormat),
+}
+
+/// The Vulkan format of an image in `format`.
+pub(super) const fn image_format(format: PixelFormat) -> vk::Format {
+    match format {
+        PixelFormat::Nv12 => vk::Format::G8_B8R8_2PLANE_420_UNORM,
+        PixelFormat::P010 => vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16,
+    }
 }
 
 impl VideoProfile {
@@ -31,11 +43,46 @@ impl VideoProfile {
         )
     }
 
+    /// The profile of a HEVC stream, by `StdVideoH265ProfileIdc`.
+    pub(super) fn hevc(std_profile_idc: u32, format: PixelFormat) -> Self {
+        Self::Hevc(
+            vk::VideoDecodeH265ProfileInfoKHR::default().std_profile_idc(std_profile_idc),
+            format,
+        )
+    }
+
+    /// The profile of a VP9 stream, by `StdVideoVP9Profile`.
+    pub(super) const fn vp9(std_profile: u32, format: PixelFormat) -> Self {
+        Self::Vp9(
+            VideoDecodeVp9ProfileInfo {
+                s_type: gap::TYPE_VP9_PROFILE_INFO,
+                p_next: ptr::null(),
+                std_profile,
+            },
+            format,
+        )
+    }
+
     /// The codec's name in errors.
     pub(super) const fn codec(&self) -> DecodeCodec {
         match self {
             Self::H264(_) => DecodeCodec::H264,
+            Self::Hevc(..) => DecodeCodec::Hevc,
+            Self::Vp9(..) => DecodeCodec::Vp9,
         }
+    }
+
+    /// The sample layout of this profile.
+    pub(super) const fn pixel_format(&self) -> PixelFormat {
+        match self {
+            Self::H264(_) => PixelFormat::Nv12,
+            Self::Hevc(_, format) | Self::Vp9(_, format) => *format,
+        }
+    }
+
+    /// Whether a coding scope of this profile binds session parameters.
+    pub(super) const fn uses_parameters(&self) -> bool {
+        !matches!(self, Self::Vp9(..))
     }
 
     /// The profile structure with the codec structure in its chain. The result borrows
@@ -46,12 +93,21 @@ impl VideoProfile {
                 vk::VideoCodecOperationFlagsKHR::DECODE_H264,
                 ptr::from_ref(h264).cast(),
             ),
+            Self::Hevc(hevc, _) => (
+                vk::VideoCodecOperationFlagsKHR::DECODE_H265,
+                ptr::from_ref(hevc).cast(),
+            ),
+            Self::Vp9(vp9, _) => (gap::DECODE_VP9, ptr::from_ref(vp9).cast()),
+        };
+        let depth = match self.pixel_format() {
+            PixelFormat::Nv12 => vk::VideoComponentBitDepthFlagsKHR::TYPE_8,
+            PixelFormat::P010 => vk::VideoComponentBitDepthFlagsKHR::TYPE_10,
         };
         let mut info = vk::VideoProfileInfoKHR::default()
             .video_codec_operation(operation)
             .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
-            .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-            .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8);
+            .luma_bit_depth(depth)
+            .chroma_bit_depth(depth);
         info.p_next = next;
         info
     }
@@ -63,9 +119,51 @@ pub(super) fn query_h264_caps(
     profile: &VideoProfile,
 ) -> Result<(DecodeCaps, u32), DecodeError> {
     let mut h264 = vk::VideoDecodeH264CapabilitiesKHR::default();
+    // SAFETY: `h264` is a whole capability structure with no chain, and it outlives the call.
+    let parsed = unsafe { read_caps(device, profile, ptr::from_mut(&mut h264).cast()) }?;
+    Ok((parsed, h264.max_level_idc))
+}
+
+/// The HEVC capabilities with the highest level the driver lists.
+pub(super) fn query_hevc_caps(
+    device: &VulkanDevice,
+    profile: &VideoProfile,
+) -> Result<(DecodeCaps, u32), DecodeError> {
+    let mut hevc = vk::VideoDecodeH265CapabilitiesKHR::default();
+    // SAFETY: `hevc` is a whole capability structure with no chain, and it outlives the call.
+    let parsed = unsafe { read_caps(device, profile, ptr::from_mut(&mut hevc).cast()) }?;
+    Ok((parsed, hevc.max_level_idc))
+}
+
+/// The VP9 capabilities. A VP9 frame header states no level, so nothing reads `maxLevel`. The
+/// query still needs its structure in the chain.
+pub(super) fn query_vp9_caps(
+    device: &VulkanDevice,
+    profile: &VideoProfile,
+) -> Result<DecodeCaps, DecodeError> {
+    let mut vp9 = VideoDecodeVp9Capabilities {
+        s_type: gap::TYPE_VP9_CAPABILITIES,
+        p_next: ptr::null_mut(),
+        max_level: 0,
+    };
+    // SAFETY: `vp9` is a whole capability structure with no chain, and it outlives the call.
+    unsafe { read_caps(device, profile, ptr::from_mut(&mut vp9).cast()) }
+}
+
+/// Queries `profile`, with the codec's capability structure in `codec_caps` filled in.
+///
+/// # Safety
+///
+/// `codec_caps` points to a writable capability structure of `profile`'s codec, with a valid
+/// chain, through the call.
+unsafe fn read_caps(
+    device: &VulkanDevice,
+    profile: &VideoProfile,
+    codec_caps: *mut c_void,
+) -> Result<DecodeCaps, DecodeError> {
     // Raw pointers, because each structure gets read after the call.
     let mut decode = vk::VideoDecodeCapabilitiesKHR {
-        p_next: ptr::from_mut(&mut h264).cast(),
+        p_next: codec_caps,
         ..Default::default()
     };
     let mut caps = vk::VideoCapabilitiesKHR {
@@ -73,7 +171,8 @@ pub(super) fn query_h264_caps(
         ..Default::default()
     };
     let info = profile.info();
-    // SAFETY: `info` and `caps` with their chains live through the call.
+    // SAFETY: `info` and `caps` live through the call. The caller states that `codec_caps`
+    // does too, and `decode` holds it at the end of the chain.
     let result = unsafe {
         (device
             .video_instance_fns
@@ -81,7 +180,7 @@ pub(super) fn query_h264_caps(
             .get_physical_device_video_capabilities_khr)(device.physical, &info, &mut caps)
     };
     check_profile(result, profile, "vkGetPhysicalDeviceVideoCapabilitiesKHR")?;
-    let parsed = DecodeCaps {
+    Ok(DecodeCaps {
         flags: caps.flags,
         decode_flags: decode.flags,
         size_alignment: caps.min_bitstream_buffer_size_alignment,
@@ -94,8 +193,7 @@ pub(super) fn query_h264_caps(
         max_dpb_slots: caps.max_dpb_slots,
         max_active_references: caps.max_active_reference_pictures,
         std_version: caps.std_header_version,
-    };
-    Ok((parsed, h264.max_level_idc))
+    })
 }
 
 fn check_profile(
@@ -107,14 +205,17 @@ fn check_profile(
         vk::Result::SUCCESS => Ok(()),
         refusal if is_refusal(refusal) => Err(DecodeError::VulkanRefused {
             codec: profile.codec(),
-            what: "the stream's profile at 8-bit 4:2:0".to_owned(),
+            what: format!(
+                "the stream's profile at {}-bit 4:2:0",
+                profile.pixel_format().bit_depth()
+            ),
             reason: format!("{call} returns {refusal:?}"),
         }),
         other => Err(vk_error(call, other, "the stream's profile")),
     }
 }
 
-/// One format and tiling the driver lists for NV12 at a usage.
+/// One format and tiling the driver lists for the profile's samples at a usage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ImageFormat {
     pub(super) format: vk::Format,
@@ -142,16 +243,20 @@ fn is_identity(mapping: vk::ComponentMapping) -> bool {
         && keeps(mapping.a, Swizzle::A)
 }
 
-/// The entry for NV12 at `usage`, from what the driver lists, or why none fits. A plane
-/// copy reads the planes as NV12 lays them out, so a mapping that moves a channel is out.
-/// Pure, for tests.
-fn choose_nv12(listed: &[ListedFormat], usage: vk::ImageUsageFlags) -> Result<ImageFormat, String> {
-    let nv12 = |entry: &&ListedFormat| {
-        entry.format == vk::Format::G8_B8R8_2PLANE_420_UNORM
+/// The entry for `wanted` at `usage`, from what the driver lists, or why none fits. A plane
+/// copy reads the planes as NV12 or P010 lay them out. So a mapping that moves a channel is
+/// out. Pure, for tests.
+fn choose_format(
+    listed: &[ListedFormat],
+    usage: vk::ImageUsageFlags,
+    wanted: vk::Format,
+) -> Result<ImageFormat, String> {
+    let same = |entry: &&ListedFormat| {
+        entry.format == wanted
             && entry.image_type == vk::ImageType::TYPE_2D
             && entry.usage.contains(usage)
     };
-    let matches = |entry: &&ListedFormat| nv12(entry) && is_identity(entry.mapping);
+    let matches = |entry: &&ListedFormat| same(entry) && is_identity(entry.mapping);
     let found = listed
         .iter()
         .filter(matches)
@@ -162,10 +267,10 @@ fn choose_nv12(listed: &[ListedFormat], usage: vk::ImageUsageFlags) -> Result<Im
             format: entry.format,
             tiling: entry.tiling,
         }),
-        None => Err(match listed.iter().find(nv12) {
+        None => Err(match listed.iter().find(same) {
             Some(entry) => format!(
-                "the driver lists NV12 only with componentMapping {:?}, and vidr takes the \
-                 identity mapping",
+                "the driver lists {wanted:?} only with componentMapping {:?}, and vidr takes \
+                 the identity mapping",
                 entry.mapping
             ),
             None => format!("the driver lists {} other formats", listed.len()),
@@ -173,7 +278,7 @@ fn choose_nv12(listed: &[ListedFormat], usage: vk::ImageUsageFlags) -> Result<Im
     }
 }
 
-/// NV12 at `usage` for `profile`, or the refusal.
+/// The format of `profile`'s samples at `usage`, or the refusal.
 pub(super) fn query_format(
     device: &VulkanDevice,
     profile: &VideoProfile,
@@ -209,9 +314,10 @@ pub(super) fn query_format(
             mapping: entry.component_mapping,
         })
         .collect();
-    choose_nv12(&listed, usage).map_err(|reason| DecodeError::VulkanRefused {
+    let wanted = image_format(profile.pixel_format());
+    choose_format(&listed, usage, wanted).map_err(|reason| DecodeError::VulkanRefused {
         codec: profile.codec(),
-        what: format!("NV12 images with usage {usage:?}"),
+        what: format!("{wanted:?} images with usage {usage:?}"),
         reason,
     })
 }
@@ -450,18 +556,18 @@ mod tests {
             listed(NV12, vk::ImageTiling::OPTIMAL, wanted),
         ];
         assert_eq!(
-            choose_nv12(&listed, wanted),
+            choose_format(&listed, wanted, NV12),
             Ok(ImageFormat {
                 format: NV12,
                 tiling: vk::ImageTiling::OPTIMAL,
             })
         );
         assert_eq!(
-            choose_nv12(&listed[..3], wanted).map(|found| found.tiling),
+            choose_format(&listed[..3], wanted, NV12).map(|found| found.tiling),
             Ok(vk::ImageTiling::LINEAR)
         );
         assert_eq!(
-            choose_nv12(&listed[..2], wanted),
+            choose_format(&listed[..2], wanted, NV12),
             Err("the driver lists 2 other formats".to_owned())
         );
     }
@@ -504,13 +610,13 @@ mod tests {
             },
             ..listed(NV12, vk::ImageTiling::OPTIMAL, usage)
         };
-        let reason = choose_nv12(&[swapped], usage).expect_err("refused");
+        let reason = choose_format(&[swapped], usage, NV12).expect_err("refused");
         assert!(reason.contains("componentMapping"), "{reason}");
         assert!(reason.contains("identity"), "{reason}");
         // An identity entry at any tiling beats a swapped optimal one.
         let plain = listed(NV12, vk::ImageTiling::LINEAR, usage);
         assert_eq!(
-            choose_nv12(&[swapped, plain], usage).map(|found| found.tiling),
+            choose_format(&[swapped, plain], usage, NV12).map(|found| found.tiling),
             Ok(vk::ImageTiling::LINEAR)
         );
     }
@@ -531,8 +637,57 @@ mod tests {
             info.luma_bit_depth,
             vk::VideoComponentBitDepthFlagsKHR::TYPE_8
         );
-        let VideoProfile::H264(h264) = &profile;
+        let VideoProfile::H264(h264) = &profile else {
+            panic!("the wrong variant");
+        };
         assert_eq!(info.p_next, ptr::from_ref(h264).cast::<c_void>());
         assert_eq!(h264.std_profile_idc, 100);
+        assert!(profile.uses_parameters());
+    }
+
+    #[test]
+    fn a_10_bit_profile_states_its_depth_and_format() {
+        let profile = VideoProfile::hevc(2, PixelFormat::P010);
+        let info = profile.info();
+        assert_eq!(
+            info.video_codec_operation,
+            vk::VideoCodecOperationFlagsKHR::DECODE_H265
+        );
+        assert_eq!(
+            info.luma_bit_depth,
+            vk::VideoComponentBitDepthFlagsKHR::TYPE_10
+        );
+        assert_eq!(
+            info.chroma_bit_depth,
+            vk::VideoComponentBitDepthFlagsKHR::TYPE_10
+        );
+        assert_eq!(
+            image_format(profile.pixel_format()),
+            vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16
+        );
+    }
+
+    #[test]
+    fn a_vp9_profile_chains_its_structure_and_takes_no_parameters() {
+        let profile = VideoProfile::vp9(0, PixelFormat::Nv12);
+        let info = profile.info();
+        assert_eq!(info.video_codec_operation, gap::DECODE_VP9);
+        let VideoProfile::Vp9(vp9, _) = &profile else {
+            panic!("the wrong variant");
+        };
+        assert_eq!(info.p_next, ptr::from_ref(vp9).cast::<c_void>());
+        assert_eq!(vp9.s_type, gap::TYPE_VP9_PROFILE_INFO);
+        assert!(!profile.uses_parameters());
+    }
+
+    #[test]
+    fn p010_needs_its_own_format_entry() {
+        let usage = vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR;
+        let p010 = vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+        let listed = [listed(NV12, vk::ImageTiling::OPTIMAL, usage)];
+        assert_eq!(
+            choose_format(&listed, usage, p010),
+            Err("the driver lists 1 other formats".to_owned())
+        );
     }
 }

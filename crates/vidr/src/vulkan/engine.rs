@@ -1,5 +1,5 @@
 //! One decode per call: the bitstream write, the barriers, the coding scope, the submit,
-//! the wait, and the status. Codecs supply `pNext` chains and nothing else.
+//! the wait, and the status. Codecs supply the bytes, the slots, and the `pNext` chains.
 //!
 //! A slot's image takes these steps in coincide mode, when the video and general queue
 //! families differ:
@@ -9,10 +9,12 @@
 //! 3. For a reference, the general queue releases it, and the next decode acquires it.
 //!
 //! When the families match, step 1 makes the decode's write visible to later reads on
-//! the queue, and no transfer runs. In distinct mode only the output image takes steps 1
-//! and 2. A slot stays in the DPB layout on the video queue, so the next decode that reads
-//! it takes a barrier against the decode that wrote it. A use of an empty image starts
-//! from `UNDEFINED`, which discards its contents and needs no transfer.
+//! the queue. No transfer runs. In distinct mode only the output image takes steps 1
+//! and 2. A slot stays in the DPB layout on the video queue. So the next decode that reads
+//! it takes a barrier against the decode that wrote it. A decode with no output also skips
+//! steps 1 and 2. [`DecodeEngine::read_slot`] takes them later for a frame shown again.
+//! A use of an empty image starts from `UNDEFINED`, which discards its contents and needs
+//! no transfer.
 //!
 //! A new session takes its reset inside the coding scope of its first picture. A decode
 //! scope needs session parameters bound, and that scope has them. So the same call order
@@ -24,6 +26,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
+use super::barriers::{discard_barrier, image_barrier, read_barrier};
 use super::caps::{DecodeCaps, DpbMode, align_up, image_extent, separate_images};
 use super::copy::WAIT;
 use super::device::VulkanDevice;
@@ -32,7 +35,7 @@ use super::objects::{CommandPool, HostBuffer, StatusQuery, Timeline};
 use super::pictures::{
     PictureImage, PictureStore, SlotState, copy_returns_image, state_after_copy,
 };
-use super::session::{SessionParameters, SessionSpec, VideoProfile, VideoSession};
+use super::session::{SessionParameters, SessionSpec, VideoProfile, VideoSession, image_format};
 use crate::error::DecodeError;
 
 /// How long a host wait lasts before it reports an error.
@@ -53,11 +56,14 @@ const fn status_name(status: i32) -> &'static str {
     }
 }
 
-/// One DPB slot in a decode, with its codec structure.
+/// One DPB slot in a decode, with its codec structure. A codec with no slot structure
+/// passes null.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SlotRef {
     pub(super) slot: u32,
     pub(super) codec_info: *const c_void,
+    /// The coded size of the picture this slot holds, or takes.
+    pub(super) coded: (u32, u32),
 }
 
 /// One picture to decode.
@@ -72,6 +78,9 @@ pub(super) struct DecodeRequest<'a> {
     pub(super) references: &'a [SlotRef],
     /// Whether the picture stays a reference.
     pub(super) reference: bool,
+    /// Whether a plane copy follows this decode. A decode with no output moves no image to
+    /// the copy queue.
+    pub(super) output: bool,
     /// The picture's pts, for errors.
     pub(super) pts: i64,
 }
@@ -101,11 +110,14 @@ struct EngineObjects {
     timeline: Timeline,
 }
 
-/// The session and everything one decode needs. Later codecs reuse it whole.
+/// The session and everything one decode needs. Every codec shares it.
 pub(super) struct DecodeEngine {
     // `Drop` frees these only once both queues are done with them.
     objects: ManuallyDrop<EngineObjects>,
-    coded: vk::Extent2D,
+    /// The largest coded size this session takes.
+    max_coded: (u32, u32),
+    /// `maxActiveReferencePictures` of the session.
+    active_references: u32,
     size_alignment: u64,
     // `new_bitstream` needs it when a picture outgrows the buffer.
     profile: VideoProfile,
@@ -136,18 +148,63 @@ pub(super) struct EngineSpec<'a> {
     pub(super) coded: (u32, u32),
     pub(super) slots: u32,
     pub(super) active_references: u32,
+    /// Whether a plane copy can read a slot's image: see [`DecodeEngine::read_slot`].
+    pub(super) readable_slots: bool,
 }
 
-/// The parameters a coding scope binds. Each decode scope needs them, and the session's
-/// reset runs in one, so a codec sets them before its first picture.
+/// The parameters a coding scope binds. A decode scope of a codec with session parameters
+/// needs them, and the session's reset runs in one. So that codec sets them before its first
+/// picture. VP9 uses none, so `uses_parameters` is false and the handle stays null.
 fn bound_parameters(
     parameters: Option<vk::VideoSessionParametersKHR>,
+    uses_parameters: bool,
     pts: i64,
 ) -> Result<vk::VideoSessionParametersKHR, DecodeError> {
+    if !uses_parameters {
+        return Ok(vk::VideoSessionParametersKHR::null());
+    }
     parameters.ok_or_else(|| DecodeError::VulkanDecodeRequest {
         pts,
         reason: "the session has no parameters".to_owned(),
     })
+}
+
+/// Refuses a request the driver takes as invalid usage, whatever its codec:
+///
+/// - a slot past the session's `slots`.
+/// - more references than `limit`, `VUID-vkCmdDecodeVideoKHR-activeReferencePictureCount-07150`.
+/// - a slot named twice, `VUID-VkVideoBeginCodingInfoKHR-pPictureResource-07238`,
+///   `VUID-vkCmdDecodeVideoKHR-pDecodeInfo-07264`, and
+///   `VUID-vkCmdDecodeVideoKHR-dpbFrameUseCount-07176`.
+///
+/// The setup slot counts as named, because a coding scope binds it too. No path here decodes a
+/// second field, which shares its first field's slot. So a valid stream never names a slot twice.
+fn check_slots(request: &DecodeRequest<'_>, slots: usize, limit: u32) -> Result<(), DecodeError> {
+    let named = || request.references.iter().chain([&request.setup]);
+    for slot_ref in named() {
+        if slot_ref.slot as usize >= slots {
+            return Err(absent_slot(slot_ref.slot, slots, request.pts));
+        }
+    }
+    if request.references.len() > limit as usize {
+        return Err(DecodeError::VulkanTooManyReferences {
+            pts: request.pts,
+            references: request.references.len(),
+            limit,
+        });
+    }
+    for (index, slot_ref) in named().enumerate() {
+        if named()
+            .take(index)
+            .any(|earlier| earlier.slot == slot_ref.slot)
+        {
+            return Err(DecodeError::VulkanDuplicateSlot {
+                pts: request.pts,
+                slot: slot_ref.slot,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The error of a slot index past the session's slots.
@@ -173,13 +230,14 @@ impl DecodeEngine {
             spec.slots,
             separate_images(caps.flags),
             image_extent(spec.coded, caps.granularity),
+            spec.readable_slots,
         )?;
         let session = VideoSession::new(
             device,
             &SessionSpec {
                 profile: &profile,
                 caps,
-                format: vk::Format::G8_B8R8_2PLANE_420_UNORM,
+                format: image_format(profile.pixel_format()),
                 coded: spec.coded,
                 slots: spec.slots,
                 active_references: spec.active_references,
@@ -207,15 +265,18 @@ impl DecodeEngine {
                 pool,
                 timeline,
             }),
-            coded: vk::Extent2D {
-                width: spec.coded.0,
-                height: spec.coded.1,
-            },
+            max_coded: spec.coded,
+            active_references: spec.active_references,
             size_alignment: caps.size_alignment,
             profile,
             needs_reset: true,
             device: Arc::clone(device),
         })
+    }
+
+    /// The largest coded size this session takes.
+    pub(super) const fn max_coded(&self) -> (u32, u32) {
+        self.max_coded
     }
 
     /// The session, for its parameters.
@@ -294,31 +355,41 @@ impl DecodeEngine {
         Ok(range)
     }
 
-    fn resource(&self, view: vk::ImageView) -> vk::VideoPictureResourceInfoKHR<'static> {
+    fn resource(
+        view: vk::ImageView,
+        coded: (u32, u32),
+    ) -> vk::VideoPictureResourceInfoKHR<'static> {
         vk::VideoPictureResourceInfoKHR::default()
-            .coded_extent(self.coded)
+            .coded_extent(vk::Extent2D {
+                width: coded.0,
+                height: coded.1,
+            })
             .image_view_binding(view)
     }
 
-    /// Refuses a request that names no slot of this session, or a session with no
-    /// parameters.
+    /// Refuses a request with slots this session cannot bind, or a session with no parameters.
+    /// The refusal comes before any driver call of the picture.
     fn check_request(&self, request: &DecodeRequest<'_>) -> Result<(), DecodeError> {
-        let slots = self.objects.pictures.slots.len();
-        for slot_ref in request.references.iter().chain([&request.setup]) {
-            if slot_ref.slot as usize >= slots {
-                return Err(absent_slot(slot_ref.slot, slots, request.pts));
-            }
-        }
+        check_slots(
+            request,
+            self.objects.pictures.slots.len(),
+            self.active_references,
+        )?;
         let parameters = self.objects.parameters.as_ref();
-        bound_parameters(parameters.map(|parameters| parameters.raw), request.pts).map(|_| ())
+        bound_parameters(
+            parameters.map(|parameters| parameters.raw),
+            self.profile.uses_parameters(),
+            request.pts,
+        )
+        .map(|_| ())
     }
 
     /// Decodes one picture and waits for it. The result names what a copy reads.
     ///
     /// # Safety
     ///
-    /// Each pointer in `request` points to a valid chain for this session's codec, and
-    /// each referenced structure lives through the call.
+    /// Each pointer in `request` points to a valid chain for this session's codec. Each
+    /// referenced structure lives through the call.
     pub(super) unsafe fn decode(
         &mut self,
         request: &DecodeRequest<'_>,
@@ -338,28 +409,127 @@ impl DecodeEngine {
         self.record_acquires(request);
         // SAFETY: the caller states the codec chains are valid, and the buffer is recording.
         let target = unsafe { self.record_decode(request, range) }?;
-        self.record_release(target);
+        if request.output {
+            self.record_release(target, self.decode_layout());
+        }
 
         let timeline_value = self.submit_and_wait(&what)?;
         self.needs_reset = false;
         self.check_status(request.pts)?;
 
-        let mode = self.objects.pictures.mode;
+        let pictures = &mut self.objects.pictures;
         for reference in request.references {
-            self.objects.pictures.slots[reference.slot as usize].state = SlotState::Ready;
+            if let Some(entry) = pictures.slots.get_mut(reference.slot as usize) {
+                entry.state = SlotState::Ready;
+            }
         }
-        self.objects.pictures.slots[request.setup.slot as usize].state =
-            state_after_copy(mode, request.reference);
+        let mode = pictures.mode;
+        if let Some(entry) = pictures.slots.get_mut(request.setup.slot as usize) {
+            entry.state = state_after_copy(mode, request.reference, request.output);
+        }
         Ok(CopySource {
             picture: target,
             timeline_value,
             timeline: self.objects.timeline.raw,
             returns_image: copy_returns_image(mode, request.reference),
-            decode_layout: match mode {
-                DpbMode::Coincide => vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-                DpbMode::Distinct => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-            },
+            decode_layout: self.decode_layout(),
         })
+    }
+
+    /// The layout the output image holds during a decode.
+    fn decode_layout(&self) -> vk::ImageLayout {
+        match self.objects.pictures.mode {
+            DpbMode::Coincide => vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
+            DpbMode::Distinct => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+        }
+    }
+
+    /// Prepares a stored slot for a plane copy, for a picture a codec shows again. The slot
+    /// stays a reference: the copy hands it back, and the next decode takes it. The engine
+    /// must open with `readable_slots`.
+    pub(super) fn read_slot(&mut self, slot: u32, pts: i64) -> Result<CopySource, DecodeError> {
+        let pictures = &self.objects.pictures;
+        let count = pictures.slots.len();
+        let state = pictures
+            .slots
+            .get(slot as usize)
+            .map(|entry| entry.state)
+            .ok_or_else(|| absent_slot(slot, count, pts))?;
+        if state == SlotState::Empty {
+            return Err(DecodeError::VulkanDecodeRequest {
+                pts,
+                reason: format!("DPB slot {slot} holds no picture to show"),
+            });
+        }
+        let picture = pictures
+            .slot_image(slot as usize)
+            .ok_or_else(|| absent_slot(slot, count, pts))?;
+        let what = format!("DPB slot {slot} at pts {pts}");
+        self.begin_commands(&what)?;
+        let families = self.families_to_video(self.device.transfers_ownership());
+        let acquire = read_barrier(state, picture, families);
+        self.pipeline_barrier(acquire.as_slice());
+        self.record_release(picture, vk::ImageLayout::VIDEO_DECODE_DPB_KHR);
+        let timeline_value = self.submit_and_wait(&what)?;
+        if let Some(entry) = self.objects.pictures.slots.get_mut(slot as usize) {
+            entry.state = SlotState::Returning;
+        }
+        Ok(CopySource {
+            picture,
+            timeline_value,
+            timeline: self.objects.timeline.raw,
+            returns_image: true,
+            decode_layout: vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
+        })
+    }
+
+    /// The view of `slot`.
+    fn slot_view(&self, slot: u32, pts: i64) -> Result<vk::ImageView, DecodeError> {
+        let slots = &self.objects.pictures.slots;
+        slots
+            .get(slot as usize)
+            .map(|entry| entry.view.raw)
+            .ok_or_else(|| absent_slot(slot, slots.len(), pts))
+    }
+
+    /// The resource of each reference, in request order.
+    fn reference_resources(
+        &self,
+        request: &DecodeRequest<'_>,
+    ) -> Result<Vec<vk::VideoPictureResourceInfoKHR<'static>>, DecodeError> {
+        request
+            .references
+            .iter()
+            .map(|reference| {
+                self.slot_view(reference.slot, request.pts)
+                    .map(|view| Self::resource(view, reference.coded))
+            })
+            .collect()
+    }
+
+    /// The resource the decode writes for output, and the image behind it.
+    fn output_target(
+        &self,
+        request: &DecodeRequest<'_>,
+        setup_resource: vk::VideoPictureResourceInfoKHR<'static>,
+    ) -> Result<(vk::VideoPictureResourceInfoKHR<'static>, PictureImage), DecodeError> {
+        let pictures = &self.objects.pictures;
+        match &pictures.output {
+            Some((view, image)) => Ok((
+                Self::resource(view.raw, request.setup.coded),
+                PictureImage {
+                    image: image.raw,
+                    layer: 0,
+                },
+            )),
+            None => {
+                let setup = request.setup.slot;
+                let target = pictures
+                    .slot_image(setup as usize)
+                    .ok_or_else(|| absent_slot(setup, pictures.slots.len(), request.pts))?;
+                Ok((setup_resource, target))
+            }
+        }
     }
 
     /// Records the coding scope: the first picture's reset, the query, and the decode.
@@ -376,20 +546,9 @@ impl DecodeEngine {
     ) -> Result<PictureImage, DecodeError> {
         let objects = &*self.objects;
         let pts = request.pts;
-        let slots = objects.pictures.slots.len();
-        let slot_view = |slot: u32| {
-            objects
-                .pictures
-                .slots
-                .get(slot as usize)
-                .map(|entry| entry.view.raw)
-                .ok_or_else(|| absent_slot(slot, slots, pts))
-        };
-        let setup_resource = self.resource(slot_view(request.setup.slot)?);
-        let mut reference_resources = Vec::with_capacity(request.references.len());
-        for reference in request.references {
-            reference_resources.push(self.resource(slot_view(reference.slot)?));
-        }
+        let setup_view = self.slot_view(request.setup.slot, pts)?;
+        let setup_resource = Self::resource(setup_view, request.setup.coded);
+        let reference_resources = self.reference_resources(request)?;
         let bound: Vec<_> = request
             .references
             .iter()
@@ -407,12 +566,15 @@ impl DecodeEngine {
         let parameters = objects.parameters.as_ref().map(|parameters| parameters.raw);
         let begin = vk::VideoBeginCodingInfoKHR::default()
             .video_session(objects.session.raw)
-            .video_session_parameters(bound_parameters(parameters, pts)?)
+            .video_session_parameters(bound_parameters(
+                parameters,
+                self.profile.uses_parameters(),
+                pts,
+            )?)
             .reference_slots(&bound);
-        let control =
-            vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
 
-        let decode_references: Vec<_> = bound[..request.references.len()]
+        // `bound` ends in the new picture's slot, and the zip stops before it.
+        let decode_references: Vec<_> = bound
             .iter()
             .zip(request.references)
             .map(|(slot, reference)| {
@@ -426,23 +588,7 @@ impl DecodeEngine {
             .picture_resource(&setup_resource);
         setup_slot.p_next = request.setup.codec_info;
 
-        let (dst_resource, target) = match &objects.pictures.output {
-            Some((view, image)) => (
-                self.resource(view.raw),
-                PictureImage {
-                    image: image.raw,
-                    layer: 0,
-                },
-            ),
-            None => {
-                let setup = request.setup.slot;
-                let target = objects
-                    .pictures
-                    .slot_image(setup as usize)
-                    .ok_or_else(|| absent_slot(setup, slots, pts))?;
-                (setup_resource, target)
-            }
-        };
+        let (dst_resource, target) = self.output_target(request, setup_resource)?;
         let mut info = vk::VideoDecodeInfoKHR::default()
             .src_buffer(objects.bitstream.raw)
             .src_buffer_offset(0)
@@ -452,15 +598,34 @@ impl DecodeEngine {
             .reference_slots(&decode_references);
         info.p_next = request.picture_info;
 
+        // SAFETY: the caller states the codec chains are valid, and the buffer is recording.
+        // `begin`, `info`, and all they point to live in this function.
+        unsafe { self.record_scope(&begin, &info) };
+        Ok(target)
+    }
+
+    /// Records the commands of one coding scope, in their one order.
+    ///
+    /// # Safety
+    ///
+    /// The buffer is recording on the video family. `begin` and `info` hold valid chains.
+    unsafe fn record_scope(
+        &self,
+        begin: &vk::VideoBeginCodingInfoKHR<'_>,
+        info: &vk::VideoDecodeInfoKHR<'_>,
+    ) {
+        let objects = &*self.objects;
         let device = &self.device;
         let cmd = objects.pool.buffer;
         let fns = device.video_fns.fp();
+        let control =
+            vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
         let end = vk::VideoEndCodingInfoKHR::default();
-        // SAFETY: the buffer is recording on the video family, each resource layout was
-        // set by `record_acquires`, and the caller states the codec chains are valid. The
-        // first picture binds no active slot, so its reset invalidates nothing it reads.
+        // SAFETY: the buffer is recording on the video family. `record_acquires` set each
+        // resource layout, and the caller states the codec chains are valid. The first
+        // picture binds no active slot, so its reset invalidates nothing it reads.
         unsafe {
-            (fns.cmd_begin_video_coding_khr)(cmd, &begin);
+            (fns.cmd_begin_video_coding_khr)(cmd, begin);
             if self.needs_reset {
                 (fns.cmd_control_video_coding_khr)(cmd, &control);
             }
@@ -469,13 +634,12 @@ impl DecodeEngine {
                     .raw
                     .cmd_begin_query(cmd, status.raw, 0, vk::QueryControlFlags::empty());
             }
-            (device.decode_fns.fp().cmd_decode_video_khr)(cmd, &info);
+            (device.decode_fns.fp().cmd_decode_video_khr)(cmd, info);
             if let Some(status) = &objects.status {
                 device.raw.cmd_end_query(cmd, status.raw, 0);
             }
             (fns.cmd_end_video_coding_khr)(cmd, &end);
         }
-        Ok(target)
     }
 
     /// Marks `slot` free. Its contents go when the next decode takes it.
@@ -522,10 +686,11 @@ impl DecodeEngine {
         let families = self.families_to_video(self.device.transfers_ownership());
         let mut barriers = Vec::with_capacity(request.references.len() + 2);
         for reference in request.references {
-            let state = pictures.slots[reference.slot as usize].state;
             let barrier = pictures
-                .slot_image(reference.slot as usize)
-                .and_then(|picture| read_barrier(state, picture, families));
+                .slots
+                .get(reference.slot as usize)
+                .zip(pictures.slot_image(reference.slot as usize))
+                .and_then(|(entry, picture)| read_barrier(entry.state, picture, families));
             barriers.extend(barrier);
         }
         if let Some(picture) = pictures.slot_image(request.setup.slot as usize) {
@@ -549,11 +714,7 @@ impl DecodeEngine {
     }
 
     /// Moves the decoded image to the copy layout, and to the general family.
-    fn record_release(&self, target: PictureImage) {
-        let old = match self.objects.pictures.mode {
-            DpbMode::Coincide => vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-            DpbMode::Distinct => vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-        };
+    fn record_release(&self, target: PictureImage, old: vk::ImageLayout) {
         let transfers = self.device.transfers_ownership();
         let (dst_stage, dst_access) = if transfers {
             (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
@@ -621,16 +782,12 @@ impl Drop for DecodeEngine {
     fn drop(&mut self) {
         let timeline = &self.objects.timeline;
         let video_done = timeline.wait(timeline.last, WAIT_NS).is_ok();
-        // A stalled video queue also stalls each copy that waits on it, so the second wait
+        // A stalled video queue also stalls each copy that waits on it. So the second wait
         // runs only after the first passes.
         let copies_done = video_done
             && self
                 .device
-                .wgpu_device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: Some(WAIT),
-                })
+                .wait_general_queue(None, "the end of a session")
                 .is_ok();
         if safe_to_destroy(video_done, copies_done) {
             // SAFETY: both queues finished with the objects, `drop` runs once, and nothing
@@ -638,94 +795,6 @@ impl Drop for DecodeEngine {
             unsafe { ManuallyDrop::drop(&mut self.objects) };
         }
     }
-}
-
-/// The barrier a decode needs before it reads a slot in `state`, or `None`. `families`
-/// is `(general, video)` when the queue families differ, and both ignored otherwise.
-///
-/// - `Written`: the decode that wrote the slot, against this read.
-/// - `Returning`: the slot comes back from the copy layout. With a transfer, this is the
-///   acquire of the copy queue's release, and an acquire has no source scope. With no
-///   transfer, the source scope chains to the barrier that ended the writing decode.
-fn read_barrier(
-    state: SlotState,
-    picture: PictureImage,
-    families: (u32, u32),
-) -> Option<vk::ImageMemoryBarrier2<'static>> {
-    let read = (
-        vk::PipelineStageFlags2::VIDEO_DECODE_KHR,
-        vk::AccessFlags2::VIDEO_DECODE_READ_KHR,
-        vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-    );
-    match state {
-        SlotState::Empty | SlotState::Ready => None,
-        SlotState::Written => Some(image_barrier(
-            picture,
-            (
-                vk::PipelineStageFlags2::VIDEO_DECODE_KHR,
-                vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR,
-                vk::ImageLayout::VIDEO_DECODE_DPB_KHR,
-            ),
-            read,
-            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
-        )),
-        SlotState::Returning => {
-            let stage = if families.0 == vk::QUEUE_FAMILY_IGNORED {
-                vk::PipelineStageFlags2::ALL_COMMANDS
-            } else {
-                vk::PipelineStageFlags2::NONE
-            };
-            Some(image_barrier(
-                picture,
-                (
-                    stage,
-                    vk::AccessFlags2::NONE,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                ),
-                read,
-                families,
-            ))
-        }
-    }
-}
-
-/// One image barrier: `(stage, access, layout)` on each side, and `(from, to)` families.
-pub(super) fn image_barrier(
-    picture: PictureImage,
-    src: (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout),
-    dst: (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout),
-    families: (u32, u32),
-) -> vk::ImageMemoryBarrier2<'static> {
-    vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(src.0)
-        .src_access_mask(src.1)
-        .old_layout(src.2)
-        .dst_stage_mask(dst.0)
-        .dst_access_mask(dst.1)
-        .new_layout(dst.2)
-        .src_queue_family_index(families.0)
-        .dst_queue_family_index(families.1)
-        .image(picture.image)
-        .subresource_range(super::objects::color_range(picture.layer))
-}
-
-/// A barrier that discards an image's contents and takes it for a decode. The source scope
-/// holds an earlier decode's write, so that write cannot land on the new picture.
-fn discard_barrier(
-    picture: PictureImage,
-    layout: vk::ImageLayout,
-    access: vk::AccessFlags2,
-) -> vk::ImageMemoryBarrier2<'static> {
-    image_barrier(
-        picture,
-        (
-            vk::PipelineStageFlags2::VIDEO_DECODE_KHR,
-            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR,
-            vk::ImageLayout::UNDEFINED,
-        ),
-        (vk::PipelineStageFlags2::VIDEO_DECODE_KHR, access, layout),
-        (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
-    )
 }
 
 #[cfg(test)]
@@ -744,102 +813,85 @@ mod tests {
         assert_eq!(status_name(7), "unknown");
     }
 
-    #[test]
-    fn a_discard_starts_from_undefined_with_no_transfer() {
-        let picture = PictureImage {
-            image: vk::Image::null(),
-            layer: 3,
+    fn slot_ref(slot: u32) -> SlotRef {
+        SlotRef {
+            slot,
+            codec_info: std::ptr::null(),
+            coded: (64, 64),
+        }
+    }
+
+    fn checked(setup: u32, references: &[u32], limit: u32) -> Result<(), DecodeError> {
+        let references: Vec<_> = references.iter().copied().map(slot_ref).collect();
+        let request = DecodeRequest {
+            bitstream: &[],
+            picture_info: std::ptr::null(),
+            setup: slot_ref(setup),
+            references: &references,
+            reference: true,
+            output: true,
+            pts: 9,
         };
-        let barrier = discard_barrier(
-            picture,
-            vk::ImageLayout::VIDEO_DECODE_DST_KHR,
-            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR,
-        );
-        assert_eq!(barrier.old_layout, vk::ImageLayout::UNDEFINED);
-        assert_eq!(barrier.new_layout, vk::ImageLayout::VIDEO_DECODE_DST_KHR);
-        assert_eq!(barrier.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
-        assert_eq!(barrier.dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
-        assert_eq!(barrier.subresource_range.base_array_layer, 3);
-        assert_eq!(
-            barrier.src_access_mask,
-            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
-        );
-    }
-
-    const NO_TRANSFER: (u32, u32) = (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED);
-    const PICTURE: PictureImage = PictureImage {
-        image: vk::Image::null(),
-        layer: 1,
-    };
-
-    #[test]
-    fn a_written_slot_takes_a_memory_dependency_before_a_read() {
-        let barrier = read_barrier(SlotState::Written, PICTURE, NO_TRANSFER).expect("a barrier");
-        assert_eq!(
-            barrier.src_stage_mask,
-            vk::PipelineStageFlags2::VIDEO_DECODE_KHR
-        );
-        assert_eq!(
-            barrier.src_access_mask,
-            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR
-        );
-        assert_eq!(
-            barrier.dst_stage_mask,
-            vk::PipelineStageFlags2::VIDEO_DECODE_KHR
-        );
-        assert_eq!(
-            barrier.dst_access_mask,
-            vk::AccessFlags2::VIDEO_DECODE_READ_KHR
-        );
-        assert_eq!(barrier.old_layout, vk::ImageLayout::VIDEO_DECODE_DPB_KHR);
-        assert_eq!(barrier.new_layout, vk::ImageLayout::VIDEO_DECODE_DPB_KHR);
-        assert_eq!(barrier.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        check_slots(&request, 6, limit)
     }
 
     #[test]
-    fn a_ready_or_empty_slot_takes_no_barrier() {
-        assert!(read_barrier(SlotState::Ready, PICTURE, NO_TRANSFER).is_none());
-        assert!(read_barrier(SlotState::Empty, PICTURE, NO_TRANSFER).is_none());
+    fn distinct_slots_up_to_the_limit_pass() {
+        assert_eq!(checked(0, &[], 1), Ok(()));
+        assert_eq!(checked(5, &[1, 2, 3], 3), Ok(()));
     }
 
     #[test]
-    fn a_returning_slot_acquires_or_chains_on_one_family() {
-        let barrier = read_barrier(SlotState::Returning, PICTURE, (0, 3)).expect("a barrier");
-        assert_eq!(barrier.src_stage_mask, vk::PipelineStageFlags2::NONE);
-        assert_eq!(barrier.old_layout, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-        assert_eq!(barrier.new_layout, vk::ImageLayout::VIDEO_DECODE_DPB_KHR);
+    fn more_references_than_the_session_holds_are_refused_by_name() {
+        let error = checked(5, &[1, 2, 3], 2).expect_err("refused");
         assert_eq!(
-            barrier.dst_access_mask,
-            vk::AccessFlags2::VIDEO_DECODE_READ_KHR
+            error,
+            DecodeError::VulkanTooManyReferences {
+                pts: 9,
+                references: 3,
+                limit: 2,
+            }
         );
-        assert_eq!(
-            (
-                barrier.src_queue_family_index,
-                barrier.dst_queue_family_index
-            ),
-            (0, 3)
-        );
+        let text = error.to_string();
+        assert!(text.contains("pts 9"), "{text}");
+        assert!(text.contains("binds 3"), "{text}");
+        assert!(text.contains("holds 2"), "{text}");
+        assert!(text.contains("re-encode"), "{text}");
+    }
 
-        let barrier = read_barrier(SlotState::Returning, PICTURE, NO_TRANSFER).expect("a barrier");
-        assert_eq!(
-            barrier.src_stage_mask,
-            vk::PipelineStageFlags2::ALL_COMMANDS
-        );
-        assert_eq!(
-            barrier.dst_access_mask,
-            vk::AccessFlags2::VIDEO_DECODE_READ_KHR
-        );
+    #[test]
+    fn a_slot_named_twice_is_refused_by_name() {
+        for (setup, references, slot) in [(5, &[1, 2, 1], 1), (2, &[1, 2, 3], 2)] {
+            let error = checked(setup, references, 3).expect_err("refused");
+            assert_eq!(error, DecodeError::VulkanDuplicateSlot { pts: 9, slot });
+            let text = error.to_string();
+            assert!(text.contains(&format!("DPB slot {slot} twice")), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_slot_past_the_session_comes_first() {
+        let error = checked(5, &[7, 7, 7], 1).expect_err("refused");
+        assert!(matches!(error, DecodeError::VulkanDecodeRequest { .. }));
     }
 
     #[test]
     fn a_decode_needs_session_parameters() {
         let raw = vk::VideoSessionParametersKHR::null();
-        assert_eq!(bound_parameters(Some(raw), 4), Ok(raw));
-        let error = bound_parameters(None, 4).expect_err("refused");
+        assert_eq!(bound_parameters(Some(raw), true, 4), Ok(raw));
+        let error = bound_parameters(None, true, 4).expect_err("refused");
         assert!(matches!(
             error,
             DecodeError::VulkanDecodeRequest { pts: 4, .. }
         ));
+    }
+
+    #[test]
+    fn a_codec_with_no_parameters_binds_a_null_handle() {
+        assert_eq!(
+            bound_parameters(None, false, 4),
+            Ok(vk::VideoSessionParametersKHR::null())
+        );
     }
 
     #[test]

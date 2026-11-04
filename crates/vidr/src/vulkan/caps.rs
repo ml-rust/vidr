@@ -41,8 +41,21 @@ pub enum DpbPreference {
     Distinct,
 }
 
+/// The mode for `flags`, or the refusal of `codec` that names what the driver lacks.
+pub(super) fn dpb_mode(
+    codec: DecodeCodec,
+    flags: vk::VideoDecodeCapabilityFlagsKHR,
+    preference: DpbPreference,
+) -> Result<DpbMode, DecodeError> {
+    choose_dpb_mode(flags, preference).map_err(|reason| DecodeError::VulkanRefused {
+        codec,
+        what: "a DPB mode".to_owned(),
+        reason,
+    })
+}
+
 /// The mode for `flags`, or what the driver lacks.
-pub(super) fn choose_dpb_mode(
+fn choose_dpb_mode(
     flags: vk::VideoDecodeCapabilityFlagsKHR,
     preference: DpbPreference,
 ) -> Result<DpbMode, String> {
@@ -68,12 +81,12 @@ pub(super) fn align_up(value: u64, alignment: u64) -> u64 {
     value.div_ceil(alignment.max(1)) * alignment.max(1)
 }
 
-/// The image size that holds `coded` at the driver's picture access granularity.
+/// The image size that holds `coded` at the driver's picture access granularity. A 4:2:0
+/// image takes even sizes, and a VP9 frame can be odd.
 pub(super) fn image_extent(coded: (u32, u32), granularity: (u32, u32)) -> (u32, u32) {
-    (
-        coded.0.div_ceil(granularity.0.max(1)) * granularity.0.max(1),
-        coded.1.div_ceil(granularity.1.max(1)) * granularity.1.max(1),
-    )
+    let side =
+        |length: u32, step: u32| (length.div_ceil(step.max(1)) * step.max(1)).next_multiple_of(2);
+    (side(coded.0, granularity.0), side(coded.1, granularity.1))
 }
 
 /// Refuses a stream outside the driver's limits, by name.
@@ -177,6 +190,7 @@ mod tests {
         assert_eq!(align_up(7, 0), 7);
         assert_eq!(image_extent((320, 192), (16, 16)), (320, 192));
         assert_eq!(image_extent((322, 180), (32, 64)), (352, 192));
+        assert_eq!(image_extent((321, 181), (1, 1)), (322, 182));
     }
 
     #[test]

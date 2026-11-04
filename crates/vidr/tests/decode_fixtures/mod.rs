@@ -82,6 +82,27 @@ impl Stream {
     }
 }
 
+/// The bytes of `NAME.hevc` and `NAME.yuv`, or `None` after a notice.
+#[allow(dead_code, reason = "each decoder's tests read their own fixtures")]
+pub(crate) fn raw_hevc(name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let dir = std::env::var_os("VIDR_HEVC_FIXTURES").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hevc"),
+        PathBuf::from,
+    );
+    let stream = std::fs::read(dir.join(format!("{name}.hevc"))).ok();
+    let reference = std::fs::read(dir.join(format!("{name}.yuv"))).ok();
+    if let (Some(stream), Some(reference)) = (stream, reference) {
+        return Some((stream, reference));
+    }
+    eprintln!(
+        "skipping: HEVC fixture `{name}` is missing in {}. Run \
+         crates/vidr/tests/fixtures/gen_hevc.py, or set VIDR_HEVC_FIXTURES to its output \
+         directory.",
+        dir.display()
+    );
+    None
+}
+
 fn directory() -> PathBuf {
     std::env::var_os("VIDR_NVDEC_FIXTURES").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nvdec"),

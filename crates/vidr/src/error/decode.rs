@@ -274,6 +274,38 @@ pub enum DecodeError {
         /// What the request lacks.
         reason: String,
     },
+    /// A picture binds more active references than its session holds.
+    VulkanTooManyReferences {
+        /// The picture's pts.
+        pts: i64,
+        /// The active references the picture binds.
+        references: usize,
+        /// `maxActiveReferencePictures` of the session.
+        limit: u32,
+    },
+    /// A picture names one DPB slot twice.
+    VulkanDuplicateSlot {
+        /// The picture's pts.
+        pts: i64,
+        /// The slot.
+        slot: u32,
+    },
+    /// A VP9 frame ends at or before its tile data.
+    VulkanNoTileBytes {
+        /// The frame's pts.
+        pts: i64,
+        /// Where the tile data starts, in bytes from the frame's start.
+        tiles_offset: u32,
+        /// The bytes of the frame.
+        frame_bytes: usize,
+    },
+    /// The Vulkan device is lost, so nothing on it runs again.
+    VulkanDeviceLost {
+        /// The call that reports it.
+        call: &'static str,
+        /// The inputs of the call.
+        input: String,
+    },
     /// An H.264 NAL unit does not parse.
     H264Header {
         /// The decoder.
@@ -563,6 +595,39 @@ impl fmt::Display for DecodeError {
                 f,
                 "the Vulkan core cannot run the picture at pts {pts}: {reason}. Report this as a \
                  vidr bug, with the stream that triggers it."
+            ),
+            Self::VulkanTooManyReferences {
+                pts,
+                references,
+                limit,
+            } => write!(
+                f,
+                "the picture at pts {pts} binds {references} active references, and its session \
+                 holds {limit}. The stream is damaged. Run `ffmpeg -v error -i INPUT -f null -` \
+                 on the source, and re-encode it if ffmpeg reports an error."
+            ),
+            Self::VulkanDuplicateSlot { pts, slot } => write!(
+                f,
+                "the picture at pts {pts} names DPB slot {slot} twice. The stream is damaged. \
+                 Run `ffmpeg -v error -i INPUT -f null -` on the source, and re-encode it if \
+                 ffmpeg reports an error."
+            ),
+            Self::VulkanNoTileBytes {
+                pts,
+                tiles_offset,
+                frame_bytes,
+            } => write!(
+                f,
+                "the VP9 frame at pts {pts} holds {frame_bytes} bytes, and its tile data starts \
+                 at byte {tiles_offset}. The frame has no tile bytes, so the stream is damaged. \
+                 Run `ffmpeg -v error -i INPUT -f null -` on the source, and re-encode it if \
+                 ffmpeg reports an error."
+            ),
+            Self::VulkanDeviceLost { call, input } => write!(
+                f,
+                "{call} reports a lost Vulkan device for {input}. Nothing on this device runs \
+                 again. Check the kernel log for a GPU reset, open a new device, and decode the \
+                 stream with another decoder if the loss repeats."
             ),
             Self::H264Header {
                 decoder,

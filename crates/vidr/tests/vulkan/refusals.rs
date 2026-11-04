@@ -40,18 +40,17 @@ fn field_coded_and_10_bit_streams_are_refused_at_open() {
 }
 
 #[test]
-fn other_codecs_are_not_supported_yet() {
+fn av1_is_not_supported_yet() {
     let Some((device, _guard)) = device() else {
         return;
     };
-    for codec in [DecodeCodec::Hevc, DecodeCodec::Av1, DecodeCodec::Vp9] {
-        let error = VulkanDecoder::new(&device, codec, &[])
-            .err()
-            .unwrap_or_else(|| panic!("{codec}: opens"));
-        let text = error.to_string();
-        assert!(matches!(error, DecodeError::VulkanRefused { .. }), "{text}");
-        assert!(text.contains("not supported yet"), "{text}");
-    }
+    let codec = DecodeCodec::Av1;
+    let error = VulkanDecoder::new(&device, codec, &[])
+        .err()
+        .unwrap_or_else(|| panic!("{codec}: opens"));
+    let text = error.to_string();
+    assert!(matches!(error, DecodeError::VulkanRefused { .. }), "{text}");
+    assert!(text.contains("not supported yet"), "{text}");
 }
 
 #[test]
@@ -74,6 +73,28 @@ fn a_stream_that_starts_on_a_p_picture_is_refused() {
     );
     assert_eq!(decoder.send(packet, *pts), Err(error), "the error repeats");
     assert_no_validation_errors(&device, name);
+}
+
+/// A stored error wins over the flush state and over an empty packet.
+#[test]
+fn an_error_repeats_on_every_later_call() {
+    let Some((device, _guard)) = device() else {
+        return;
+    };
+    let name = "h264_baseline";
+    let Some(stream) = load(name) else {
+        return;
+    };
+    let mut decoder = VulkanDecoder::new(&device, DecodeCodec::H264, &stream.config)
+        .unwrap_or_else(|error| panic!("{name}: open: {error}"));
+    let packets = samples(&stream);
+    let (packet, pts) = &packets[1];
+    let error = decoder.send(packet, *pts).expect_err("refused");
+    let expected = Err(error);
+    assert_eq!(decoder.flush(), expected, "the first flush");
+    assert_eq!(decoder.flush(), expected, "the second flush");
+    assert_eq!(decoder.send(packet, *pts), expected, "a send after a flush");
+    assert_eq!(decoder.send(&[], *pts), expected, "an empty packet");
 }
 
 /// Baseline holds every frame as a reference, so a dropped frame leaves a gap.

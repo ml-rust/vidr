@@ -120,8 +120,8 @@ impl fmt::Display for ExecutionError {
             ),
             Self::VulkanCodec { codec } => write!(
                 f,
-                "{} on Vulkan Video is not supported yet. --decoder vulkan decodes H.264 only in \
-                 this release. Pass --decoder auto or --decoder cpu.",
+                "{} on Vulkan Video is not supported yet. --decoder vulkan decodes H.264, HEVC, \
+                 and VP9 in this release. Pass --decoder auto or --decoder cpu.",
                 codec.name()
             ),
             Self::H264NotBaseline { profile_idc } => write!(

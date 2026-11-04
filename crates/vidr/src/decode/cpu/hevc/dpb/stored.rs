@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::decode::cpu::dsp::sample::Sample;
+use crate::decode::hevc_order::buffer::BufferedPicture;
 
 use super::buffer::Frame;
 
@@ -34,6 +35,12 @@ pub(crate) trait StoredPicture: Clone {
 
     /// The picture's buffer, for a new picture of the same size.
     fn reclaim(self) -> Reclaim<Self>;
+}
+
+impl<P: StoredPicture> BufferedPicture for P {
+    fn poc(&self) -> i32 {
+        StoredPicture::poc(self)
+    }
 }
 
 impl<S: Sample> StoredPicture for Arc<Frame<S>> {

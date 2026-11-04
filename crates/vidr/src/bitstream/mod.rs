@@ -60,7 +60,7 @@ pub(crate) mod hevc_pps;
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
 pub(crate) mod hevc_pred_weight;
 #[cfg(feature = "hevc")]
-mod hevc_ptl;
+pub(crate) mod hevc_ptl;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
 pub(crate) mod hevc_rps;
@@ -77,7 +77,7 @@ mod hevc_sps;
 pub(crate) mod hevc_sps_full;
 #[cfg(feature = "hevc")]
 #[allow(dead_code, reason = "read by the CPU HEVC decoder and Vulkan units")]
-mod hevc_vps;
+pub(crate) mod hevc_vps;
 #[cfg(feature = "hevc")]
 mod hevc_vui;
 #[cfg(feature = "hevc")]
@@ -93,7 +93,10 @@ pub mod av1;
 #[cfg(feature = "vp9")]
 mod vp9;
 #[cfg(feature = "vp9")]
-#[allow(dead_code, reason = "read by the Vulkan VP9 unit")]
+#[allow(
+    dead_code,
+    reason = "a build with `vp9` alone reads the frame color only"
+)]
 mod vp9_header;
 
 #[cfg(all(test, any(feature = "hevc", feature = "vp9")))]
@@ -123,13 +126,15 @@ pub use nal::HevcNalType;
 pub use nal::ParameterSetKind;
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use to_annexb::ToAnnexB;
-#[cfg(feature = "cpu-vp9")]
+#[cfg(any(feature = "cpu-vp9", feature = "vulkan-video"))]
 pub(crate) use vp9::split_superframe;
 #[cfg(feature = "vp9")]
 pub use vp9::{Vp9Color, vp9_color, vp9_packet_color};
-#[cfg(feature = "cpu-vp9")]
+#[cfg(any(feature = "cpu-vp9", feature = "vulkan-video"))]
 pub(crate) use vp9_header::{
     ColorConfig, NUM_REF_FRAMES, RefFrameTable, UncompressedHeader, Vp9HeaderParser,
 };
+#[cfg(feature = "vulkan-video")]
+pub(crate) use vp9_header::{KEY_FRAME, LoopFilterParams, SegmentationParams};
 #[cfg(any(feature = "h264", feature = "hevc"))]
 pub use vui::{ChromaSampleLoc, ColourDescription, VideoSignalType, VuiSignal};
