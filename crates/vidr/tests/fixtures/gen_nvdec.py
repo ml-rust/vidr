@@ -23,7 +23,9 @@ For each stream NAME the script writes:
   (`nv12` or `p010`), and the ffprobe colour fields `matrix`, `transfer`,
   `primaries` as H.273 code points and `range` (`tv` or `pc`). A stream
   whose SPS signals a chroma sample location also has `chroma_location`,
-  the H.273 `ChromaSampleLocType` number.
+  the H.273 `ChromaSampleLocType` number. `interlaced` and `top_field_first`
+  (0 or 1) are what ffprobe reports for every frame. The script exits when
+  frames disagree, so each stream holds one structure.
 - `NAME.yuv`: ffmpeg's software decode as `-f rawvideo` in `nv12` or
   `p010le`, every frame in display order. Streams the tests expect NVDEC
   to refuse have no `.yuv`.
@@ -68,6 +70,11 @@ CHROMA_LOCATIONS = {"center": (1, "center")}
 CENTER = ["-chroma_sample_location", "center"]
 
 X264 = ["-c:v", "libx264", "-g", "5", "-bf", "2"]
+# libx264 has no PAFF mode. `+ildct+ilme` turns on MBAFF, which sets
+# `frame_mbs_only_flag` 0 and `mb_adaptive_frame_field_flag` 1.
+MBAFF = ["-flags", "+ildct+ilme", "-x264-params", "tff=1"]
+# Source filters in front of the colour filter, by stream name.
+SOURCE_FILTERS = {"h264_mbaff_interlaced": "interlace=scan=tff,"}
 X265 = "keyint=5:min-keyint=5:bframes=2:log-level=error"
 AOM = ["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "5", "-row-mt", "0"]
 VPX = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-g", "5"]
@@ -86,6 +93,13 @@ STREAMS = [
     ("h264_chroma_center", "h264", "yuv420p", [*X264, *CENTER], "nv12"),
     ("hevc_chroma_center", "hevc", "yuv420p",
      ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1", *CENTER], "nv12"),
+    # Picture structure. Progressive content coded as MBAFF, interlaced
+    # content coded as MBAFF, and progressive content flagged with
+    # `frame_mbs_only_flag` 0 but coded as plain frames (no MBAFF).
+    ("h264_mbaff_progressive", "h264", "yuv420p", [*X264, *MBAFF], "nv12"),
+    ("h264_mbaff_interlaced", "h264", "yuv420p", [*X264, *MBAFF], "nv12"),
+    ("h264_frame_flagged", "h264", "yuv420p",
+     [*X264, "-x264-params", "fake-interlaced=1"], "nv12"),
     # Odd display size. H.264 and HEVC crop in units of two samples at 4:2:0,
     # so only AV1 and VP9 carry an odd display size.
     ("av1_odd", "av1", "yuv420p", AOM, "nv12"),
@@ -105,6 +119,15 @@ def tool(name, args):
         print(f"{name} {' '.join(args)} failed:\n{result.stderr}", file=sys.stderr)
         return None
     return result.stdout
+
+
+def picture_structure(mp4, name):
+    """Returns (interlaced, top_field_first) as ffprobe reports every frame."""
+    frames = probe(mp4, "frames", "frame=interlaced_frame,top_field_first")["frames"]
+    seen = {(int(f["interlaced_frame"]), int(f["top_field_first"])) for f in frames}
+    if len(seen) != 1:
+        sys.exit(f"{name}: ffprobe reports mixed picture structures {sorted(seen)}")
+    return seen.pop()
 
 
 def probe(path, section, entries):
@@ -159,6 +182,7 @@ def write_meta(mp4, out, name, codec, decoded, chroma_location):
         "primaries": code("color_primaries"),
         "range": stream.get("color_range", "tv"),
     }
+    meta["interlaced"], meta["top_field_first"] = picture_structure(mp4, name)
     if chroma_location is not None:
         number, probed = CHROMA_LOCATIONS[chroma_location]
         if stream.get("chroma_location") != probed:
@@ -192,8 +216,8 @@ def main():
     for name, codec, pix_fmt, codec_args, decoded in STREAMS:
         mp4 = args.out / f"{name}.mp4"
         odd = name.endswith("_odd")
-        if not encode(mp4, pix_fmt, codec_args,
-                      ODD_SOURCE if odd else SIZE, ODD_CROP if odd else ""):
+        prefix = ODD_CROP if odd else SOURCE_FILTERS.get(name, "")
+        if not encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix):
             print(f"{name}: skipped, the encoder is missing or refuses {pix_fmt}")
             continue
         extract(mp4, args.out, name)

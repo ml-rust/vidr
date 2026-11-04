@@ -6,3 +6,4 @@
 mod decode;
 mod fixtures;
 mod refusals;
+mod structure;

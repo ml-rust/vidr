@@ -9,10 +9,15 @@ use numr::ops::{ChromaSiting, ColorMatrix, ColorRange, YuvSpec};
 pub const MATRIX_BT709: u8 = 1;
 /// H.273 `MatrixCoefficients` 2: unspecified.
 pub const MATRIX_UNSPECIFIED: u8 = 2;
+/// H.273 `MatrixCoefficients` 4: United States FCC Title 47, `Kr = 0.30`,
+/// `Kb = 0.11`.
+pub const MATRIX_FCC: u8 = 4;
 /// H.273 `MatrixCoefficients` 5: ITU-R BT.470 System B, G. BT.601 625-line.
 pub const MATRIX_BT470BG: u8 = 5;
 /// H.273 `MatrixCoefficients` 6: SMPTE 170M. BT.601 525-line.
 pub const MATRIX_SMPTE170M: u8 = 6;
+/// H.273 `MatrixCoefficients` 7: SMPTE 240M, `Kr = 0.212`, `Kb = 0.087`.
+pub const MATRIX_SMPTE240M: u8 = 7;
 
 /// H.273 `TransferCharacteristics` 2: unspecified.
 pub const TRANSFER_UNSPECIFIED: u8 = 2;
@@ -143,9 +148,19 @@ pub struct ColorFacts {
 impl ColorFacts {
     /// The numr matrix for `matrix_coefficients`, or `None` for a matrix
     /// numr does not convert: unspecified, BT.2020, and the others.
+    ///
+    /// | Code | Constant | Matrix |
+    /// | --- | --- | --- |
+    /// | 1 | `MATRIX_BT709` | `Bt709` |
+    /// | 4 | `MATRIX_FCC` | `Fcc` |
+    /// | 5 | `MATRIX_BT470BG` | `Bt601` |
+    /// | 6 | `MATRIX_SMPTE170M` | `Bt601` |
+    /// | 7 | `MATRIX_SMPTE240M` | `Smpte240m` |
     pub const fn matrix(&self) -> Option<ColorMatrix> {
         match self.matrix_coefficients {
             MATRIX_BT709 => Some(ColorMatrix::Bt709),
+            MATRIX_FCC => Some(ColorMatrix::Fcc),
+            MATRIX_SMPTE240M => Some(ColorMatrix::Smpte240m),
             MATRIX_BT470BG | MATRIX_SMPTE170M => Some(ColorMatrix::Bt601),
             _ => None,
         }
@@ -222,12 +237,49 @@ mod tests {
     }
 
     #[test]
+    fn fcc_and_smpte240m_map_to_their_own_matrices() {
+        assert_eq!(
+            facts(MATRIX_FCC, false, None).matrix(),
+            Some(ColorMatrix::Fcc)
+        );
+        assert_eq!(
+            facts(MATRIX_SMPTE240M, false, None).matrix(),
+            Some(ColorMatrix::Smpte240m)
+        );
+        assert_eq!(
+            facts(MATRIX_FCC, true, None).yuv_spec(ChromaSiting::Left),
+            Some(YuvSpec::new(
+                ColorMatrix::Fcc,
+                ColorRange::Full,
+                ChromaSiting::Left
+            ))
+        );
+        assert_eq!(
+            facts(MATRIX_SMPTE240M, false, None).yuv_spec(ChromaSiting::Left),
+            Some(YuvSpec::new(
+                ColorMatrix::Smpte240m,
+                ColorRange::Limited,
+                ChromaSiting::Left
+            ))
+        );
+    }
+
+    #[test]
+    fn matrix_constants_hold_the_h273_codes() {
+        assert_eq!(MATRIX_FCC, 4);
+        assert_eq!(MATRIX_SMPTE240M, 7);
+    }
+
+    #[test]
     fn unspecified_and_bt2020_have_no_spec() {
         assert_eq!(
             facts(MATRIX_UNSPECIFIED, false, None).yuv_spec(ChromaSiting::Left),
             None
         );
         assert_eq!(facts(9, false, None).yuv_spec(ChromaSiting::Left), None);
+        // YCgCo (8) and the reserved code 3 have no numr matrix.
+        assert_eq!(facts(8, false, None).matrix(), None);
+        assert_eq!(facts(3, false, None).matrix(), None);
     }
 
     #[test]

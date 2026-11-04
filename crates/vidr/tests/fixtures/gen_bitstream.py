@@ -21,6 +21,9 @@ For each stream NAME the script writes:
   `gen_nvdec.py` also reads `vpcC` through `extract`.
 - `NAME.samples`: every sample of the video track, in decode order, each as
   a 4-byte big-endian size and then the sample bytes.
+- `NAME.sar`: only for the `*_sar*` streams. The sample aspect ratio that
+  ffprobe reads from `NAME.raw`, as `W:H`. That file carries the SPS VUI and
+  no container box, so the value comes from the VUI.
 
 The tests read `VIDR_BITSTREAM_FIXTURES` first, then the default directory.
 """
@@ -166,6 +169,18 @@ def extract(mp4, out_dir, name):
     (out_dir / f"{name}.samples").write_bytes(framed)
 
 
+def write_sar(raw, path):
+    """Writes the sample aspect ratio ffprobe reads from the raw stream."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=sample_aspect_ratio", "-of", "csv=p=0", str(raw)],
+        capture_output=True, text=True)
+    value = result.stdout.strip()
+    if result.returncode != 0 or ":" not in value:
+        sys.exit(f"ffprobe reads no sample aspect ratio from {raw}: {result.stderr}")
+    path.write_text(value + "\n")
+
+
 def write_raw(mp4, raw, raw_format, bsf):
     """Writes ffmpeg's own conversion of the MP4 samples to the raw form."""
     args = ["-i", str(mp4), "-map", "0:v:0", "-c", "copy"]
@@ -176,6 +191,7 @@ def write_raw(mp4, raw, raw_format, bsf):
 
 X264 = ["-c:v", "libx264", "-g", "5", "-bf", "2"]
 X265 = "keyint=5:min-keyint=5:bframes=2:log-level=error"
+X265_ARGS = ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1"]
 AOM = ["-c:v", "libaom-av1", "-cpu-used", "8", "-g", "5", "-row-mt", "0"]
 
 STREAMS = [
@@ -197,6 +213,15 @@ STREAMS = [
      lambda p: encode_raw_then_mp4(
          p, "hevc", ["-c:v", "libx265", "-x265-params", f"{X265}:repeat-headers=1"],
          ["-tag:v", "hev1"])),
+    # `aspect_ratio_idc` 14 (4:3) from the table, and 255 with 7:5 sent in full.
+    ("h264_sar", "h264", "h264_mp4toannexb",
+     lambda p: encode_mp4(p, [*X264, "-vf", "setsar=4/3"])),
+    ("h264_sar_ext", "h264", "h264_mp4toannexb",
+     lambda p: encode_mp4(p, [*X264, "-vf", "setsar=7/5"])),
+    ("hevc_sar", "hevc", "hevc_mp4toannexb",
+     lambda p: encode_mp4(p, [*X265_ARGS, "-vf", "setsar=4/3"])),
+    ("hevc_sar_ext", "hevc", "hevc_mp4toannexb",
+     lambda p: encode_mp4(p, [*X265_ARGS, "-vf", "setsar=7/5"])),
     # Sequence header in av1C and in band on key frames.
     ("av1", "obu", None,
      lambda p: encode_mp4(p, AOM)),
@@ -219,6 +244,8 @@ def main():
         make(mp4)
         write_raw(mp4, args.out / f"{name}.raw", raw_format, bsf)
         extract(mp4, args.out, name)
+        if "_sar" in name:
+            write_sar(args.out / f"{name}.raw", args.out / f"{name}.sar")
         print(f"{name}: {mp4}")
 
 

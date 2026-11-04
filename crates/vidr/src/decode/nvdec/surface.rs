@@ -21,7 +21,8 @@ use numr::tensor::Tensor;
 use super::ffi::{self, CuVideoDecoder, CuvidParserDispInfo, CuvidProcParams};
 use super::sequence::OUTPUT_SURFACES;
 use super::session::{Mapped, Session};
-use crate::decode::{DecodedFrame, PixelFormat, frame::chroma_shape};
+use crate::decode::frame::{PictureStructure, chroma_shape};
+use crate::decode::{DecodedFrame, PixelFormat};
 use crate::error::DecodeError;
 
 /// One pitched-to-dense plane copy.
@@ -156,6 +157,10 @@ impl Session {
             info.timestamp,
             sequence.display,
             sequence.color,
+            PictureStructure {
+                progressive: info.progressive_frame != 0,
+                top_field_first: info.top_field_first != 0,
+            },
         ));
         Ok(1)
     }

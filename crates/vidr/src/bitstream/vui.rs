@@ -4,13 +4,42 @@
 //!
 //! Both standards lay these fields out the same way. Everything before
 //! `chroma_loc_info_present_flag` is read and kept only when it describes
-//! the colour of the picture.
+//! the colour or the sample shape of the picture.
 
 use super::bits::BitReader;
 use crate::error::BitstreamError;
 
 /// `aspect_ratio_idc` value that sends `sar_width` and `sar_height`.
 const EXTENDED_SAR: u8 = 255;
+
+/// ITU-T H.264 Table E-1 and H.265 Table E.1, which are identical: the sample
+/// aspect ratio of `aspect_ratio_idc` 1 to 16, as `(width, height)`.
+const SAR_TABLE: [(u16, u16); 16] = [
+    (1, 1),
+    (12, 11),
+    (10, 11),
+    (16, 11),
+    (40, 33),
+    (24, 11),
+    (20, 11),
+    (32, 11),
+    (80, 33),
+    (18, 11),
+    (15, 11),
+    (64, 33),
+    (160, 99),
+    (4, 3),
+    (3, 2),
+    (2, 1),
+];
+
+/// The sample aspect ratio of a table `aspect_ratio_idc`: 1 to 16. Idc 0
+/// is unspecified, 17 to 254 are reserved, and 255 sends the ratio. All of
+/// them give `None`.
+fn table_sample_aspect_ratio(aspect_ratio_idc: u8) -> Option<(u16, u16)> {
+    let index = usize::from(aspect_ratio_idc).checked_sub(1)?;
+    SAR_TABLE.get(index).copied()
+}
 
 /// The `colour_description_present_flag` fields, as ITU-T H.273 code
 /// points.
@@ -45,10 +74,16 @@ pub struct ChromaSampleLoc {
     pub bottom_field: u8,
 }
 
-/// The colour fields of a VUI. A field is `None` when its presence flag is
-/// 0, or when the SPS has no VUI.
+/// The colour and sample shape fields of a VUI. A field is `None` when its
+/// presence flag is 0, or when the SPS has no VUI.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VuiSignal {
+    /// Sample aspect ratio as `(width, height)`, from `aspect_ratio_idc`.
+    /// Idc 1 to 16 map through the table in ITU-T H.264 and H.265. Idc 255
+    /// sends `sar_width` and `sar_height`. It is `None` for idc 0
+    /// (unspecified), for the reserved idc 17 to 254, for an extended ratio
+    /// with a zero part, and without `aspect_ratio_info_present_flag`.
+    pub sample_aspect_ratio: Option<(u16, u16)>,
     /// `video_signal_type_present_flag` fields.
     pub video_signal_type: Option<VideoSignalType>,
     /// `chroma_loc_info_present_flag` fields.
@@ -67,11 +102,21 @@ pub(crate) fn read_signal(
     reader: &mut BitReader<'_>,
     structure: &'static str,
 ) -> Result<VuiSignal, BitstreamError> {
-    if reader.bit("aspect_ratio_info_present_flag")?
-        && reader.u8(8, "aspect_ratio_idc")? == EXTENDED_SAR
-    {
-        reader.skip(32, "sar_width")?;
-    }
+    let sample_aspect_ratio = if reader.bit("aspect_ratio_info_present_flag")? {
+        let idc = reader.u8(8, "aspect_ratio_idc")?;
+        if idc == EXTENDED_SAR {
+            let width = reader.bits(16, "sar_width")?;
+            let height = reader.bits(16, "sar_height")?;
+            match (u16::try_from(width), u16::try_from(height)) {
+                (Ok(width), Ok(height)) if width != 0 && height != 0 => Some((width, height)),
+                _ => None,
+            }
+        } else {
+            table_sample_aspect_ratio(idc)
+        }
+    } else {
+        None
+    };
     if reader.bit("overscan_info_present_flag")? {
         reader.skip(1, "overscan_appropriate_flag")?;
     }
@@ -104,6 +149,7 @@ pub(crate) fn read_signal(
         None
     };
     Ok(VuiSignal {
+        sample_aspect_ratio,
         video_signal_type,
         chroma_sample_loc,
     })
@@ -154,18 +200,140 @@ mod tests {
     }
 
     #[test]
-    fn extended_sar_and_overscan_are_skipped() {
-        // aspect 1, idc 255, 32 SAR bits, overscan 1 + 1 bit, no signal type,
+    fn extended_sar_and_overscan_are_read_and_skipped() {
+        // aspect 1, idc 255, sar 4 by 3, overscan 1 + 1 bit, no signal type,
         // chroma loc 1, top `010` (1), bottom `011` (2).
-        let bits = "1".to_owned() + "11111111" + &"0".repeat(32) + "11" + "0" + "1" + "010" + "011";
+        let bits = "1".to_owned()
+            + "11111111"
+            + "0000000000000100"
+            + "0000000000000011"
+            + "11"
+            + "0"
+            + "1"
+            + "010"
+            + "011";
         assert_eq!(
             read(&bits),
             Ok(VuiSignal {
+                sample_aspect_ratio: Some((4, 3)),
                 video_signal_type: None,
                 chroma_sample_loc: Some(ChromaSampleLoc {
                     top_field: 1,
                     bottom_field: 2,
                 }),
+            })
+        );
+    }
+
+    /// aspect 1, the 8-bit idc, then the fields up to the end of the VUI
+    /// with every other flag 0.
+    fn with_idc(idc: u8) -> String {
+        format!("1{idc:08b}000")
+    }
+
+    #[test]
+    fn every_table_idc_gives_its_ratio() {
+        let expected = [
+            (1, (1, 1)),
+            (2, (12, 11)),
+            (3, (10, 11)),
+            (4, (16, 11)),
+            (5, (40, 33)),
+            (6, (24, 11)),
+            (7, (20, 11)),
+            (8, (32, 11)),
+            (9, (80, 33)),
+            (10, (18, 11)),
+            (11, (15, 11)),
+            (12, (64, 33)),
+            (13, (160, 99)),
+            (14, (4, 3)),
+            (15, (3, 2)),
+            (16, (2, 1)),
+        ];
+        for (idc, ratio) in expected {
+            let signal = read(&with_idc(idc)).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(signal.sample_aspect_ratio, Some(ratio), "idc {idc}");
+            assert_eq!(signal.video_signal_type, None, "idc {idc}");
+            assert_eq!(signal.chroma_sample_loc, None, "idc {idc}");
+        }
+    }
+
+    #[test]
+    fn unspecified_and_reserved_idc_give_none() {
+        for idc in [0, 17, 18, 100, 254] {
+            assert_eq!(
+                read(&with_idc(idc)).map(|signal| signal.sample_aspect_ratio),
+                Ok(None),
+                "idc {idc}"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_ratio_keeps_the_full_sixteen_bits() {
+        // idc 255, sar 65535 by 1.
+        let bits = "1".to_owned() + "11111111" + &"1".repeat(16) + "0000000000000001" + "000";
+        assert_eq!(
+            read(&bits).map(|signal| signal.sample_aspect_ratio),
+            Ok(Some((65535, 1)))
+        );
+    }
+
+    #[test]
+    fn extended_ratio_with_a_zero_part_gives_none() {
+        let zero_width = "1".to_owned() + "11111111" + &"0".repeat(16) + "0000000000000011" + "000";
+        let zero_height =
+            "1".to_owned() + "11111111" + "0000000000000011" + &"0".repeat(16) + "000";
+        for bits in [zero_width, zero_height] {
+            assert_eq!(
+                read(&bits).map(|signal| signal.sample_aspect_ratio),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn no_aspect_flag_gives_none() {
+        assert_eq!(
+            read("000").map(|signal| signal.sample_aspect_ratio),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn aspect_ratio_leaves_the_colour_fields_byte_exact() {
+        // aspect idc 14, overscan 1 + 1 bit, signal type 1, format 5,
+        // full range 1, description 1: 1, 1, 6; chroma loc 1, top `1`,
+        // bottom `010`.
+        let bits = "1".to_owned()
+            + "00001110"
+            + "11"
+            + "1"
+            + "101"
+            + "1"
+            + "1"
+            + "00000001"
+            + "00000001"
+            + "00000110"
+            + "1"
+            + "1"
+            + "010";
+        let signal = read(&bits).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(signal.sample_aspect_ratio, Some((4, 3)));
+        assert_eq!(
+            signal.video_signal_type.and_then(|s| s.colour),
+            Some(ColourDescription {
+                colour_primaries: 1,
+                transfer_characteristics: 1,
+                matrix_coefficients: 6,
+            })
+        );
+        assert_eq!(
+            signal.chroma_sample_loc,
+            Some(ChromaSampleLoc {
+                top_field: 0,
+                bottom_field: 1,
             })
         );
     }
@@ -177,6 +345,7 @@ mod tests {
         assert_eq!(
             read(concat!("00", "1", "101", "1", "0", "0")),
             Ok(VuiSignal {
+                sample_aspect_ratio: None,
                 video_signal_type: Some(VideoSignalType {
                     video_format: 5,
                     full_range: true,

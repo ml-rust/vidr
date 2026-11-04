@@ -1,7 +1,7 @@
 //! HEVC filters against ffmpeg's `hevc_mp4toannexb` and MP4 muxer.
 
 use vidr::bitstream::{
-    FromAnnexB, HevcConfig, HevcNalType, LengthSize, NalCodec, NalConfig, ToAnnexB,
+    FromAnnexB, HevcConfig, HevcNalType, LengthSize, NalCodec, NalConfig, ToAnnexB, hevc_sps_vui,
 };
 
 use super::fixtures::{load, nal_units, sample_of};
@@ -130,4 +130,25 @@ fn from_annexb_removes_in_band_parameter_sets() {
         })
         .collect();
     assert_eq!(built.nal_units().collect::<Vec<_>>(), source_units);
+}
+
+/// `aspect_ratio_idc` 14 from the table, then 255 with an explicit 7:5. The
+/// ratio the SPS VUI carries equals what ffprobe reads from the raw stream.
+#[test]
+fn sps_sample_aspect_ratio_matches_ffprobe() {
+    for (name, expected) in [("hevc_sar", (4, 3)), ("hevc_sar_ext", (7, 5))] {
+        let Some(fixture) = load(name) else { return };
+        let Some(probed) = fixture.sar else {
+            panic!("{name}.sar is missing. Regenerate the fixtures.");
+        };
+        assert_eq!(probed, expected, "{name}: ffprobe ratio");
+        let config = HevcConfig::parse(&fixture.config).unwrap();
+        let sps = config
+            .arrays
+            .iter()
+            .find(|array| array.nal_unit_type == HevcNalType::SPS)
+            .unwrap();
+        let signal = hevc_sps_vui(&sps.nal_units[0]).unwrap();
+        assert_eq!(signal.sample_aspect_ratio, Some(probed), "{name}");
+    }
 }

@@ -29,4 +29,7 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `record_upscaled` and `check_record` write and check the `.upscale.json` sidecar, schema 1. The text equals the PoC's byte for byte. The write is atomic and the read stops at 64 KiB.
   - `find_upscaled` selects a matching full-length upscale from the candidates beside the source, newest first. A `VideoProbe` supplies the video facts, and `check_match` compares them.
 - `vidr`: `ChromaLocation::to_h273` and `ChromaLocation::to_av1`.
+- `vidr`: `DecodedFrame::progressive` and `DecodedFrame::top_field_first`, from NVDEC's `CUVIDPARSERDISPINFO`. The flags describe how the picture was coded, not the content. To decide whether a stream is interlaced, read the SPS.
+- `vidr`: `VuiSignal::sample_aspect_ratio` for H.264 and HEVC. `aspect_ratio_idc` 1 to 16 map through the standards' table, and idc 255 gives the sent `sar_width` and `sar_height`. Idc 0, the reserved values, and an extended ratio with a zero part give `None`.
+- `vidr`: `MATRIX_FCC` and `MATRIX_SMPTE240M`. `ColorFacts::matrix` maps them to numr's `ColorMatrix::Fcc` and `ColorMatrix::Smpte240m`, so `yuv_spec` now returns a spec for these two codes.
 - `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.

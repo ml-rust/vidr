@@ -11,6 +11,14 @@ use super::codec::PixelFormat;
 use super::color::ColorFacts;
 use crate::geometry::Dimensions;
 
+/// The picture structure flags a decoder reports for one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "nvdec"), allow(dead_code))]
+pub(crate) struct PictureStructure {
+    pub(crate) progressive: bool,
+    pub(crate) top_field_first: bool,
+}
+
 /// One decoded 4:2:0 frame in display order.
 ///
 /// For a display size of `W x H`, with `Wc = 2 * ceil(W / 2)` and
@@ -33,10 +41,14 @@ pub struct DecodedFrame<R: Runtime> {
     pts: i64,
     display: Dimensions,
     color: ColorFacts,
+    progressive: bool,
+    top_field_first: bool,
 }
 
 impl<R: Runtime> DecodedFrame<R> {
     /// Assembles a frame. Decoders call this after they write both planes.
+    /// `structure` holds the decoder's picture structure flags for this
+    /// frame.
     #[cfg_attr(not(feature = "nvdec"), allow(dead_code))]
     pub(crate) fn new(
         y: Tensor<R>,
@@ -45,6 +57,7 @@ impl<R: Runtime> DecodedFrame<R> {
         pts: i64,
         display: Dimensions,
         color: ColorFacts,
+        structure: PictureStructure,
     ) -> Self {
         Self {
             y,
@@ -53,6 +66,8 @@ impl<R: Runtime> DecodedFrame<R> {
             pts,
             display,
             color,
+            progressive: structure.progressive,
+            top_field_first: structure.top_field_first,
         }
     }
 
@@ -85,6 +100,24 @@ impl<R: Runtime> DecodedFrame<R> {
     /// Colour facts from the sequence header.
     pub fn color(&self) -> &ColorFacts {
         &self.color
+    }
+
+    /// Whether the decoder reports this frame as progressive.
+    ///
+    /// NVDEC supplies the flag from `CUVIDPARSERDISPINFO.progressive_frame`.
+    /// It describes how the picture was coded, not what the content shows.
+    /// To decide whether a stream is interlaced, read its SPS.
+    pub fn progressive(&self) -> bool {
+        self.progressive
+    }
+
+    /// Whether the top field comes first, from
+    /// `CUVIDPARSERDISPINFO.top_field_first`.
+    ///
+    /// It carries meaning only when [`DecodedFrame::progressive`] is
+    /// `false`.
+    pub fn top_field_first(&self) -> bool {
+        self.top_field_first
     }
 
     /// The planes as numr's `ColorOps::yuv_to_rgb` takes them: `Nv12` or
@@ -122,6 +155,8 @@ impl<R: Runtime> Clone for DecodedFrame<R> {
             pts: self.pts,
             display: self.display,
             color: self.color,
+            progressive: self.progressive,
+            top_field_first: self.top_field_first,
         }
     }
 }
@@ -135,6 +170,8 @@ impl<R: Runtime> fmt::Debug for DecodedFrame<R> {
             .field("pts", &self.pts)
             .field("display", &self.display)
             .field("color", &self.color)
+            .field("progressive", &self.progressive)
+            .field("top_field_first", &self.top_field_first)
             .finish()
     }
 }

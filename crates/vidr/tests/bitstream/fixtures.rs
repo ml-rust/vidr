@@ -13,6 +13,9 @@ pub(crate) struct Fixture {
     pub(crate) samples: Vec<Vec<u8>>,
     /// ffmpeg's raw Annex-B or OBU conversion of the samples.
     pub(crate) raw: Vec<u8>,
+    /// ffprobe's sample aspect ratio of `raw`, for the `*_sar*` fixtures.
+    #[cfg_attr(not(any(feature = "h264", feature = "hevc")), allow(dead_code))]
+    pub(crate) sar: Option<(u16, u16)>,
 }
 
 fn directory() -> PathBuf {
@@ -40,6 +43,18 @@ pub(crate) fn unframe(bytes: &[u8]) -> Vec<Vec<u8>> {
     samples
 }
 
+/// Parses the `W:H` text of a `NAME.sar` file.
+fn parse_sar(name: &str, text: &str) -> (u16, u16) {
+    let parsed = text
+        .trim()
+        .split_once(':')
+        .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)));
+    match parsed {
+        Some(ratio) => ratio,
+        None => panic!("{name}.sar holds `{}`, expected `W:H`", text.trim()),
+    }
+}
+
 /// Loads fixture `name`, or prints a notice and returns `None` when a file
 /// is missing.
 pub(crate) fn load(name: &str) -> Option<Fixture> {
@@ -50,6 +65,9 @@ pub(crate) fn load(name: &str) -> Option<Fixture> {
             config,
             samples: unframe(&samples),
             raw,
+            sar: std::fs::read_to_string(dir.join(format!("{name}.sar")))
+                .ok()
+                .map(|text| parse_sar(name, &text)),
         }),
         _ => {
             eprintln!(

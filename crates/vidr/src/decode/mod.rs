@@ -20,8 +20,8 @@ pub mod nvdec;
 
 pub use codec::{ChromaFormat, DecodeCodec, PixelFormat};
 pub use color::{
-    ChromaLocation, ColorFacts, MATRIX_BT470BG, MATRIX_BT709, MATRIX_SMPTE170M, MATRIX_UNSPECIFIED,
-    PRIMARIES_UNSPECIFIED, TRANSFER_UNSPECIFIED,
+    ChromaLocation, ColorFacts, MATRIX_BT470BG, MATRIX_BT709, MATRIX_FCC, MATRIX_SMPTE170M,
+    MATRIX_SMPTE240M, MATRIX_UNSPECIFIED, PRIMARIES_UNSPECIFIED, TRANSFER_UNSPECIFIED,
 };
 pub use frame::DecodedFrame;
 pub use traits::Decoder;

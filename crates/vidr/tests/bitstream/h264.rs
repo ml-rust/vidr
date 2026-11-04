@@ -1,7 +1,7 @@
 //! H.264 filters against ffmpeg's `h264_mp4toannexb` and MP4 muxer.
 
 use vidr::bitstream::{
-    AvcConfig, FromAnnexB, H264NalType, LengthSize, NalCodec, NalConfig, ToAnnexB,
+    AvcConfig, FromAnnexB, H264NalType, LengthSize, NalCodec, NalConfig, ToAnnexB, h264_sps_vui,
 };
 
 use super::fixtures::{load, nal_units, sample_of};
@@ -92,4 +92,33 @@ fn from_annexb_removes_in_band_parameter_sets() {
         panic!("no avcC after the first access unit");
     };
     assert_eq!(built.to_bytes().unwrap(), fixture.config);
+}
+
+/// `aspect_ratio_idc` 14 from the table, then 255 with an explicit 7:5. The
+/// ratio the SPS VUI carries equals what ffprobe reads from the raw stream.
+#[test]
+fn sps_sample_aspect_ratio_matches_ffprobe() {
+    for (name, expected) in [("h264_sar", (4, 3)), ("h264_sar_ext", (7, 5))] {
+        let Some(fixture) = load(name) else { return };
+        let Some(probed) = fixture.sar else {
+            panic!("{name}.sar is missing. Regenerate the fixtures.");
+        };
+        assert_eq!(probed, expected, "{name}: ffprobe ratio");
+        let config = AvcConfig::parse(&fixture.config).unwrap();
+        let signal = h264_sps_vui(&config.sps[0]).unwrap();
+        assert_eq!(signal.sample_aspect_ratio, Some(probed), "{name}");
+    }
+}
+
+/// A stream without `setsar` has the square-pixel SPS x264 writes. It
+/// either omits the ratio or signals 1:1, and vidr reports what the SPS says.
+#[test]
+fn sps_without_setsar_reports_no_ratio_or_square_pixels() {
+    let Some(fixture) = load("h264") else { return };
+    let config = AvcConfig::parse(&fixture.config).unwrap();
+    let ratio = h264_sps_vui(&config.sps[0]).unwrap().sample_aspect_ratio;
+    assert!(
+        matches!(ratio, None | Some((1, 1))),
+        "unexpected ratio {ratio:?}"
+    );
 }
