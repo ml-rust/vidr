@@ -40,7 +40,7 @@ Decode, filter, run models, and encode video in one process, with frames in GPU 
 
 </div>
 
-vidr is a Cargo workspace for video on top of [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor, so a codec, a filter, and a neural network all read and write the same buffer. [voxr](https://github.com/ml-rust/voxr) is its audio counterpart. Together they cover the work an application hands to the `ffmpeg` command line and to an inference engine today, as libraries it links.
+vidr is a Cargo workspace for video on top of [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor. A codec, a filter, and a neural network all read and write that buffer. [voxr](https://github.com/ml-rust/voxr) is its audio counterpart. Together they cover the work an application hands to the `ffmpeg` command line and to an inference engine. An application links them as libraries.
 
 ```
 decode (hardware or software) → filters and models on the GPU → encode → mux
@@ -48,7 +48,19 @@ decode (hardware or software) → filters and models on the GPU → encode → m
 
 ## Status
 
-In development. No release exists yet. The frame timing model, output checks, the H.264, HEVC, and AV1 bitstream filters, NVDEC hardware decode, NVENC hardware encode, conversion between NV12 or P010 planes and float RGB, the SDR colour policy, MP4, MOV, Matroska, and WebM input facts through containr, one-pass MP4 and MKV output with every other stream copied, the copied-track checks, and the threaded decode, transform, and encode pump work today. The `vidr-remaster` command runs a whole video, and it needs an NVIDIA GPU: NVDEC and NVENC are its only decode and encode paths until the vendor-neutral path lands. Build it with `--features cuda,mp4,mkv,model-srvgg,model-rrdb`. A build without those features reports which ones it lacks. The rest of [Scope](#scope) does not work yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table.
+In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table. These work today:
+
+- Frame timing model and output checks
+- H.264, HEVC, and AV1 bitstream filters
+- NVDEC hardware decode and NVENC hardware encode
+- Conversion between NV12 or P010 planes and float RGB
+- SDR colour policy
+- MP4, MOV, Matroska, and WebM input facts through containr
+- One-pass MP4 and MKV output, with every other stream copied, and the copied-track checks
+- Threaded decode, transform, and encode pump
+- The `vidr-remaster` command, on NVIDIA GPUs only
+
+NVDEC and NVENC are the only decode and encode paths until the vendor-neutral path lands. The rest of [Scope](#scope) does not work yet.
 
 ## Crates
 
