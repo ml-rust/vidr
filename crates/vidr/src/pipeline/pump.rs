@@ -137,6 +137,9 @@ impl Shared<'_> {
 /// [`TrackTiming`](crate::time::TrackTiming), so `check_output` sees the same
 /// values on both sides. Output pts equal [`EditTimeline::present`].
 ///
+/// One packet gives one pts. A decoder that returns two frames for one packet gives
+/// that pts twice, and the run ends in [`PipelineError::Timing`].
+///
 /// [`EditTimeline::present`]: crate::time::EditTimeline::present
 ///
 /// # Memory

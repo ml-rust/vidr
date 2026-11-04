@@ -34,12 +34,19 @@ For each stream NAME the script writes:
   `p010le`, every frame in display order, each at its own size. Streams the
   tests expect a decoder to refuse have no `.yuv`.
 
+`vp9_two_shown` is a stream no encoder writes: each sample is a superframe of two
+shown frames. Its `NAME.frames` holds one pts per sample, and its `NAME.yuv` holds the
+second frame of each sample, from ffmpeg's decode of the single-frame stream. libvpx
+returns the last shown frame of a chunk, and ffmpeg splits a superframe and returns
+both. The meta file holds `codec`, `width`, `height`, and `format`.
+
 The tests read `VIDR_NVDEC_FIXTURES` first, then the default directory.
 """
 
 import argparse
 import json
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -298,6 +305,63 @@ def decode(mp4, out, name, decoded):
         sys.exit(f"{name}: ffmpeg cannot decode {mp4}")
 
 
+def ivf_frames(data):
+    """Returns the frame payloads of an IVF file."""
+    frames = []
+    offset = struct.unpack_from("<H", data, 6)[0]
+    while offset < len(data):
+        size = struct.unpack_from("<I", data, offset)[0]
+        offset += 12
+        frames.append(data[offset:offset + size])
+        offset += size
+    return frames
+
+
+def superframe(frames):
+    """Joins `frames` with the VP9 superframe index of Annex B, 4-byte sizes."""
+    marker = bytes([0b11011000 | (len(frames) - 1)])
+    sizes = b"".join(struct.pack("<I", len(frame)) for frame in frames)
+    return b"".join(frames) + marker + sizes + marker
+
+
+def write_vp9_two_shown(out):
+    """Writes `vp9_two_shown`. Returns False when ffmpeg has no libvpx-vp9."""
+    name = "vp9_two_shown"
+    width, height = SIZE.split("x")
+    ivf = out / f"{name}.source.ivf"
+    raw = out / f"{name}.source.yuv"
+    source = ["-f", "lavfi", "-i", f"testsrc2=size={SIZE}:rate=25", "-frames:v", FRAMES,
+              "-pix_fmt", "yuv420p", "-vf", COLOR_FILTER]
+    encoded = tool("ffmpeg", [*QUIET, *source, *VPX, "-auto-alt-ref", "0", "-lag-in-frames", "0",
+                              "-f", "ivf", str(ivf)])
+    if encoded is None:
+        return False
+    if tool("ffmpeg", [*QUIET, "-i", str(ivf), "-f", "rawvideo", "-pix_fmt", "nv12",
+                       str(raw)]) is None:
+        sys.exit(f"{name}: ffmpeg cannot decode {ivf}")
+    frames = ivf_frames(ivf.read_bytes())
+    decoded = raw.read_bytes()
+    ivf.unlink()
+    raw.unlink()
+    frame_bytes = int(width) * int(height) * 3 // 2
+    if len(frames) % 2 != 0 or len(decoded) != len(frames) * frame_bytes:
+        sys.exit(f"{name}: {len(frames)} frames, {len(decoded)} decoded bytes")
+    pairs = range(0, len(frames), 2)
+    samples = [superframe(frames[index:index + 2]) for index in pairs]
+    framed = b"".join(struct.pack(">I", len(sample)) + sample for sample in samples)
+    pts = "".join(f"{index}\n" for index in pairs)
+    second = b"".join(decoded[(index + 1) * frame_bytes:(index + 2) * frame_bytes]
+                      for index in pairs)
+    (out / f"{name}.config").write_bytes(b"")
+    (out / f"{name}.samples").write_bytes(framed)
+    (out / f"{name}.pts").write_text(pts)
+    (out / f"{name}.frames").write_text(pts)
+    (out / f"{name}.yuv").write_bytes(second)
+    meta = {"codec": "vp9", "width": width, "height": height, "format": "nv12"}
+    (out / f"{name}.meta").write_text("".join(f"{k}={v}\n" for k, v in meta.items()))
+    return True
+
+
 def main():
     default = Path(__file__).resolve().parent / "nvdec"
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -334,6 +398,9 @@ def main():
         if decoded is not None:
             decode(mp4, args.out, name, decoded)
         print(f"{name}: {mp4}")
+    if not args.only or "vp9_two_shown" in args.only:
+        written = write_vp9_two_shown(args.out)
+        print("vp9_two_shown: " + ("written" if written else "skipped, libvpx-vp9 is missing"))
 
 
 if __name__ == "__main__":

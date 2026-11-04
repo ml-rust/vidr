@@ -23,6 +23,26 @@ fn encoded(script: Script, timing: PumpTiming) -> Vec<(i64, i64)> {
     probe.encoded()
 }
 
+/// A decoder that returns two frames at one pts cannot keep the output's timing, so
+/// the run ends in a named error. NVDEC's parser has no rule against this.
+#[test]
+fn two_frames_at_one_pts_are_a_named_error() {
+    let script = Script {
+        decoder_returns_two: true,
+        ..script(steady(3))
+    };
+    let (result, probe) = pump(script, millis());
+    assert_eq!(
+        result.unwrap_err(),
+        PipelineError::from(TimingError::NonIncreasingPts {
+            index: 1,
+            previous: 0,
+            pts: 0,
+        })
+    );
+    assert_eq!(Probe::read(&probe.sink_finished), 0);
+}
+
 #[test]
 fn order_and_pts_survive_decoder_reordering() {
     // Decode order of a stream with B-frames.

@@ -50,7 +50,8 @@ const UNSTATED: ColorFacts = ColorFacts {
 /// it, so a stream that resizes changes size mid-stream, and odd sizes work.
 ///
 /// A hidden frame gives no output. A chunk gives at most one frame: its last shown
-/// frame, as libvpx does. So the lower spatial layers of a superframe give none.
+/// frame, as libvpx does. So the lower spatial layers of a superframe give none, and a
+/// superframe with two shown frames keeps one frame per packet and each packet's timing.
 /// The frame carries the chunk's pts. `show_existing_frame` repeats a slot, with
 /// the colour that slot's frame stated.
 ///

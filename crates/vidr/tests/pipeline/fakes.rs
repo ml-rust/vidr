@@ -140,6 +140,8 @@ pub(crate) struct Script {
     /// The transform returns planes of `[4, 4]` and `[2, 4]`, not `[2, 2]` and
     /// `[1, 2]`.
     pub(crate) transform_doubles: bool,
+    /// The decoder returns two frames for each packet, both at its pts.
+    pub(crate) decoder_returns_two: bool,
 }
 
 /// What the fakes measure.
@@ -231,6 +233,7 @@ struct FakeDecoder {
     ready: VecDeque<i64>,
     reorder: usize,
     returns_nothing: bool,
+    returns_two: bool,
     sends: u64,
     route: FrameRoute,
     faults: Faults,
@@ -277,6 +280,9 @@ impl Decoder<CpuRuntime> for FakeDecoder {
             return Ok(());
         }
         self.held.push(Reverse(pts));
+        if self.returns_two {
+            self.held.push(Reverse(pts));
+        }
         while self.held.len() > self.reorder {
             if let Some(Reverse(next)) = self.held.pop() {
                 self.ready.push_back(next);
@@ -522,6 +528,7 @@ fn fakes(script: Script) -> Fakes {
         ready: VecDeque::new(),
         reorder: script.reorder,
         returns_nothing: script.decoder_returns_nothing,
+        returns_two: script.decoder_returns_two,
         sends: 0,
         route: script.decoder_route.unwrap_or(FrameRoute::Device),
         faults,
@@ -607,6 +614,49 @@ pub(crate) fn pump_boxed(script: Script, timing: PumpTiming) -> RunResult {
         )
     })
     .wait()
+}
+
+/// Runs `samples` of `(bytes, pts, duration)` through a real decoder, and the fake
+/// transform, encoder, and sink. `luma` is the `[height, width]` of each frame.
+#[cfg(feature = "cpu-vp9")]
+pub(crate) fn pump_decoder<D>(
+    samples: Vec<(Vec<u8>, i64, i64)>,
+    decoder: D,
+    luma: [usize; 2],
+    timing: PumpTiming,
+) -> (RunResult, Arc<Probe>)
+where
+    D: Decoder<CpuRuntime> + Send + 'static,
+{
+    /// Each sample's own bytes, for a decoder that reads them.
+    struct SampleSource(VecDeque<(Vec<u8>, i64, i64)>);
+
+    impl PacketSource for SampleSource {
+        fn next(&mut self, data: &mut Vec<u8>) -> Result<Option<SourcePacket>, PipelineError> {
+            Ok(self.0.pop_front().map(|(bytes, pts, duration)| {
+                *data = bytes;
+                SourcePacket { pts, duration }
+            }))
+        }
+    }
+
+    let Fakes {
+        transform,
+        mut encoder,
+        sink,
+        probe,
+        ..
+    } = fakes(Script::default());
+    encoder.luma = luma;
+    let source = SampleSource(samples.into_iter().collect());
+    let control = PumpControl::new();
+    let result = watched(move || {
+        run::<CpuRuntime, _, _, _, _, _>(
+            source, decoder, transform, encoder, sink, timing, &control,
+        )
+    })
+    .wait();
+    (result, probe)
 }
 
 /// Runs `script` to its end.

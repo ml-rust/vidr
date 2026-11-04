@@ -4,3 +4,5 @@
 //! `python3 crates/vidr/tests/fixtures/gen_nvdec.py` to write them.
 
 mod decode;
+#[cfg(feature = "pipeline")]
+mod two_shown;
