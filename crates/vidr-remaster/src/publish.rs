@@ -3,14 +3,45 @@
 //! A run writes inside a temporary directory beside the output, so the output
 //! path holds no partial file at any moment. Dropping [`TempOutput`] removes the
 //! directory and everything in it.
+//!
+//! `process::exit` skips that drop. So each live directory also sits in a registry,
+//! and [`remove_temp_directories`] removes them before the command exits on a second
+//! signal.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tempfile::TempDir;
+
+use crate::provenance::record_path;
+
+/// The directories of every live [`TempOutput`] in this process.
+static LIVE_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn live_directories() -> MutexGuard<'static, Vec<PathBuf>> {
+    // A `Vec` of paths has no partial state, so a poisoned lock is still correct.
+    LIVE_DIRECTORIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Removes every live temporary directory, best effort, for a caller about to end
+/// the process without running destructors.
+///
+/// This function takes a lock, allocates, and walks directories. So it is not
+/// async-signal-safe, and it must run on a normal thread. The `ctrlc` crate calls
+/// its handler on such a thread. A file that a writer creates during the walk can
+/// leave its directory behind. A later drop of the [`TempOutput`] does no harm.
+pub fn remove_temp_directories() {
+    for directory in live_directories().drain(..) {
+        // Best effort: the process is ending, and no caller can act on an error.
+        let _ = fs::remove_dir_all(directory);
+    }
+}
 
 /// An error making or publishing the temporary output.
 #[derive(Debug)]
@@ -82,6 +113,41 @@ impl std::error::Error for PublishError {
     }
 }
 
+/// The output is final, and its provenance sidecar did not land.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingSidecar {
+    /// The final output.
+    pub output: PathBuf,
+    /// The path the sidecar did not reach.
+    pub sidecar: PathBuf,
+    /// The operating-system error.
+    pub reason: String,
+}
+
+impl fmt::Display for MissingSidecar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "The output {} is final, and its provenance sidecar {} did not land: {}. Reuse \
+             refuses this output until it has a sidecar. Check the directory permissions, then \
+             run again with --overwrite.",
+            self.output.display(),
+            self.sidecar.display(),
+            self.reason
+        )
+    }
+}
+
+/// How [`TempOutput::publish_with_sidecar`] ends once the output is final.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Published {
+    /// The output and its sidecar are both in place.
+    Complete,
+    /// The output is in place, and the sidecar is not.
+    WithoutSidecar(MissingSidecar),
+}
+
 /// A temporary directory beside the output, and the file a run writes in it.
 #[derive(Debug)]
 pub struct TempOutput {
@@ -120,6 +186,7 @@ impl TempOutput {
                 error,
             })?;
         let prepared = directory.path().join(name);
+        live_directories().push(directory.path().to_path_buf());
         Ok(Self {
             directory,
             prepared,
@@ -152,8 +219,45 @@ impl TempOutput {
         self.publish_with(overwrite, |from, to| fs::hard_link(from, to))
     }
 
+    /// Publishes as [`TempOutput::publish`] does, then renames `sidecar`, a record
+    /// written inside the temporary directory, to the output's record path.
+    ///
+    /// The record is complete before this call, so only that rename can fail after
+    /// the output is final. The rename stays inside one file system, since the
+    /// temporary directory sits beside the output.
+    ///
+    /// # Errors
+    ///
+    /// [`PublishError::OutputExists`] and [`PublishError::Move`] when the output does
+    /// not publish. A failed sidecar rename is no error: it returns
+    /// [`Published::WithoutSidecar`], since the output is final.
+    pub fn publish_with_sidecar(
+        self,
+        overwrite: bool,
+        sidecar: &Path,
+    ) -> Result<Published, PublishError> {
+        self.move_prepared(overwrite, |from, to| fs::hard_link(from, to))?;
+        let landing = record_path(&self.destination);
+        Ok(match fs::rename(sidecar, &landing) {
+            Ok(()) => Published::Complete,
+            Err(error) => Published::WithoutSidecar(MissingSidecar {
+                output: self.destination.clone(),
+                sidecar: landing,
+                reason: error.to_string(),
+            }),
+        })
+    }
+
     fn publish_with(
         self,
+        overwrite: bool,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> Result<(), PublishError> {
+        self.move_prepared(overwrite, link)
+    }
+
+    fn move_prepared(
+        &self,
         overwrite: bool,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> Result<(), PublishError> {
@@ -184,6 +288,14 @@ impl TempOutput {
     }
 }
 
+impl Drop for TempOutput {
+    fn drop(&mut self) {
+        // The field drop that follows removes the directory itself.
+        let directory = self.directory.path();
+        live_directories().retain(|live| live != directory);
+    }
+}
+
 /// True for the errors a file system with no hard links returns: `EPERM` on
 /// FAT and exFAT, and `ENOTSUP`.
 fn links_are_unsupported(error: &io::Error) -> bool {
@@ -205,6 +317,8 @@ fn exclusive_rename(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::{check_record, record_upscaled};
+    use crate::request::ModelId;
 
     fn entries(directory: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(directory)
@@ -314,6 +428,104 @@ mod tests {
             "{error}"
         );
         assert_eq!(fs::read(root.path().join("out.mp4")).expect("read"), b"old");
+    }
+
+    #[test]
+    fn a_live_temporary_directory_is_registered_until_it_drops() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = TempOutput::beside(&root.path().join("out.mp4")).expect("temp");
+        let directory = output.directory().to_path_buf();
+        assert!(live_directories().contains(&directory));
+        drop(output);
+        assert!(!live_directories().contains(&directory));
+    }
+
+    #[test]
+    fn a_publish_also_leaves_the_registry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = prepared(root.path(), "out.mp4", b"new");
+        let directory = output.directory().to_path_buf();
+        output.publish(false).expect("publish");
+        assert!(!live_directories().contains(&directory));
+    }
+
+    /// A source file and a prepared output with its record inside the temporary
+    /// directory.
+    fn with_record(root: &Path) -> (PathBuf, TempOutput, PathBuf) {
+        let source = root.join("source.mp4");
+        fs::write(&source, b"abc").expect("write");
+        let output = prepared(root, "out.mp4", b"new");
+        let record = record_upscaled(&source, output.prepared(), ModelId::Fast).expect("record");
+        (source, output, record)
+    }
+
+    #[test]
+    fn the_sidecar_lands_beside_the_output_and_checks_at_the_final_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = fs::canonicalize(dir.path()).expect("canonicalize");
+        let (source, output, record) = with_record(&root);
+        assert_eq!(record.parent(), Some(output.directory()));
+        let written = fs::read(&record).expect("read");
+        let published = output
+            .publish_with_sidecar(false, &record)
+            .expect("publish");
+        assert_eq!(published, Published::Complete);
+        assert_eq!(
+            entries(&root),
+            ["out.mp4", "out.mp4.upscale.json", "source.mp4"]
+        );
+        let destination = root.join("out.mp4");
+        check_record(&source, &destination, ModelId::Fast, None).expect("record checks");
+        let landed = fs::read(record_path(&destination)).expect("read");
+        assert_eq!(landed, written);
+        // A record written after the publish holds the same bytes.
+        let direct = record_upscaled(&source, &destination, ModelId::Fast).expect("record");
+        assert_eq!(fs::read(direct).expect("read"), written);
+    }
+
+    #[test]
+    fn a_sidecar_that_does_not_land_is_a_named_outcome_with_both_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = fs::canonicalize(dir.path()).expect("canonicalize");
+        let (_source, output, record) = with_record(&root);
+        // A rename over a directory that holds a file fails.
+        let landing = root.join("out.mp4.upscale.json");
+        fs::create_dir(&landing).expect("mkdir");
+        fs::write(landing.join("kept"), b"kept").expect("write");
+        let published = output
+            .publish_with_sidecar(false, &record)
+            .expect("publish");
+        let Published::WithoutSidecar(missing) = published else {
+            panic!("the sidecar landed: {published:?}");
+        };
+        assert_eq!(missing.output, root.join("out.mp4"));
+        assert_eq!(missing.sidecar, landing);
+        let message = missing.to_string();
+        assert!(message.contains(&missing.output.display().to_string()));
+        assert!(message.contains(&missing.sidecar.display().to_string()));
+        assert!(message.contains("--overwrite"), "{message}");
+        assert_eq!(fs::read(root.join("out.mp4")).expect("read"), b"new");
+        assert_eq!(
+            entries(&root),
+            ["out.mp4", "out.mp4.upscale.json", "source.mp4"]
+        );
+    }
+
+    #[test]
+    fn a_refused_output_moves_no_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = fs::canonicalize(dir.path()).expect("canonicalize");
+        let (_source, output, record) = with_record(&root);
+        fs::write(root.join("out.mp4"), b"old").expect("write");
+        let error = output
+            .publish_with_sidecar(false, &record)
+            .expect_err("refused");
+        assert!(
+            matches!(error, PublishError::OutputExists { .. }),
+            "{error}"
+        );
+        assert_eq!(fs::read(root.join("out.mp4")).expect("read"), b"old");
+        assert_eq!(entries(&root), ["out.mp4", "source.mp4"]);
     }
 
     #[test]

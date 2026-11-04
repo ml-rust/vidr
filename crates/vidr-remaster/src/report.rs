@@ -1,8 +1,9 @@
 //! The run report: `report.json` in a directory for each run, under
 //! `$XDG_STATE_HOME/vidr-remaster/upscale-<run id>/`.
 //!
-//! A run writes the report once, when it completes, stops, or fails. Validation
-//! refusals come before the report exists, so they write none.
+//! A run writes the report once, when it completes, stops, or fails. The write is
+//! atomic, so no reader sees a partial report. Validation refusals come before the
+//! report exists, so they write none.
 
 use std::env;
 use std::ffi::OsStr;
@@ -15,12 +16,15 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::catalog::licence_notice;
+use crate::paths::write_atomic;
 use crate::request::{Request, Validated};
 
 /// The directory under the state home.
 const APPLICATION: &str = "vidr-remaster";
 /// The report's file name.
 const REPORT_FILE: &str = "report.json";
+/// The name start of the temporary file a report write uses.
+const REPORT_TEMP_PREFIX: &str = ".report-";
 /// The attempts to find a run directory no other run holds.
 const DIRECTORY_ATTEMPTS: u32 = 16;
 
@@ -29,6 +33,8 @@ const DIRECTORY_ATTEMPTS: u32 = 16;
 pub enum ReportStatus {
     /// The output and its sidecar are written.
     Complete,
+    /// The output is final, and its sidecar did not land.
+    OutputWithoutSidecar,
     /// A stop request ended the run.
     Interrupted,
     /// An error ended the run.
@@ -40,6 +46,7 @@ impl ReportStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Complete => "complete",
+            Self::OutputWithoutSidecar => "output_without_sidecar",
             Self::Interrupted => "interrupted",
             Self::Blocked => "blocked",
         }
@@ -211,11 +218,13 @@ impl RunReport {
         &self.path
     }
 
-    /// Sets the status, the error, and the elapsed time, then writes the file.
+    /// Sets the status, the error, and the elapsed time, then writes the file
+    /// atomically: a temporary file in the same directory, a sync, then a rename.
     ///
     /// # Errors
     ///
-    /// [`ReportError::Write`] when the file does not write.
+    /// [`ReportError::Write`] when the file does not write. Any earlier report at
+    /// this path stays, and no temporary file remains.
     pub fn finish(
         &mut self,
         status: ReportStatus,
@@ -234,7 +243,8 @@ impl RunReport {
         let mut text = serde_json::to_string_pretty(&self.fields)
             .map_err(|error| write_error(error.to_string()))?;
         text.push('\n');
-        fs::write(&self.path, text).map_err(|error| write_error(error.to_string()))?;
+        write_atomic(&self.path, REPORT_TEMP_PREFIX, &text)
+            .map_err(|error| write_error(error.to_string()))?;
         Ok(self.path.clone())
     }
 }
@@ -394,6 +404,56 @@ mod tests {
         assert_eq!(value["status"], "interrupted");
         assert_eq!(value["licence_notice"], Value::Null);
         assert!(value.get("error").is_none());
+    }
+
+    #[test]
+    fn the_report_arrives_by_rename_and_leaves_no_temporary_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let (request, validated) = sample();
+        let mut report = RunReport::start(home.path(), &request, &validated).expect("start");
+        // A write in place changes every hard link of the file. A rename changes none.
+        let linked = home.path().join("linked");
+        fs::write(&linked, b"earlier").expect("write");
+        fs::hard_link(&linked, report.path()).expect("link");
+        let path = report.finish(ReportStatus::Complete, None).expect("finish");
+        assert_eq!(fs::read(&linked).expect("read"), b"earlier");
+        assert_eq!(read(&path)["status"], "complete");
+        let names: Vec<String> = fs::read_dir(path.parent().expect("parent"))
+            .expect("read_dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, ["report.json"]);
+    }
+
+    #[test]
+    fn a_failed_report_write_names_the_path_and_leaves_no_temporary_file() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let (request, validated) = sample();
+        let mut report = RunReport::start(home.path(), &request, &validated).expect("start");
+        // A rename over a directory that holds a file fails.
+        fs::create_dir(report.path()).expect("mkdir");
+        fs::write(report.path().join("kept"), b"kept").expect("write");
+        let error = report
+            .finish(ReportStatus::Complete, None)
+            .expect_err("refused");
+        assert!(matches!(error, ReportError::Write { .. }), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&report.path().display().to_string()),
+            "{error}"
+        );
+        assert_eq!(fs::read(report.path().join("kept")).expect("read"), b"kept");
+        let entries = fs::read_dir(report.path().parent().expect("parent"))
+            .expect("read_dir")
+            .count();
+        assert_eq!(entries, 1);
     }
 
     #[test]

@@ -32,7 +32,7 @@ use crate::plan::{
     start_offset, stream_rate,
 };
 use crate::provenance::record_upscaled;
-use crate::publish::TempOutput;
+use crate::publish::{Published, TempOutput};
 use crate::report::RunReport;
 use crate::request::{ModelId, Request, Validated};
 use crate::reuse::{Reuse, VideoFacts, VideoProbe, find_upscaled};
@@ -63,13 +63,15 @@ struct FrameSource {
 ///
 /// The first [`RemasterError`], or [`RemasterError::Stopped`] after a stop
 /// request. The temporary output drops on every return, so no partial file stays.
+/// After the output publishes, the only thing left that can fail is the sidecar's
+/// rename, and that returns [`Published::WithoutSidecar`].
 pub(crate) fn execute<P: FnMut(Progress) + Send>(
     request: &Request,
     validated: &Validated,
     progress: &mut P,
     control: &PumpControl,
     report: &mut RunReport,
-) -> Result<(), RemasterError> {
+) -> Result<Published, RemasterError> {
     let source_path = validated.source.as_path();
     let destination = validated.destination.as_path();
     progress(Progress::Analyzing {
@@ -229,12 +231,15 @@ pub(crate) fn execute<P: FnMut(Progress) + Send>(
     );
 
     stop_check(control)?;
-    temporary.publish(request.overwrite)?;
-    record_upscaled(source_path, destination, request.model)?;
+    // The record holds the source path and two digests, and no output path. So it
+    // stays correct after the move, and each way it can fail comes before the publish.
+    let sidecar = record_upscaled(source_path, temporary.prepared(), request.model)?;
+    stop_check(control)?;
+    let published = temporary.publish_with_sidecar(request.overwrite, &sidecar)?;
     progress(Progress::Saved {
         path: destination.to_path_buf(),
     });
-    Ok(())
+    Ok(published)
 }
 
 fn stop_check(control: &PumpControl) -> Result<(), RemasterError> {

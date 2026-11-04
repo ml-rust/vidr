@@ -13,6 +13,7 @@ use clap::Parser;
 use vidr::pipeline::PumpControl;
 
 use crate::error::RemasterError;
+use crate::publish::remove_temp_directories;
 use crate::request::{Codec, ModelId, Request};
 use crate::resolution::ResolutionMode;
 use crate::run::{Progress, RunOutcome, remaster};
@@ -132,6 +133,8 @@ pub fn flag_help() -> Vec<(String, String)> {
 pub fn exit_code(result: &Result<RunOutcome, RemasterError>) -> u8 {
     match result {
         Ok(RunOutcome::Stopped { .. }) => EXIT_INTERRUPTED,
+        // The run promises the output and its sidecar, and the sidecar is absent.
+        Ok(RunOutcome::OutputWithoutSidecar { .. }) => EXIT_FAILURE,
         Ok(_) => EXIT_SUCCESS,
         Err(_) => EXIT_FAILURE,
     }
@@ -140,7 +143,8 @@ pub fn exit_code(result: &Result<RunOutcome, RemasterError>) -> u8 {
 /// One run's stop state.
 ///
 /// The first press asks the run to stop. The pump cannot interrupt a call into
-/// the driver, so a second press ends the process at once, as a last resort.
+/// the driver, so a second press removes the temporary output and ends the
+/// process, as a last resort.
 #[derive(Debug)]
 struct Interrupt {
     control: Arc<PumpControl>,
@@ -166,6 +170,12 @@ impl Interrupt {
 /// `main_with_args` can run more than once in it.
 static CURRENT: Mutex<Option<Arc<Interrupt>>> = Mutex::new(None);
 
+/// The handler `ctrlc` calls.
+///
+/// `ctrlc`'s own signal handler only posts a semaphore. Its `ctrl-c` thread waits on
+/// that semaphore, then calls this function. So this function runs on a normal
+/// thread outside signal context, and locks, allocation, and file removal are all
+/// allowed here. A panic stops that thread for good, so nothing here panics.
 fn on_signal() {
     // An `Option` has no partial state, so a poisoned lock is still correct.
     let current = CURRENT
@@ -175,6 +185,8 @@ fn on_signal() {
     if let Some(interrupt) = current
         && interrupt.press()
     {
+        // `process::exit` skips `Drop`, so the temporary directory goes first.
+        remove_temp_directories();
         process::exit(i32::from(EXIT_INTERRUPTED));
     }
 }
@@ -244,14 +256,18 @@ pub fn run_command(args: impl IntoIterator<Item = OsString>) -> u8 {
     let result = remaster(request, printer(), &control);
     match &result {
         Ok(RunOutcome::Stopped { .. }) => print_line(INTERRUPTED_TEXT),
+        Ok(RunOutcome::OutputWithoutSidecar { missing, .. }) => {
+            eprint_line(&missing.to_string());
+        }
         Ok(_) => {}
         Err(error) => eprint_line(&error.to_string()),
     }
     exit_code(&result)
 }
 
-/// The `vidr-remaster` command: exit 0 for a complete run, 1 for a refusal or
-/// failure, and 130 for a run a signal stopped.
+/// The `vidr-remaster` command: exit 0 for a complete run, 1 for a refusal, a
+/// failure, or an output whose sidecar did not land, and 130 for a run a signal
+/// stopped. A report that does not write after the publish still exits 0.
 pub fn main_with_args(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     ExitCode::from(run_command(args))
 }
@@ -259,6 +275,7 @@ pub fn main_with_args(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::publish::MissingSidecar;
 
     #[test]
     fn the_first_press_stops_and_the_second_asks_to_exit() {
@@ -274,9 +291,23 @@ mod tests {
     fn exit_codes_follow_the_outcome() {
         let complete = Ok(RunOutcome::Complete {
             output: PathBuf::from("out.mp4"),
-            report: PathBuf::from("report.json"),
+            report: Some(PathBuf::from("report.json")),
         });
         assert_eq!(exit_code(&complete), 0);
+        let no_report = Ok(RunOutcome::Complete {
+            output: PathBuf::from("out.mp4"),
+            report: None,
+        });
+        assert_eq!(exit_code(&no_report), 0);
+        let no_sidecar = Ok(RunOutcome::OutputWithoutSidecar {
+            missing: MissingSidecar {
+                output: PathBuf::from("out.mp4"),
+                sidecar: PathBuf::from("out.mp4.upscale.json"),
+                reason: "disk gone".to_owned(),
+            },
+            report: None,
+        });
+        assert_eq!(exit_code(&no_sidecar), 1);
         let stopped = Ok(RunOutcome::Stopped { report: None });
         assert_eq!(exit_code(&stopped), 130);
         assert_eq!(exit_code(&Err(RemasterError::NoGpu)), 1);

@@ -36,7 +36,7 @@ pub enum RemasterError {
     Catalog(CatalogError),
     /// An enhanced video is refused.
     Reuse(ReuseError),
-    /// The provenance sidecar does not write.
+    /// The provenance sidecar does not write before the publish.
     Provenance(ProvenanceError),
     /// This build leaves out what a run needs.
     MissingFeatures {

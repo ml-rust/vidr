@@ -41,7 +41,7 @@ pub use catalog::{
 pub use cli::main_with_args;
 pub use error::RemasterError;
 pub use provenance::{ProvenanceError, check_record, record_path, record_upscaled};
-pub use publish::{PublishError, TempOutput};
+pub use publish::{MissingSidecar, PublishError, Published, TempOutput, remove_temp_directories};
 pub use rate::frame_rate_hint;
 pub use report::{ReportError, ReportStatus, RunReport, run_id, state_home, state_home_from_env};
 pub use request::{

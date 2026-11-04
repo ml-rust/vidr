@@ -5,19 +5,21 @@
 use std::ffi::OsString;
 use std::fmt::{self, Write as _};
 use std::fs::File;
-use std::io::{self, Read, Write as _};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::paths::resolve;
+use crate::paths::{resolve, write_atomic};
 use crate::request::ModelId;
 
 /// Largest record `check_record` reads, in bytes.
 const MAX_RECORD_BYTES: u64 = 65536;
 /// The only schema this release reads and writes.
 const SCHEMA: i64 = 1;
+/// The name start of the temporary file a record write uses.
+const RECORD_TEMP_PREFIX: &str = ".upscale-record-";
 
 /// An error recording or checking provenance.
 #[derive(Debug)]
@@ -226,22 +228,12 @@ fn render_record(
     out
 }
 
-fn write_atomic(destination: &Path, text: &str) -> io::Result<()> {
-    let directory = destination.parent().unwrap_or_else(|| Path::new("."));
-    let mut file = tempfile::Builder::new()
-        .prefix(".upscale-record-")
-        .suffix(".tmp")
-        .tempfile_in(directory)?;
-    file.write_all(text.as_bytes())?;
-    file.flush()?;
-    file.as_file().sync_all()?;
-    file.persist(destination).map_err(|error| error.error)?;
-    Ok(())
-}
-
 /// Writes the sidecar for `enhanced` and returns its path.
 ///
 /// The write is atomic: a temporary file in the same directory, then a rename.
+/// The record holds the source path and two digests, and no path of `enhanced`.
+/// So a record written beside a temporary output stays correct after both files
+/// move to their final names.
 ///
 /// # Errors
 ///
@@ -269,9 +261,11 @@ pub fn record_upscaled(
         &sha256_hex(&enhanced)?,
     );
     let destination = record_path(&enhanced);
-    write_atomic(&destination, &text).map_err(|error| ProvenanceError::Write {
-        path: destination.clone(),
-        error,
+    write_atomic(&destination, RECORD_TEMP_PREFIX, &text).map_err(|error| {
+        ProvenanceError::Write {
+            path: destination.clone(),
+            error,
+        }
     })?;
     Ok(destination)
 }
