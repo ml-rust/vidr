@@ -2,14 +2,18 @@
 
 # vidr
 
-<h3>Video in Rust. A library first, on any GPU.</h3>
+<h3>Video in Rust. A library first, with GPU and CPU paths.</h3>
 
 <p>
-Decode, filter, run models, and encode video in one process, with frames in GPU memory throughout. Every codec, container, and filter is a Cargo feature, so an application links only what it uses. Model weights load at run time from a directory, and no weights are compiled in.
+Decode, run models, and encode video in one process. On a hardware path, frames stay in GPU memory. Every codec, container, and model is a Cargo feature, so an application links only what it uses. Model weights load at run time from a directory, and no weights are compiled in.
 </p>
 
 <p>
   <a href="#status"><strong>Status</strong></a>
+  ·
+  <a href="#build"><strong>Build</strong></a>
+  ·
+  <a href="#run"><strong>Run</strong></a>
   ·
   <a href="#crates"><strong>Crates</strong></a>
   ·
@@ -42,69 +46,143 @@ Decode, filter, run models, and encode video in one process, with frames in GPU 
 
 </div>
 
-vidr is a Cargo workspace for video on top of [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor. A codec, a filter, and a neural network all read and write that buffer. [voxr](https://github.com/ml-rust/voxr) is its audio counterpart. Together they cover the work an application hands to the `ffmpeg` command line and to an inference engine. An application links them as libraries.
+vidr is a Cargo workspace for video on [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor. A codec and a neural network both read and write that buffer.
+
+[voxr](https://github.com/ml-rust/voxr) is the audio counterpart. Together they target the work an application hands to the `ffmpeg` command line and an inference engine. [Scope](#scope) lists what is still planned.
 
 ```
-decode (hardware or software) → filters and models on the GPU → encode → mux
+decode (hardware or CPU) → models → encode → mux
 ```
 
 ## Status
 
-In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemented-vs-roadmap table. These work today:
+In development. vidr has no release. A fresh checkout does not build until containr and rav1r are public, because cargo resolves `rav1r` for every feature set. See [Build](#build).
 
-- Frame timing model and output checks
-- H.264, HEVC, and AV1 bitstream filters
-- NVDEC hardware decode and NVENC hardware encode
-- Vulkan Video decode on numr's WebGPU device, frames only: H.264 8-bit 4:2:0 Baseline, Main, and High. HEVC Main, Main 10, and Main Still Picture at 8 or 10 bits. VP9 profiles 0 and 2 at 8 or 10 bits. AV1 Main at 8 or 10 bits, 4:2:0. Real-GPU tests pass on NVIDIA's driver only, in its coincident DPB mode. The HEVC_v1, libvpx VP9, and libaom AV1 sweeps show no failure there. They refuse some streams by name at driver limits, and AV1 monochrome. No AMD or Intel GPU has run any of it, and no validation layer has run on it
-- Vulkan Video encode on numr's WebGPU device: H.264 High at 8 bits, HEVC Main, and Main 10 where the driver lists it. One previous frame as the reference, an IDR picture at `gop_length`, B-frames refused by name. Frames stay on the device. Real-GPU tests pass for H.264 and HEVC on NVIDIA's driver only, in its coincident DPB mode. No AMD or Intel GPU has run it, and no validation layer has run on it. AV1 through `VK_KHR_video_encode_av1` is written and has never run on any GPU. A driver that lacks the extension refuses it by name
-- CPU codecs, each with one host copy per frame: AV1 decode on dav1d, H.264 Baseline decode and encode on OpenH264. A source build of OpenH264 (`openh264`) gets no Cisco patent cover. Cisco's cover applies only to its own binary, which `openh264-cisco` loads from a path the caller supplies
-- AV1 encode on rav1r, VP9 decode on `rusty_vp9`, and HEVC Main and Main 10 decode on this crate's own core, each with one host copy per frame. See [CPU codecs](#cpu-codecs)
-- Conversion between NV12 or P010 planes and float RGB
-- SDR colour policy
-- MP4, MOV, Matroska, and WebM input facts through containr
-- One-pass MP4 and MKV output, with every other stream copied, and the copied-track checks
-- Threaded decode, transform, and encode pump
-- The `vidr-remaster` command, on NVDEC and NVENC, on Vulkan Video, or on the CPU codecs
+### Decode
 
-Vulkan Video is the only hardware path off NVIDIA, and no GPU off NVIDIA has run it. On WebGPU, the `fast` model ran on an RTX 3060 on a real clip, between Vulkan decode and Vulkan encode. That run took no host copy. `realesrgan` and `purevision` have not run on WebGPU. `--from-upscaled` also ran there, with Vulkan H.264, HEVC, VP9, or AV1 decode and a CPU encoder. The rest of [Scope](#scope) does not work yet.
+All paths are 4:2:0.
+
+| Codec | NVIDIA (`nvdec`) | Vulkan Video (`vulkan-video`) | CPU |
+| ----- | ---------------- | ----------------------------- | --- |
+| H.264 | 8 or 10 bits | 8 bits. Baseline, Main, High | 8 bits, Baseline only (`openh264`, `openh264-cisco`) |
+| HEVC | 8 or 10 bits | 8 or 10 bits. Main, Main 10, Main Still Picture | 8 or 10 bits. Main, Main 10 (`cpu-hevc`) |
+| VP9 | 8 or 10 bits | 8 or 10 bits. Profiles 0 and 2 | 8 or 10 bits. Profiles 0 and 2 (`cpu-vp9`) |
+| AV1 | 8 or 10 bits | 8 or 10 bits. Main | 8 or 10 bits (`dav1d`) |
+
+### Encode
+
+All paths are 4:2:0.
+
+| Codec | NVIDIA (`nvenc`) | Vulkan Video (`vulkan-video`) | CPU |
+| ----- | ---------------- | ----------------------------- | --- |
+| H.264 | 8 bits. 10 bits on a GPU that lists it | 8 bits, High | 8 bits, Constrained Baseline (`openh264`, `openh264-cisco`) |
+| HEVC | 8 bits. 10 bits on a GPU that lists it | Main. Main 10 where the driver lists it | None, by decision |
+| VP9 | None | None | None |
+| AV1 | 8 bits. 10 bits on a GPU that lists it | Never run. Refused by name with no `VK_KHR_video_encode_av1` | 8 or 10 bits (`cpu-av1`, `cpu-av1-asm`) |
+
+Vulkan Video encode uses one previous frame as the reference, and an IDR picture at `gop_length`. It refuses B-frames by name.
+
+### What has run
+
+All of this ran on one machine: an RTX 3060 on NVIDIA's driver. No AMD or Intel GPU has run any of it.
+
+| Path | Checked with |
+| ---- | ------------ |
+| NVDEC, NVENC | A real clip with all three models. No test covers NVENC AV1 |
+| Vulkan Video decode | A real clip, plus the HEVC_v1, libvpx VP9, and libaom AV1 test vectors, with no decode error |
+| Vulkan Video encode | A real clip, H.264 and HEVC |
+| `dav1d` | The libaom AV1 test vectors |
+| `cpu-vp9` | The libvpx VP9 test vectors |
+| `cpu-hevc` | The HEVC_v1 test vectors |
+| `cpu-av1`, `openh264` | Tests in this repository, with no conformance set |
+
+Limits of the Vulkan Video runs:
+
+- Streams past a driver limit, and AV1 monochrome, are refused by name.
+- Only one driver mode has run: reference and output pictures sharing one image.
+- No validation layer has run.
+
+| Model | CUDA, per 1080p frame | WebGPU, per 1080p frame |
+| ----- | --------------------- | ----------------------- |
+| `fast` | About 0.22 s | About 4 s, with no host copy |
+| `realesrgan` | Ran, not timed here | Has not run |
+| `purevision` | Ran, not timed here | Has not run |
+
+Times are wall-clock. `--from-upscaled` also ran on WebGPU, with Vulkan decode and a CPU encoder.
+
+### Also working
+
+| Capability | Feature |
+| ---------- | ------- |
+| Frame timing model and output checks | None |
+| Bitstream filters | `h264`, `hevc`, `av1` |
+| Conversion between NV12 or P010 planes and float RGB | `frame` |
+| SDR colour policy | `decode` |
+| MP4, MOV, Matroska, and WebM input | `mp4`, `mkv` |
+| One-pass MP4 and MKV output, with other streams copied and checked | `mp4`, `mkv` |
+| Threaded decode, transform, and encode pump | `pipeline` |
+| The `vidr-remaster` command | See [Build](#build) |
+
+[AGENTS.md](AGENTS.md) holds the full implemented-vs-roadmap table.
 
 ## Crates
 
 | Crate                                   | What it holds                                                                                           |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| [`vidr`](crates/vidr)                   | Video codecs, hardware decode and encode, frame timing, colour management, and the filter graph         |
+| [`vidr`](crates/vidr)                   | Video codecs, hardware decode and encode, frame timing, and colour management                           |
 | [`vidr-remaster`](crates/vidr-remaster) | The `vidr-remaster` command: restoration, upscaling, scaling, and encoding of a whole video in one pass |
 
 ## vidr-remaster
 
 `vidr-remaster` runs a restoration model over a whole video, resizes it, and encodes it. One command writes one output.
 
+### Build
+
+vidr has no release. Every build needs sibling checkouts, because `rav1r` is not on crates.io and cargo resolves optional dependencies for every feature set. A fresh checkout does not build until containr and rav1r are public.
+
+Place these five directories side by side in one parent directory:
+
+- `numr`
+- `boostr`
+- `containr`
+- `rav1r`
+- `vidr`
+
+Then run this in `vidr`:
+
+```bash
+cp .cargo/config.toml.example .cargo/config.toml
 ```
-vidr-remaster clip.mp4 --model fast --models-dir ~/models
+
+The copy patches numr, boostr, containr, and rav1r to the sibling paths.
+
+Pick one row, then run `cargo build --release -p vidr-remaster --features <features>`.
+
+| Machine | `<features>` | Also needs | Reads |
+| ------- | ------------ | ---------- | ----- |
+| NVIDIA GPU | `cuda,mp4,mkv,model-srvgg,model-rrdb` | `nvcc` at build time, and driver support for NVENC API 13.1 | H.264, HEVC, VP9, AV1 |
+| GPU with Vulkan Video | `vulkan-video,mp4,mkv,model-srvgg,model-rrdb` | A driver that lists the video extensions. Tested on NVIDIA only | H.264, HEVC, VP9, AV1 |
+| No GPU | `mp4,dav1d,cpu-av1,model-srvgg` | libdav1d 1.3.0 or newer, through pkg-config | AV1 only |
+
+- **CPU codecs.** A CPU build holds only the codecs its features name. Add `cpu-hevc`, `cpu-vp9`, or `openh264` to read other sources. See [CPU codecs](#cpu-codecs).
+- **Mixed builds.** Add a CPU codec to a hardware build to cover what the hardware leaves out.
+- **Incomplete builds.** A build with no container, decoder, or encoder reports which features it lacks.
+
+### Run
+
+Put the model directories under one root, named as in [Models](#models). Pass the root with `--models-dir`, or set `VIDR_MODELS_DIR`.
+
+```bash
+# NVIDIA or Vulkan Video build
+target/release/vidr-remaster clip.mp4 --model fast --models-dir ~/models
+
+# No-GPU build: no CPU HEVC encoder exists, so pass --codec av1
+target/release/vidr-remaster clip.mp4 --model fast --models-dir ~/models --codec av1
 ```
+
+The default `--model` is `purevision`, and its licence forbids commercial use. See [Models](#models).
 
 The output is `clip.fast.restored.mp4` beside the source. It keeps the source's frame count, frame timing, last-frame duration, rotation, and aspect ratio. Audio, text subtitles, chapters, and metadata copy with no transcode. A mismatch in the output check is an error, and no output publishes.
-
-### Requirements
-
-- A decoder and an encoder: the `cuda` build on an NVIDIA GPU, a CPU codec for each side, one of each, or the `vulkan-video` build for H.264, HEVC, VP9, or AV1 decode and H.264, HEVC, or AV1 encode, with a CPU codec for what it leaves out. NVENC needs driver support for API 13.1. numr's CUDA backend needs `nvcc` at build time.
-- A CPU build holds only the codecs its features name. See [CPU codecs](#cpu-codecs).
-- A model directory that holds the catalog's directory names. Pass it with `--models-dir`, or set `VIDR_MODELS_DIR`.
-
-To build against sibling checkouts, copy `.cargo/config.toml.example` to `.cargo/config.toml` first.
-
-```
-cargo build --release -p vidr-remaster --features cuda,mp4,mkv,model-srvgg,model-rrdb
-```
-
-A CPU build needs no GPU:
-
-```
-cargo build --release -p vidr-remaster --features mp4,dav1d,cpu-av1,model-srvgg
-vidr-remaster clip.mp4 --model fast --models-dir ~/models --codec av1
-```
-
-A build without a container, a decoder, and an encoder reports which features it lacks.
 
 ### Flags
 
@@ -128,7 +206,15 @@ A build without a container, a decoder, and an encoder reports which features it
 
 `--resolution` sets the shorter edge. `auto` takes the largest standard edge at or below the source's. The shorter edge never falls below 480.
 
-Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<stem>.<model>.2x` and `<stem>.<model>.restored`, `.mp4` or `.mkv`. A candidate exactly twice the source's size, with a matching `.upscale.json` sidecar, replaces the model. A candidate with a missing or mismatched sidecar stops the run, and the error names both flags. A sidecar names the encoder that wrote its video, so a candidate from another encoder stops the run the same way.
+### Reusing an earlier output
+
+Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<stem>.<model>.2x` and `<stem>.<model>.restored`, `.mp4` or `.mkv`.
+
+| Candidate | Result |
+| --------- | ------ |
+| Exactly twice the source's size, with a matching `.upscale.json` sidecar | Replaces the model pass |
+| Missing or mismatched sidecar | Stops the run. The error names both flags |
+| Sidecar names another encoder | Stops the run. The error names both flags |
 
 ### Execution
 
@@ -138,13 +224,41 @@ Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<s
 | `wgpu` | Vulkan Video for H.264, HEVC, VP9, and AV1, CPU | Vulkan Video for H.264, HEVC, and AV1, CPU |
 | `cpu` | CPU | CPU |
 
-`auto` prefers CUDA, then WebGPU, then the CPU, and each hardware codec over CPU codecs. When a library or device is missing, or a hardware codec refuses the stream or the output, `auto` falls through, with the reason in the report. Refusals of H.264 slice groups, data partitioning, a `frame_num` gap, field coding, and bit depth count. A stalled GPU queue does not fall through. The run ends with the error that names the stall. An explicit `--decoder nvdec`, `--decoder vulkan`, `--encoder nvenc`, or `--encoder vulkan` then ends in an error naming what is missing. A pair outside the table is refused, and the error names both sides and the pair that works.
+How `auto` chooses:
 
-The output check decodes the output. The run's decoder does this when it reads the output codec, and otherwise the runtime's hardware decoder or the CPU decoder of that codec does. With no such decoder the run stops before any work.
+- **Order.** CUDA, then WebGPU, then the CPU. A hardware codec comes before a CPU codec.
+- **Missing library or device.** `auto` falls through, with the reason in the report.
+- **Hardware refusal.** `auto` falls through. This covers H.264 slice groups, data partitioning, a `frame_num` gap, field coding, and bit depth.
+- **Stalled GPU queue.** The run ends. The error names the stall.
 
-Vulkan Video copies each plane between a video image and a numr buffer on the device, with no host copy. A CPU codec copies each frame through host memory. The run states this on one line of stdout. `report.json` holds `frame_path`: the runtime, each codec and route, the output check's decoder, the host copies of the encode pass and of the scans, and why each part was chosen.
+Other choices:
 
-A model on the CPU or WebGPU runtime runs at F32. A model on CUDA runs at F16.
+- **Explicit hardware codec.** `--decoder nvdec`, `--decoder vulkan`, `--encoder nvenc`, or `--encoder vulkan` never falls through. The error names what is missing.
+- **Pair outside the table.** The run is refused. The error names both sides and the pair that works.
+
+The output check decodes the output, in this order:
+
+1. The run's decoder, when it reads the output codec.
+2. The runtime's hardware decoder.
+3. The CPU decoder of that codec.
+
+With no such decoder, the run stops before any work.
+
+| Runtime | Frame copies | Model precision |
+| ------- | ------------ | --------------- |
+| `cuda` | No host copy on NVDEC or NVENC | F16 |
+| `wgpu` | One device-to-device copy per plane on Vulkan Video, with no host copy | F32 |
+| `cpu` | One host copy per frame | F32 |
+
+A CPU codec on any runtime copies each frame through host memory. A run states its copies on one line of stdout.
+
+`report.json` holds `frame_path`:
+
+- the runtime
+- each codec and route
+- the output check's decoder
+- the host copies of the encode pass and of the scans
+- why each part was chosen
 
 ### Models
 
@@ -162,39 +276,64 @@ The `purevision` licence forbids commercial use and requires share-alike. The de
 
 Each refusal ends the run with exit code 1 and leaves no output.
 
-| Refused                                                 | Why                                                         | Next action                               |
-| ------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------- |
-| HDR, in the bitstream or the container tags             | The colour policy covers SDR only                           | Use an SDR source, or tone-map it first   |
-| Interlaced or MBAFF-coded frames                        | The frame transform needs progressive frames                | Deinterlace the source first              |
-| Fragmented MP4                                          | containr does not read it                                   | `ffmpeg -i <input> -c copy <output.mp4>`  |
-| A size, pixel format, or colour change inside the video | A run holds one conversion and one encoder session          | Split the source at the change            |
-| Nonincreasing pts, or a frame count unlike the packets  | The output check needs one frame per packet, in order       | Repair or remux the source                |
-| A 10-bit source with `--codec h264`                     | NVENC, Vulkan Video, and OpenH264 do not encode H.264 at 10 bits here | Pass `--codec hevc`, or `--codec av1` on the CPU |
-| HEVC with a CPU encoder                                 | No CPU HEVC encoder exists here, by decision                | Pass `--codec av1`                        |
-| An H.264 source that is not Baseline, on OpenH264       | OpenH264's B-slice output differs from the reference        | Use NVDEC or Vulkan Video, or re-encode as Baseline |
-| Vulkan Video with `--runtime cuda`, or with NVDEC or NVENC | Its frames live on WebGPU tensors                        | Pass `--runtime wgpu`, with Vulkan Video or a CPU codec on each side |
-| B-frames, an odd size, or a size outside the driver's range, on Vulkan Video encode | One previous frame is the reference, and 4:2:0 needs even sides | Scale the frames, or pick another encoder |
-| AV1 on Vulkan Video encode, on a driver with no `VK_KHR_video_encode_av1` | The driver lists no such queue operation | Pass `--encoder cpu` with `cpu-av1`, or `--codec hevc` |
-| H.264 slice groups, data partitioning, or a `frame_num` gap on Vulkan Video | Vulkan Video has no form for the first two, and vidr does not infer missing frames | Use another decoder, or re-encode |
-| An HEVC picture that binds a reference the DPB lacks, on Vulkan Video | Vulkan Video activates a DPB slot only through a decode | Use another decoder, or start at an earlier IRAP picture |
-| A VP9 frame that grows past its session and keeps references, on Vulkan Video | A new session holds none of the references | Use another decoder, or call `VulkanDecoder::with_max_coded_size` in library code |
-| An AV1 frame under the driver's smallest coded size, or film grain with no `filmGrainSupport` profile, on Vulkan Video | Each frame checks against what the driver lists | Use another decoder |
-| An AV1 frame that reads a reference its `ref_order_hint` states as lost, on Vulkan Video | Vulkan Video activates a DPB slot only through a decode, so no slot can stand in for the lost frame | Use another decoder, or start at a key frame |
-| AV1 in Annex B framing, or large-scale tile coding, on Vulkan Video | vidr reads the low-overhead format, and has no tile list decode | Run `ffmpeg -i INPUT -c copy -f obu OUTPUT`, or use another decoder |
-| An H.264 IDR picture that drops waiting frames on Vulkan Video: `no_output_of_prior_pics_flag` 1, or a new size or `max_dec_frame_buffering` | ITU-T H.264 C.4.4 removes them, so frames no longer match packets and the scan refuses the count | Use another decoder, or re-encode |
-| A codec, a runtime, or `--openh264-library` not in the build | The feature is off                                     | Rebuild with the feature the error names  |
-| A candidate from another encoder                        | The sidecar names another encoder                           | Pass `--from-upscaled` or `--force-ai`    |
-| Attachments or ASS subtitles into `.mp4`                | MP4 has no form for them                                    | Write `.mkv`                              |
-| A Matroska crop or `ContentEncoding`                    | NVDEC applies neither                                       | Remux or re-encode the source             |
-| More than one MP4 sample description                    | A decoder takes one config record                           | Split or transcode the source             |
-| An existing output                                      | A run replaces a file only on request                       | Pass `--overwrite`, or choose another path |
+**The source**
+
+| Refused | Why | Next action |
+| ------- | --- | ----------- |
+| HDR, in the bitstream or the container tags | The colour policy covers SDR only | Use an SDR source, or tone-map it first |
+| Interlaced or MBAFF-coded frames | The frame transform needs progressive frames | Deinterlace the source first |
+| Fragmented MP4 | containr does not read it | Run `ffmpeg -i <input> -c copy <output.mp4>` |
+| A size, pixel format, or colour change inside the video | A run holds one conversion and one encoder session | Split the source at the change |
+| Nonincreasing pts, or a frame count unlike the packets | The output check needs one frame per packet, in order | Repair or remux the source |
+| A Matroska crop or `ContentEncoding` | NVDEC applies neither | Remux or re-encode the source |
+| More than one MP4 sample description | A decoder takes one config record | Split or transcode the source |
+| An H.264 source that is not Baseline, on OpenH264 | OpenH264's B-slice output differs from the reference | Use NVDEC or Vulkan Video, or re-encode as Baseline |
+
+**The output**
+
+| Refused | Why | Next action |
+| ------- | --- | ----------- |
+| A 10-bit source with `--codec h264` | OpenH264 and Vulkan Video encode H.264 at 8 bits. NVENC refuses it when the GPU lists no 10-bit support | Pass `--codec hevc`, or `--codec av1` on the CPU |
+| HEVC with a CPU encoder | No CPU HEVC encoder exists here, by decision | Pass `--codec av1` |
+| Attachments or ASS subtitles into `.mp4` | MP4 has no form for them | Write `.mkv` |
+| An existing output | A run replaces a file only on request | Pass `--overwrite`, or choose another path |
+| A candidate from another encoder | The sidecar names another encoder | Pass `--from-upscaled` or `--force-ai` |
+| A codec, a runtime, or `--openh264-library` not in the build | The feature is off | Rebuild with the feature the error names |
+
+**Vulkan Video encode**
+
+| Refused | Why | Next action |
+| ------- | --- | ----------- |
+| `--runtime cuda`, or a pairing with NVDEC or NVENC | Its frames live on WebGPU tensors | Pass `--runtime wgpu`, with Vulkan Video or a CPU codec on each side |
+| B-frames | One previous frame is the reference | Pick another encoder |
+| An odd size | 4:2:0 needs even sides | Scale the frames, or pick another encoder |
+| A size outside the driver's range | The driver sets the range | Scale the frames, or pick another encoder |
+| AV1, on a driver with no `VK_KHR_video_encode_av1` | The driver lists no such queue operation | Pass `--encoder cpu` with `cpu-av1`, or `--codec hevc` |
+
+**Vulkan Video decode**
+
+Use another decoder for every row. A further option appears where one exists.
+
+| Refused | Why | Further option |
+| ------- | --- | -------------- |
+| `--runtime cuda`, or a pairing with NVDEC or NVENC | Its frames live on WebGPU tensors | Pass `--runtime wgpu` |
+| H.264 slice groups or data partitioning | Vulkan Video has no form for them | Re-encode |
+| An H.264 `frame_num` gap | vidr does not infer missing frames | Re-encode |
+| An H.264 IDR picture with `no_output_of_prior_pics_flag` 1, or a new size or `max_dec_frame_buffering` | ITU-T H.264 C.4.4 removes waiting frames, so frames no longer match packets | Re-encode |
+| An HEVC picture that binds a reference the DPB lacks | Vulkan Video activates a DPB slot only through a decode | Start at an earlier IRAP picture |
+| A VP9 frame that grows past its session and keeps references | A new session holds none of the references | Call `VulkanDecoder::with_max_coded_size` in library code |
+| An AV1 frame under the driver's smallest coded size | Each frame checks against what the driver lists | None |
+| AV1 film grain with no `filmGrainSupport` profile | Each frame checks against what the driver lists | None |
+| An AV1 frame that reads a reference its `ref_order_hint` states as lost | No slot can stand in for the lost frame | Start at a key frame |
+| AV1 in Annex B framing | vidr reads the low-overhead format | Run `ffmpeg -i INPUT -c copy -f obu OUTPUT` |
+| AV1 large-scale tile coding | vidr has no tile list decode | None |
 
 ### Results
 
 | Exit code | Meaning                                                                                       |
 | --------- | --------------------------------------------------------------------------------------------- |
 | 0         | The output and its sidecar are in place. A report that does not write gives a warning         |
-| 1         | A refusal, a failure, or a final output whose sidecar did not land. The error names both paths |
+| 1         | A refusal, an error, or a final output whose sidecar did not land. The error names both paths |
 | 130       | A signal stopped the run. The temporary output is gone                                         |
 
 The first Ctrl-C, SIGTERM, or SIGHUP asks the run to stop at the next frame. A second one removes the temporary output and ends the process.
@@ -203,57 +342,50 @@ The first Ctrl-C, SIGTERM, or SIGHUP asks the run to stop at the next frame. A s
 
 ## CPU codecs
 
-A CPU codec works in host memory, so each frame takes one copy through it. The codec declares the copy through `FrameRoute`. Every feature here is off by default. `vidr-remaster` has a feature of the same name for each codec, and selects the codec with `--decoder cpu` or `--encoder cpu`, or through `auto`.
+A CPU codec works in host memory, so each frame takes one copy through it. The run report states the copy. In library code, `FrameRoute` on the decoder or encoder declares it.
 
-| Codec | Feature | Direction | Bit depth, chroma | Crate | Licence | Patent note |
-| ----- | ------- | --------- | ----------------- | ----- | ------- | ----------- |
-| AV1 | `dav1d` | Decode | 8, 10, 4:2:0 | libdav1d through `dav1d` | BSD-2-Clause | AV1: see below |
-| AV1 | `cpu-av1`, `cpu-av1-asm` | Encode | 8, 10, 4:2:0 | `rav1r` | BSD-2-Clause | AOM Patent License 1.0: see below |
-| VP9 | `cpu-vp9` | Decode | 8, 10, 4:2:0 | `rusty_vp9` | Apache-2.0 | VP9 has a patent pool: see below |
-| HEVC | `cpu-hevc` | Decode | 8, 10, 4:2:0 | This crate | Apache-2.0 | HEVC has patent pools: see below |
-| H.264 | `openh264`, `openh264-cisco` | Decode, encode | 8, 4:2:0 | OpenH264 through `openh264` | BSD-2-Clause | Cisco's cover applies only to its own binary, which `openh264-cisco` loads |
+Every feature here is off by default. `vidr-remaster` has a feature of the same name for each codec. Select the codec with `--decoder cpu`, `--encoder cpu`, or `auto`.
+
+| Codec | Feature | Direction | Bit depth, chroma | Crate | Licence |
+| ----- | ------- | --------- | ----------------- | ----- | ------- |
+| AV1 | `dav1d` | Decode | 8, 10, 4:2:0 | libdav1d through `dav1d` | BSD-2-Clause |
+| AV1 | `cpu-av1`, `cpu-av1-asm` | Encode | 8, 10, 4:2:0 | `rav1r` | BSD-2-Clause |
+| VP9 | `cpu-vp9` | Decode | 8, 10, 4:2:0 | `rusty_vp9` | Apache-2.0 |
+| HEVC | `cpu-hevc` | Decode | 8, 10, 4:2:0 | This crate | Apache-2.0 |
+| H.264 | `openh264`, `openh264-cisco` | Decode, encode | 8, 4:2:0 | OpenH264 through `openh264` | BSD-2-Clause |
+
+`cpu-av1-asm` needs NASM 2.15 or newer on x86_64, or a C compiler on aarch64.
+
+### Shipping a binary
 
 These notes state what a binary distribution needs. They are not legal advice.
 
-- **rav1r.** rav1r is a fork of rav1e, under the BSD-2-Clause licence and the Alliance for Open Media Patent License 1.0.
+| Feature | Condition |
+| ------- | --------- |
+| `cpu-av1` | Reproduce the Alliance for Open Media Patent License 1.0 and the BSD licence text in documentation, legal notices, or other written materials |
+| `dav1d` | AV1 has patent terms. Get legal review |
+| `cpu-vp9` | VP9 has a patent pool. Get legal review |
+| `cpu-hevc` | HEVC has patent pools. Get legal review |
+| `openh264` | A source build gets no Cisco patent cover |
+| `openh264-cisco` | Cisco's cover applies only to its own binary. This feature loads it from a path the caller supplies |
+
+- **rav1r.** rav1r is a fork of rav1e, under the BSD-2-Clause licence and the Alliance for Open Media Patent License 1.0. rav1r's `PATENTS` file holds the patent licence. Section 1.3 ends it for a licensee that sues over an Implementation, with two stated exceptions.
 - **Notices.** `vidr-remaster --notices` prints the text of each codec in the build. `crates/vidr-remaster/notices/` holds each text unchanged, and the crate package includes that directory.
-- **AV1.** A binary built with `cpu-av1` must reproduce the Alliance for Open Media Patent License 1.0 in its documentation, legal notices, or other written materials, with the BSD licence text. rav1r's `PATENTS` file holds the patent licence. Section 1.3 of that licence ends it for a licensee that sues over an Implementation, with two stated exceptions.
-- **VP9.** VP9 has a patent pool. Shipping a binary with `cpu-vp9` on needs legal review.
-- **HEVC.** HEVC has patent pools. Shipping a binary with `cpu-hevc` on needs legal review.
-
-`rav1r` is not on crates.io yet. Until it is, `cpu-av1` builds only through the `[patch.crates-io]` path in `.cargo/config.toml`, and a CI run on a clean checkout does not resolve it.
-
-`rusty_vp9` stays pinned to one release, and its adoption depends on the conformance run below.
-
-### Conformance
-
-The conformance sets stay outside the repository. Their licence terms are unconfirmed, and nothing here redistributes them.
-
-```
-scripts/conformance/fetch_vp9.sh DIR
-VIDR_VP9_VECTORS=DIR cargo test -p vidr --features cpu-vp9,mkv libvpx_vectors -- --nocapture
-```
-
-The test compares every frame with libvpx's `.md5` file, prints a pass and fail table by vector, and names each failure. `VIDR_VP9_FILTER` picks vectors by name, and `VIDR_CONFORMANCE_JOBS` sets how many run at once. ffmpeg remuxes the `.ivf` vectors.
-
-```
-scripts/conformance/fetch_hevc.sh DIR
-VIDR_HEVC_CONFORMANCE=DIR cargo test -p vidr --release --features cpu-hevc hevc_zips_decode -- --nocapture
-```
-
-The test decodes each HEVC_v1 zip through `HevcDecoder`. It checks each picture's hash SEI message and the zip's MD5 of the whole decoded stream, keeps no frame, and needs `unzip`. It prints a table by vector and names each failure. `VIDR_HEVC_ONLY` picks zips by name, `VIDR_HEVC_REPORT` names a file for one line per vector, and `VIDR_HEVC_THREADS` sets the worker threads per decoder, 1 by default. Without `cpu-hevc`, the same variable reads each zip's layout and decodes nothing.
+- **`rusty_vp9`.** It stays pinned to one release. [CONTRIBUTING.md](CONTRIBUTING.md#conformance) holds the libvpx conformance run.
 
 ## Scope
 
-| Area            | Planned                                                                                       |
-| --------------- | --------------------------------------------------------------------------------------------- |
-| Hardware codecs | NVDEC and NVENC, Vulkan Video, VA-API                                                         |
-| Software codecs | AV1, VP9, H.264, and HEVC decode. AV1 encode                                                  |
-| Containers      | MP4, Matroska, and WebM read and write, with stream copy for audio, subtitles, and chapters   |
-| Colour          | BT.601, BT.709, and BT.2020 matrices, full and limited range, HDR10 and HLG, tone mapping     |
-| Filters         | Scaling, cropping, deinterlacing, frame-rate conversion, denoising, and deblocking            |
-| Models          | Super-resolution, temporal restoration, frame interpolation, and any vision model boostr runs |
-| Distribution    | Multi-GPU processing over [nexar](https://github.com/ml-rust/nexar)                           |
+These are planned, and none of them works yet.
+
+| Area            | Planned                                                                     |
+| --------------- | --------------------------------------------------------------------------- |
+| Hardware codecs | VA-API                                                                      |
+| Software codecs | H.264 above Baseline                                                        |
+| Containers      | Fragmented MP4 input, through containr                                      |
+| Colour          | BT.2020 matrices, HDR10 and HLG, tone mapping                               |
+| Filters         | A filter graph: scaling, cropping, deinterlacing, frame-rate conversion, denoising, and deblocking |
+| Models          | Temporal restoration, frame interpolation, and any vision model boostr runs |
+| Distribution    | Multi-GPU processing over [nexar](https://github.com/ml-rust/nexar)         |
 
 ## Minimum Rust version
 

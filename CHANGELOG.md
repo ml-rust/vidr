@@ -2,218 +2,28 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Each release must have a non-empty section here before it can be tagged — `.github/workflows/release-validate.yml` refuses a tag whose version has no entry, and the GitHub Release body is this file's section for that version. vidr and vidr-remaster release together at one version.
-
 ## [Unreleased]
+
+First release. `vidr` and `vidr-remaster` share one version.
 
 ### Added
 
-- `vidr`: hardware encode on Vulkan Video behind `vulkan-video`. `VulkanEncoder` implements `Encoder<WgpuRuntime>`, on the shared `VulkanDevice`, which opens an encode queue when the device has one. `vulkan_encode_available` states it with no device open. Real-GPU tests pass for H.264 and HEVC on NVIDIA's driver only, in its coincident DPB mode. No AMD or Intel GPU has run it, and no validation layer has run on it.
-  - H.264 High at 8 bits, HEVC Main, and Main 10 where the driver lists it. One previous frame as the reference, an IDR picture at `gop_length`, `dts` equal to `pts`. `b_frames` above 0 is refused by name.
-  - Each frame takes one `vkCmdCopyBufferToImage` per plane from numr's buffers to an input image, with a queue ownership transfer, and no host copy. The copy fills the coded area past the frame with the frame's last column and last row.
-  - `avcC` and `hvcC` come from `vkGetEncodedVideoSessionParametersKHR`, through the existing filters. A cropping rectangle or conformance window maps the coded size back to the frame's.
-  - `VbrQuality` runs at a constant quantiser where the driver lists its disabled mode, and else at a mapped VBR or CBR rate. `VulkanEncoder::rate_control` states which.
-  - AV1 through `VK_KHR_video_encode_av1` on the same core, with `av1C` from the driver's sequence header. A driver that lacks the extension refuses by name. This path is written and has never run on any GPU.
-  - NVIDIA's driver reads session parameter pointers after create, so each pointee keeps a stable address. It refuses a rate-controlled encode with no codec layer structure, so each layer states one. It refuses VBR with an equal maximum, so an equal maximum takes CBR where the driver lists it. It refuses some small H.264 decode sessions, so each decode session opens at a floor on each side. An AV1 encode session stays exact.
-  - `EncodeError` gains `Vulkan`, `VulkanUnavailable`, `VulkanRefused`, `VulkanEncodeStatus`, `VulkanBitstreamOverrun`, `VulkanFeedbackRange`, `VulkanWaitTimeout`, `VulkanNoMemoryType`, `VulkanCore`, and `VulkanDeviceLost`.
-- `vidr-remaster`: `--encoder vulkan`, and `auto` on WebGPU prefers Vulkan Video encode. A capability refusal under `auto` falls to the CPU encoder, with the reason in the report. `Machine` gains `vulkan_encode`. The `fast` model ran on numr WebGPU on a real GPU and a real clip, between Vulkan decode and Vulkan encode. That run took no host copy. `realesrgan` and `purevision` have not run on WebGPU.
-- `vidr`: HEVC and VP9 decode on Vulkan Video behind `vulkan-video`, on the shared `DecodeEngine`. Real-GPU tests pass on NVIDIA's driver, in its coincident DPB mode. The HEVC_v1 and libvpx VP9 sweeps show no failure there, and refuse some streams by name at driver limits. No AMD or Intel GPU has run them, and no validation layer has run on them.
-  - HEVC Main, Main 10, and Main Still Picture at 8 or 10 bits, with several slice segments, tiles, WPP, scaling lists, and long-term references. RASL pictures of a first CRA picture skip. `pic_output_flag` and `NoOutputOfPriorPicsFlag` hold. A picture that binds a reference the DPB lacks is refused by name, because Vulkan Video activates a slot only through a decode.
-  - VP9 profiles 0 and 2 at 8 or 10 bits. A hidden frame fills a slot with no copy, `show_existing_frame` copies the slot again, and a chunk returns its last shown frame, as libvpx does. A frame that grows past its session while it keeps references is refused by name. `VulkanDecoder::with_max_coded_size` sizes that session.
-  - `decode::hevc_order` holds POC, RPS, marking, and bumping with no samples, and the CPU decoder and Vulkan Video share it.
-  - The shared engine refuses a picture past its session's active references, or one that names a slot twice, before any driver call. `DecodeError::VulkanTooManyReferences` and `DecodeError::VulkanDuplicateSlot` name them. `DecodeError::VulkanNoTileBytes` names a VP9 frame with no tile bytes on this path. The shared parser and `RustyVp9Decoder` do not change.
-  - `DecodeError::VulkanDeviceLost` names a lost device, and `VulkanDevice::is_lost` states it. wgpu's panic on a lost device in `poll` becomes this error. `VulkanDevice::open_shared` opens a new device on the next numr index after a loss.
-  - After an error, each later `send` and `flush` returns that error, also after a flush.
-  - `hevc_vulkan_mutations_stay_safe` and `vp9_vulkan_mutations_stay_safe` run seeded damage through `VulkanDecoder` on one device, and report each lost device.
-- `vidr`: AV1 Main decode on Vulkan Video behind `vulkan-video`, at 8 or 10 bits, 4:2:0, on the shared `DecodeEngine`. Real-GPU tests pass on NVIDIA's driver only, in its coincident DPB mode. The libaom sweep shows no failure there. It refuses streams by name below the driver's smallest coded size, and monochrome streams. No AMD or Intel GPU has run it, and no validation layer has run on it.
-  - `bitstream::av1` holds a whole parser: the sequence header, `uncompressed_header()` with the state it reads from the reference names, tile groups, temporal units, and operating point 0. It holds no decoding state past the header syntax.
-  - Session parameters hold the sequence header, and a new sequence header opens a new session at a key frame. Eight reference names share nine DPB slots. A sample holds several frames, and it gives its last shown frame per temporal unit.
-  - A frame with `apply_grain` 1 takes film grain from the driver, in an output image of its own, as `VUID-vkCmdDecodeVideoKHR-pDecodeInfo-09249` states. A frame shown again repeats its grained planes. A driver with no `filmGrainSupport` profile refuses by name.
-  - `DecodeError::VulkanTileRange` names a tile outside its frame's bytes. Annex B framing and tile lists are refused by name.
-  - `Av1Parser` refuses by name a sequence header or `OBU_FRAME_HEADER` inside an open frame, and a redundant header that is no exact copy. `parse_frame_header` refuses a `ref_frame_idx` with `RefValid` 0, and a `delta_frame_id_minus_1` that misses `RefFrameId`.
-  - A name that `ref_order_hint` states as lost goes empty in the reference pool. A frame that reads it takes `DecodeError::VulkanRefused`, and never decodes against the stale slot.
-  - Each Vulkan decoder keeps what its session parameters point to in stable heap storage for the life of the parameters, because NVIDIA's driver reads through those pointers after the create call returns.
-  - `scripts/conformance/fetch_av1.sh` fetches libaom's vectors. `libaom_vectors_match_on_dav1d`, `libaom_vectors_match_on_vulkan_video`, and `av1_vulkan_mutations_stay_safe` read them from `VIDR_AV1_VECTORS`.
-- `vidr-remaster`: `auto` and `--decoder vulkan` on WebGPU take HEVC, VP9, and AV1 sources through Vulkan Video, and the run's output check reads each output codec on it. `ExecutionError::VulkanCodec` goes.
-- `vidr`: exact frame timing model. `Rational` time values with checked arithmetic and named rounding modes, `rescale`, `TrackTiming` with the last-frame duration chain and total duration, and `EditTimeline` for MP4-style edit lists at rate 1.
-- `vidr`: frame geometry. `Rotation` in multiples of 90 degrees from degrees or a `tkhd` display matrix, sample and display aspect ratios.
-- `vidr`: bitstream filters behind the `h264`, `hevc`, and `av1` features.
-  - `ToAnnexB` turns MP4 and Matroska samples into the Annex-B access units NVDEC takes. Its output equals ffmpeg's `h264_mp4toannexb` and `hevc_mp4toannexb` byte for byte. One exception: an HEVC sample with in-band VPS, SPS, and PPS gets no duplicate copy.
-  - `FromAnnexB` turns NVENC Annex-B access units into samples, and builds `avcC` or `hvcC` from the first access unit.
-  - `Av1ToDecoder` and `Av1FromEncoder` convert AV1 samples and temporal units, and build `av1C`.
-  - `AvcConfig`, `HevcConfig`, and `Av1Config` parse and write the config records. The `annexb`, `length_prefixed`, and `av1::obu` modules split and join NAL units and OBUs.
-- `vidr`: NVDEC hardware decode behind the `nvdec` feature, and the backend-neutral `Decoder` trait and `DecodedFrame` behind `decode`.
-  - `NvdecDecoder` decodes H.264, HEVC, AV1, and VP9, 4:2:0 at 8 or 10 bits, on numr's CUDA context and stream. `libnvcuvid.so.1` loads at run time.
-  - `DecodedFrame` holds dense NV12 or P010 planes as numr tensors, the pts, the display size, and the colour facts. The planes go straight to `ColorOps::yuv_to_rgb`.
-  - `ColorFacts::chroma_location` comes from `av1C` for AV1 and from the SPS VUI for H.264 and HEVC, through `h264_sps_vui` and `hevc_sps_vui`. numr models the horizontal siting only, so the vertical offset of H.273 types 2 to 5 is kept in `ChromaLocation` and not applied.
-- `vidr`: NVENC hardware encode behind the `nvenc` feature, and the backend-neutral `Encoder` trait, `EncodeConfig`, `EncodeFrame`, and `EncodedPacket` behind `encode`.
-  - `NvencEncoder` encodes H.264, HEVC, and AV1 as far as the GPU lists them, from NV12 or P010 planes on numr's CUDA context and stream. `libnvidia-encode.so.1` loads at run time, and the driver must support NVENC API 13.1.
-  - Packets come out in decode order as MP4 samples, with exact pts, dts, and duration. `config_record` returns `avcC`, `hvcC`, or `av1C` after the first packet.
-  - A codec, bit depth, B-frame count, or size the GPU refuses returns a named `EncodeError`. So does an odd H.264 or HEVC size, and a plane that does not match the config.
-- `vidr-remaster`: the pure logic of the Python proof of concept, as a library.
-  - `choose_resolution` picks even output dimensions for the modes `auto`, `original`, `2x`, and the standard shorter edges 480 to 4320, with a 480-pixel minimum.
-  - `Request::validate` and `output_path` check the source, the output name and container, an existing output, the output directory, the encoder quality, and the `--from-upscaled` and `--force-ai` pair. Quality runs from 1 to 51, because NVENC refuses 0.
-  - `record_upscaled` and `check_record` write and check the `.upscale.json` sidecar, schema 1. The text equals the PoC's byte for byte. The write is atomic and the read stops at 64 KiB.
-  - `find_upscaled` selects a matching full-length upscale from the candidates beside the source, newest first. A `VideoProbe` supplies the video facts, and `check_match` compares them.
-- `vidr`: `ChromaLocation::to_h273` and `ChromaLocation::to_av1`.
-- `vidr`: `DecodedFrame::progressive` and `DecodedFrame::top_field_first`, from NVDEC's `CUVIDPARSERDISPINFO`. The flags describe how the picture was coded, not the content. To decide whether a stream is interlaced, read the SPS.
-- `vidr`: `VuiSignal::sample_aspect_ratio` for H.264 and HEVC. `aspect_ratio_idc` 1 to 16 map through the standards' table, and idc 255 gives the sent `sar_width` and `sar_height`. Idc 0, the reserved values, and an extended ratio with a zero part give `None`.
-- `vidr`: `MATRIX_FCC` and `MATRIX_SMPTE240M`. `ColorFacts::matrix` maps them to numr's `ColorMatrix::Fcc` and `ColorMatrix::Smpte240m`, so `yuv_spec` now returns a spec for these two codes.
-- `vidr`: frame conversion behind the `frame` feature, on any numr backend whose `ColorOps` takes U8 and U16 planes.
-  - `frame::to_rgb` converts a `DecodedFrame` in NV12 or P010 to float RGB in F32 or F16, in `ConvLayout::Nchw` or `ConvLayout::Nhwc`. An odd AV1 or VP9 display size pads luma by replication on the odd side, converts, and cuts the RGB back to `[H, W]` on the device.
-  - `frame::from_rgb` converts even-size float RGB to `OutputPlanes`, and `EncodeFrame::from(&planes)` borrows them for an encoder. An odd size returns `FrameError::OddRgbSize`.
-  - `Error::Frame` holds the new `FrameError`. `DecodedFrame::from_planes` builds a frame from planes outside a decoder. `PixelFormat::sample_dtype` names a format's numr dtype.
-  - The feature enables `numr/f16`, which F16 RGB needs on the CPU backend.
-- `vidr`: colour policy in `color`, behind `decode`.
-  - `check_sdr` refuses transfer 16 or 18, matrix 9 or 10, and primaries 9, and names the code. Transfers 14 and 15 alone pass.
-  - `color_plan` runs `check_sdr`, then returns one `YuvSpec` for decode and encode, and the output tags. An unspecified matrix converts as BT.601 and stays untagged. A matrix outside BT.709, the BT.601 variants, FCC, SMPTE 240M, and unspecified returns `ColorError::UnsupportedMatrix`. The chroma location passes through.
-  - `merge_container`, behind `mp4` or `mkv`, fills unspecified bitstream fields from the container. A specified bitstream value wins, which matches ffprobe's frame fields and differs from its stream fields. `full_range` takes full from either side, because the flag has no unspecified state.
-- `vidr`: media input over containr in `media`, behind the `mp4` and `mkv` features. Neither needs a GPU.
-  - `Input::open` picks the container from the file bytes, never the extension. Unknown bytes return `MediaError::UnknownFormat`, and fragmented MP4 returns `MediaError::Fragmented` with containr's message.
-  - `video_track` returns the first video track in file order, whichever track holds the default flag.
-  - `edit_timeline` converts the raw edit list with the movie timescale. `rotation` reads the display matrix or `ProjectionPoseRoll`, and refuses a mirror, another angle, yaw, pitch, or a roll on a spherical projection. `sample_aspect_ratio` and `colour` return what the container states.
-  - `decode_config` returns the codec and config record `NvdecDecoder::new` takes. It refuses a Matroska `ContentEncoding`, more than one MP4 sample description, and a missing config record.
-- `vidr`: media output over containr in `media`, behind the `mp4` and `mkv` features. Neither needs a GPU, and both now enable `encode`.
-  - `OutputKind::from_path` takes `.mp4` and `.mkv`, in any case, and refuses other extensions by naming those two.
-  - `plan_copy` runs every `StreamCopy` plan and a dry run of the whole mux before GPU work. Audio, text subtitles, chapters, global metadata, and copied track metadata copy, with no transcode. `CopyPlan::dropped` lists extra video, data, and `tmcd` tracks. Attachments and any stream or item the output cannot hold are refused, with the output kind that holds them.
-  - MP4 to MKV rounds copied tracks to a 1 ms `TimestampScale`. `CopyPlan::max_rounding_error_ns` reports the error, at most half a tick. A chapter time with no whole nanosecond is refused and names MP4, never rounded. Matroska to Matroska copies exactly.
-  - `OutputMux` writes in one pass, starting after the encoder's first packet, with `moov` first in MP4. `VideoOutput` states the codec, config record, size, sample aspect ratio, rotation, time base, colour tags, language, and start offset. The offset is an empty edit in MP4 and a pts shift in MKV. HEVC uses `hvc1`.
-  - MKV video pts round half-even from the first frame, in integers, so `check_output` sees the exact rescale it compares. A pts on the absolute time line is within one tick, and the total duration within half a tick. Two frames on one tick are refused and name MP4.
-  - Copied packets demux one at a time by decode time. `OutputMux::buffered_bytes` and `CopyPlan::with_max_buffer` state and set the memory bound. MKV holds its attachments in memory from `finish` until it writes them.
-- `vidr`: `read_stream_facts` fills `StreamFacts` from a demuxed file with the edit list applied. `read_track_facts` and `check_tracks` compare audio, subtitle, chapter, and copied packet counts against `CopyPlan::expected_tracks`, with new `Deviation` variants. A text subtitle's count leaves out empty gap samples.
-- `vidr`: the threaded pump behind the `pipeline` feature, which needs no GPU. `pipeline::run` takes a `PacketSource`, a `Decoder`, a `FrameTransform`, an `Encoder`, and a `PacketSink`.
-  - T1 demuxes and decodes, T2 applies the edit window and the transform, and T3 encodes and writes, over channels of capacity 2 and 1. A blocked sink stops T2 from queuing kernels, then stops T1 from parsing. `MAX_IN_FLIGHT_FRAMES` states the bound.
-  - The first error stops every stage and returns as the root cause. A panic returns `PipelineError::Panic`, which names the stage. `PumpControl::request_stop` ends a run with `PipelineError::Stopped`, and the sink never finishes.
-  - T2 holds one frame back before the transform, so a frame outside the edit window costs no work, and each frame's duration is the next output pts minus its own. The last frame's duration comes from the chain `TrackTiming` uses, from the same inputs as `read_stream_facts`. A frame count mismatch between the decoder and the encoder is `PipelineError::CountMismatch`.
-  - `media::InputSource` and `media::MuxSink` connect `Input` and `OutputMux` to the pump. `MuxSink` starts the output when the encoder's first packet supplies the config record.
-  - `Error::Pipeline` holds the new `PipelineError`.
-- `vidr`: `Rotation::display_matrix`, the inverse of `Rotation::from_display_matrix`.
-- `vidr`: `SampleAspectRatio::from_fraction`, which reduces wide parts. `Error::Color` and `Error::Media` hold the new `ColorError` and `MediaError`.
-- `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.
-- `vidr`: the `vp9` feature, which `nvdec` enables. `vp9_color` reads `color_space` and `color_range` from one VP9 frame header, and `vp9_packet_color` reads every frame of a chunk, superframes included. `Vp9Color` holds the values and the bit depth.
-- `vidr-remaster`: `remaster`, one whole run, and the `vidr-remaster` command through `main_with_args`. A run needs `cuda` and `mp4` or `mkv`, so it needs an NVIDIA GPU until a vendor-neutral path lands. A build without them validates the request, writes a report, and names the missing features.
-  - A run plans the stream copy, then pre-scans the source with one full NVDEC decode. The scan refuses interlaced or MBAFF-coded frames, a mid-stream change of size, pixel format, or colour, pts that do not increase, HDR, and a decoded frame count that differs from the packet count.
-  - `find_upscaled` selects an earlier upscale with a probe over `read_stream_facts` and the same scan. It also refuses a candidate whose rotation differs from the source's.
-  - The encode pass writes inside a temporary directory beside the output, with `Preset::P5`, `VbrQuality`, and no B-frames. The frame rate is a hint reduced to 32-bit parts by continued fraction. NVENC's refusal of 10-bit H.264 becomes an error that names `--codec hevc`.
-  - The output check re-decodes the output, then runs `check_output` and `check_tracks`. A mismatch is an error, and the temporary output never publishes.
-  - `TempOutput` publishes with a hard link, or with a rename under `--overwrite`. On a file system with no hard links, an exclusive create keeps the no-overwrite rule.
-  - `report.json` goes under `$XDG_STATE_HOME/vidr-remaster/upscale-<run id>/`, else `~/.local/state`, on success, failure, and stop. It adds the model's licence notice, dropped tracks, and the rounding error of copied tracks.
-  - The command takes the proof of concept's flags without `--backend`, and `--models-dir`. It exits 0, 1, or 130. Ctrl-C, SIGTERM, and SIGHUP ask the run to stop, which removes the temporary output. A second signal ends the process at once.
-- `vidr`: `Input::bitstream_sample_aspect_ratio` reads the VUI of the first SPS in an H.264 or HEVC config record. `read_stream_facts` falls back to it when the container states no ratio.
-- `vidr`: `pipeline::PumpControl`, `PumpProgress`, and `PumpReport` are in every build, so a caller holds a stop request with no `pipeline` feature.
-- `vidr-remaster`: end-to-end tests in `tests/e2e/` with `tests/e2e.rs` as the root, behind `cuda`, `mp4`, `mkv`, `model-srvgg`, and `model-rrdb`. The nextest `nvenc` group caps them. A missing GPU, model, or ffmpeg skips with a notice.
-- `vidr-remaster`: `RunOutcome::OutputWithoutSidecar`, `ReportStatus::OutputWithoutSidecar`, `MissingSidecar`, `Published`, `TempOutput::publish_with_sidecar`, and `remove_temp_directories`.
-- README: a `vidr-remaster` usage section.
-- `vidr`: plane forms. `PlaneForm::Samples` holds U8 or U16 planes and `PlaneForm::Words` holds numr's packed U32 words, the only form numr's WebGPU kernels take.
-  - `DecodedFrame::from_packed_planes`, `EncodeFrame::from_packed_planes`, and `OutputPlanes::from_packed_planes` build a word-form frame. `plane_form` reads the form on each type.
-  - `to_rgb`, `to_rgb_reusing`, `DecodedFrame::planes`, and the plane checks follow the form. An odd word frame pads luma with `ColorOps::pad_packed_luma`. `from_rgb` allocates words when `Runtime::packed_color_planes` is true.
-  - The `wgpu` feature passes through to `numr/wgpu`. Tests in `tests/frame/wgpu.rs` compare the WebGPU path with the CPU path bit for bit, and skip with a notice without an adapter.
-- `vidr`: `FrameRoute` states how a decoder or encoder moves each frame: `Device`, `HostUpload`, `HostDownload`, or `HostOnly`. `PumpReport` and `PumpProgress` gain `host_copied_frames` and `host_copied_bytes`, which the pump computes from each route and the frame sizes.
-- `vidr`: `Decoder` and `Encoder` impls for `Box<T>`, with `T` unsized, so a run takes `Box<dyn Decoder<R> + Send>`.
-- `vidr`: CPU codecs, each with one host copy per frame that `FrameRoute` declares. `Dav1dDecoder` behind `dav1d` decodes AV1 at 4:2:0, 8 or 10 bits, on libdav1d 1.3.0 or newer. `Openh264Decoder` and `Openh264Encoder` run on OpenH264 compiled from source behind `openh264`, or on Cisco's binary at a caller's path behind `openh264-cisco`. The decoder takes Baseline only and refuses 10 bits, interlaced streams, and other profiles by name. The encoder writes 8-bit Constrained Baseline and refuses P010 and B-frames by name. A source build gets no Cisco patent cover, and Cisco's cover applies only to its own binary. `h264_sps_facts`, `av1_sequence_facts`, `upload_route`, and `download_route` support them.
-- `vidr`: `Rav1rEncoder` behind `cpu-av1`, AV1 software encode on rav1r at 4:2:0, 8 or 10 bits, with odd sizes. `cpu-av1-asm` adds rav1r's assembly. `Preset` maps to speed 0 to 10, and `VbrQuality { cq }` to `quantizer = round(cq * 255 / 63)`. `b_frames` 0 means no reorder, and 3 means rav1r's reorder group of 4. Packets stay in display order with `dts` equal to `pts`, because a temporal unit hides reordered frames. Scene detection stays off, so keyframes fall on `gop_length` only. `ConstQp`, other `b_frames` counts, `Lossless`, and a bitrate peak are refused by name. One host copy per frame, declared through `FrameRoute`.
-- `vidr`: `RustyVp9Decoder` behind `cpu-vp9`, VP9 software decode on `rusty_vp9` 0.1.3, profiles 0 and 2, 4:2:0 at 8 or 10 bits, with odd sizes and mid-stream resize. Superframes split through vidr's parser, and a chunk gives its last shown frame, as libvpx does. Colour comes from vidr's header parser. `DecodeError::Vp9Layout` refuses profiles 1 and 3, 12 bits, and other chroma layouts by name. One host copy per frame, declared through `FrameRoute`. `DecodeError::Bitstream` now also exists with `vp9` alone.
-- `vidr`: conformance harness. `scripts/conformance/fetch_vp9.sh` and `fetch_hevc.sh` fetch libvpx's test vectors and the JCT-VC HEVC_v1 zips to a directory outside the repository. Their licence terms are unconfirmed, and nothing redistributes them. `VIDR_VP9_VECTORS` runs each vector against libvpx's per-frame MD5 through `RustyVp9Decoder`, and prints a table by vector. `VIDR_HEVC_CONFORMANCE` reads each zip's layout and hash. With `cpu-hevc` it also decodes each zip through `HevcDecoder`.
-- `vidr`: host plane copies in `frame`, for a CPU codec. `upload_planes` interleaves I420 to NV12, writes I010 as `value << 6`, and packs to words on a word-form backend. `download_planes` reverses it into a `HostFrame`, whose buffers a same-size frame reuses. `HostPlanes` takes pitched sources, odd sizes round chroma up, and `FrameError` gains `HostFrameSize`, `HostStride`, `HostPlaneShort`, and `HostSampleRange`.
-- `vidr`: crate-internal header parsers behind `hevc` and `vp9`, for the CPU HEVC decoder and the Vulkan path. They have no public API yet.
-  - HEVC VPS, full SPS, PPS, and slice segment header, with `profile_tier_level`, `scaling_list_data`, `st_ref_pic_set`, `pred_weight_table`, dependent slice segments, entry points, and the range extension flags. A value outside the range H.265 V11 states returns a named error.
-  - VP9 `uncompressed_header` in a parser that keeps the state the syntax needs: colour, loop filter deltas, segmentation features, and the last frame size. The caller holds the reference frame table.
-  - `tests/fixtures/gen_headers.py` writes the sidecars. It takes each value from ffmpeg's `trace_headers`, over libx265, libvpx, vpxenc, and hand-built streams. The tests compare every element the parsers keep.
-- `vidr`: `BitstreamError::InvalidSignedField` for a signed syntax element outside its range.
-- `vidr`: the CPU HEVC decoder behind the `cpu-hevc` feature, written from ITU-T H.265 V11 for Main and Main 10 at 4:2:0. `HevcDecoder` and the core below it decode pictures now.
-  - Picture and plane buffers over a `Sample` type for `u8` and `u16`, with a view as `HostPlanes` in I420 or I010.
-  - The CABAC engine and context tables, with a test encoder from 9.3.5.
-  - The coding quadtree, coding unit, prediction unit, transform tree, transform unit, and `residual_coding` parsers, with sign data hiding and transform skip. They write plain records per CTU, for the reconstruct stage.
-  - QP derivation, scaling, scaling lists, the inverse DST and DCT from 4x4 to 32x32, transform skip, and transform bypass.
-  - A stream with unequal luma and chroma bit depth, another chroma format, a depth above 10 bits, a range or multilayer extension tool, or a picture above level 6.2 gets a named refusal.
-- `vidr`: the CPU HEVC decoder core behind `cpu-hevc`, crate-internal. `HevcDecoder` is its public API.
-  - The slice data loop: SAO syntax, CTB address order, `end_of_subset_one_bit`, tiles, wavefronts, and dependent slice segments.
-  - Intra prediction: reference sample substitution, three-tap and strong smoothing, planar, DC, angular, and the boundary filters. PCM samples and constrained intra prediction.
-  - The deblocking filter and SAO, with picture, slice, and tile boundary rules, `pcm_loop_filter_disabled_flag`, and `cu_transquant_bypass_flag`.
-  - The decoded picture hash SEI message with MD5, CRC, and checksum. The check is off by default. `DecodeOptions::check_picture_hash` turns it on, and a mismatch returns `HevcError::PictureHashMismatch`.
-  - `crates/vidr/tests/fixtures/gen_hevc.py` generates x265 streams and ffmpeg raw video for the comparison tests. The tests print a skip notice without them.
-  - P and B slices. Picture order count, reference picture sets, generated pictures for absent "Foll" entries, reference lists, the collocated picture, and `NoBackwardPredFlag`. Reference pictures sit behind `Arc`, so a slice copies no samples. A list entry the buffer does not hold returns `HevcError::MissingReference`.
-  - The output order buffer: bumping, the latency limit, the buffer size limit, `pic_output_flag`, `no_output_of_prior_pics_flag`, and the conformance window on output. RASL pictures of an IRAP picture with `NoRaslOutputFlag` 1 are skipped. `StreamDecoder::next_output` returns pictures in output order, and `StreamDecoder::flush` outputs what still waits.
-  - Merge mode with the parallel merge level, motion vector prediction, and temporal prediction from motion stored at 16x16 per picture.
-  - Luma and chroma motion compensation through clamped reference coordinates, with default and explicit weighting.
-  - Deblocking `bS` for inter edges: coded transform blocks, reference pictures, and vector distance.
-  - Long-term references follow the spec text.
-- `vidr`: `decode::hevc::HevcDecoder` behind `cpu-hevc`, the public `Decoder` over the CPU HEVC core. `vidr-remaster` does not use it yet. It passes the whole-stream MD5 on every JCT-VC HEVC_v1 vector except `TSUNEQBD_A_MAIN10_Technicolor_2`, which holds unequal luma and chroma depths and is refused by name.
-  - Main and Main 10, 4:2:0 at 8 or 10 bits, as NV12 or P010 at the conformance window. The frame's copy is declared through `FrameRoute`.
-  - `new` takes an `hvcC` payload with length-prefixed samples, or an empty config with Annex-B data. `with_picture_hash_check` also compares each picture with its hash SEI message.
-  - Each frame carries the pts and VUI colour of the packet that started its picture. A skipped, unoutput, or dropped picture leaves no pending pts, and a lost frame is `DecodeError::MissingPictures` at flush.
-  - `DecodeError::HevcTool` names a tool outside the decoder. `UnsupportedLayout` names another chroma format, unequal depths, or a depth other than 8 or 10.
-- `vidr`: `HevcDecoder` decodes on a fixed worker pool. Output bytes, order, and pts are the same for every thread count.
-  - `new` and `with_picture_hash_check` pick the workers from `available_parallelism`, at most 32. `with_threads` names a count, and `with_options` takes `HevcOptions`, which also holds the hash check. A count of 1 runs on the calling thread with no worker and no channel.
-  - Header parsing, reference marking, and bumping stay on the calling thread. A picture's slice data parses on a worker before its references finish, and its reconstruction starts when they have. Deblocking and SAO run over CTB rows in parallel. Reconstruction inside a picture stays serial.
-  - Pictures in flight stop at the worker count plus the picture buffer size, and `send` blocks there. A worker's error comes back from a later `send` or from `flush`, in decode order, after the frames before it. A worker's panic is a named error.
-  - `cpu-hevc` depends on `rayon` for the pool, because it lends picture rows to fixed threads in safe code.
-- `vidr`: `hevc_mutations_stay_safe`, a harness behind `cpu-hevc` and `VIDR_HEVC_CONFORMANCE`. It runs ten kinds of seeded damage on each HEVC_v1 zip through `HevcDecoder`: bit flips at two rates, runs of zeros or 0xFF, truncation, dropped, repeated, and swapped NAL units, and corrupt parameter sets and slice headers. A panic, a stream over the deadline, or a frame pile fails the case, and the failure line states zip, seed, and kind. `VIDR_HEVC_ROBUST_SEEDS`, `VIDR_HEVC_ROBUST_DEADLINE_SECS`, `VIDR_HEVC_ROBUST_KEEP`, and `VIDR_HEVC_ROBUST_TRACE` control it.
-- `vidr`: the HEVC_v1 conformance test now decodes with `cpu-hevc`. It checks each picture's hash SEI message and the zip's MD5 of the whole stream, hashes as it goes, and keeps no frame. `VIDR_HEVC_ONLY` picks zips, and `VIDR_HEVC_REPORT` writes one line per vector.
+`vidr` features:
 
-- `vidr-remaster`: the run is generic over the numr runtime, in `run_frames`, and `execution_for` chooses the runtime, decoder, and encoder.
-  - `--runtime auto|cuda|wgpu|cpu`, `--decoder auto|nvdec|cpu`, `--encoder auto|nvenc|cpu`, and `--openh264-library PATH` are new, and `--codec` takes `av1`. `auto` prefers the hardware path, then the CPU.
-  - The features `wgpu`, `dav1d`, `cpu-vp9`, `cpu-hevc`, `openh264`, `openh264-cisco`, `cpu-av1`, and `cpu-av1-asm` enable the matching runtime or codec. A codec not compiled in is refused with its feature's name. HEVC CPU encode is refused, and the refusal names `--codec av1`.
-  - `report.json` gains `frame_path`: the runtime, each codec and route, the output check's decoder, host copies, and why each part was chosen. A run with a host copy states it on one line of stdout.
-  - A model on the CPU or WebGPU runtime runs at F32 in NCHW. `RemasterTransform::load_at` takes the execution.
-  - The provenance sidecar adds `decoder` and `encoder` for a run off NVDEC and NVENC. A hardware run writes the same bytes as before. A candidate recorded with another encoder stops the automatic reuse, and `--from-upscaled` and `--force-ai` still apply.
-  - `--notices` prints the licence and patent notices of each codec in the build, from `crates/vidr-remaster/notices/`. `--help` states that rav1r is a fork of rav1e, under BSD-2-Clause and the AOM Patent License 1.0.
-- `vidr`: a test and fixture for a VP9 superframe with two shown frames. `RustyVp9Decoder` returns the last, so the pump keeps one frame per packet. A decoder that returns two frames at one pts ends the run in `PipelineError::Timing`.
-- `vidr`: H.264 hardware decode on Vulkan Video behind `vulkan-video`, in `vulkan`.
-  - `VulkanDevice::open_shared` opens the device through wgpu-hal with the video extensions and a decode queue, and installs it as numr's WebGPU device 0. `vulkan_video_available` checks a machine and opens nothing.
-  - `VulkanDecoder` implements `Decoder<WgpuRuntime>` for 8-bit 4:2:0 Baseline, Main, and High frames, from `avcC` samples or Annex-B, with `FrameRoute::Device`. It tracks POC types 0, 1, and 2, sliding window and MMCO marking, and output order. An SPS change at IDR opens a new session when the old one does not fit.
-  - Frames hold `PlaneForm::Words` planes. Each plane reaches a numr buffer through `vkCmdCopyImageToBuffer` on wgpu's queue, with no host copy.
-  - Field and MBAFF coding, other profiles and depths, slice groups, data partitioning, and `frame_num` gaps return a named `DecodeError`. `H264Tool`, `H264Header`, `H264References`, `Vulkan`, `VulkanRefused`, `VulkanUnavailable`, `VulkanDecodeStatus`, `VulkanCopyTimeout`, `VulkanNoMemoryType`, and `VulkanDecodeRequest` are new.
-  - A new session takes its reset inside its first picture's coding scope, with session parameters bound, so no driver needs `videoMaintenance2`.
-  - Distinct DPB mode holds a barrier from the decode that writes a slot to the decode that reads it. A slot's discard holds the earlier write, in both modes.
-  - Each SPS activation checks `level_idc` and the capabilities, also for a sequence that keeps its session. A level change opens a new session. NV12 with a non-identity `componentMapping` is refused by name.
-  - The setup slot states the picture as marking leaves it: long-term for an IDR picture with `long_term_reference_flag` and for operation 6, and `frame_num` 0 with the rebased order count for operation 5.
-  - `no_output_of_prior_pics_flag` follows ITU-T H.264 C.4.4: the flag, or a new frame size or `max_dec_frame_buffering` at an IDR picture, removes each waiting frame with no output.
-  - Dropping a decoder waits for its last decode and for wgpu's queue, each for at most 60 s. After a timeout or a lost device, its Vulkan objects stay allocated for the life of the process.
-  - Slices stay in the packet until the decode, and go straight into a bitstream buffer that stays mapped. A write to non-coherent memory still ends with a flush.
-  - It depends on `ash` 0.38, `wgpu` 30, and `h264-reader` 0.9. `vulkan::gap` holds the VP9 decode `pNext` layouts `ash` lacks.
-- `vidr-remaster`: `--decoder vulkan` and the `vulkan-video` feature. `auto` on `--runtime wgpu` takes Vulkan Video for H.264, HEVC, VP9, and AV1. The encoder stays on the CPU.
-- `vidr-remaster`: under `--decoder auto`, the refusals `H264Tool`, `H264Interlaced`, `H264BitDepth`, and `VulkanNoMemoryType` fall through to a CPU decoder. `VulkanCopyTimeout` ends the run.
+- `nvdec`: decode H.264, HEVC, VP9, and AV1 on NVIDIA GPUs, at 8 or 10 bits.
+- `nvenc`: encode H.264, HEVC, and AV1 on NVIDIA GPUs that list them.
+- `vulkan-video`: decode H.264, HEVC, VP9, and AV1, and encode H.264 and HEVC, on Vulkan GPUs. It has run on NVIDIA only. Encode refuses B-frames.
+- `dav1d`: decode AV1 on the CPU.
+- `cpu-av1`: encode AV1 on the CPU.
+- `openh264`, `openh264-cisco`: decode and encode H.264 Baseline on the CPU.
+- `cpu-vp9`: decode VP9 on the CPU.
+- `cpu-hevc`: decode HEVC Main and Main 10 on the CPU.
+- `mp4`, `mkv`: read MP4, MOV, Matroska, and WebM, and write MP4 and MKV. Output copies audio, text subtitles, chapters, and metadata.
+- `frame`: convert NV12 and P010 to RGB and back on the GPU.
+- `pipeline`: run decode, transform, and encode on three threads.
 
-### Changed
+`vidr-remaster` command:
 
-- `vidr-remaster`: `report.json` holds `backend` as null until the run knows its runtime, and adds `runtime_request`, `decoder_request`, and `encoder_request`.
-- `vidr`: `Decoder::route` and `Encoder::route` are required methods with no default, so every implementor adds them.
-- `vidr`: `OutputPlanes` has a private field. Build one with `OutputPlanes::new` in place of a struct literal. `y` and `uv` stay public.
-- `vidr`: `DtsClock` moves from `encode::nvenc` to `encode`, behind `encode`, so another encoder can reuse it.
-- `vidr-remaster`: `RunOutcome::Complete::report` is now `Option<PathBuf>`. `None` means the report did not write.
-- `vidr`: the CPU HEVC decoder's hot kernels run on explicit vector types through `fearless_simd`, with no change to any output sample. The `cpu-hevc` feature depends on it. The decoder selects AVX2 on x86-64 or NEON on AArch64 at run time, and any other CPU takes a scalar form. The tree keeps `forbid(unsafe_code)`.
-  - Motion compensation reads the reference plane directly for a block inside the picture, and copies only for a block across an edge. Each stage runs on explicit 16-bit vectors, with 16-bit sums at 8 bits and dot products on pairs of lanes elsewhere.
-  - Prediction writes, residual addition, SAO edge and band offsets, the luma deblocking filters, and the inverse DCT run on explicit vectors. The DCT stops at the extent of the coded levels.
-  - Deblocking scans its edge rows once and skips repeated motion comparisons along an edge.
-
-### Fixed
-
-- `vidr`: Vulkan Video encode with one queue family for encode and general work. The encode's command buffer now holds a global barrier to `VIDEO_ENCODE`, because a host wait makes nothing visible.
-- `vidr`: after a failed wait, a Vulkan plane copy keeps its tensors allocated for the life of the process, because wgpu tracks no raw-recorded copy. The session parameters now own what they point to, so a stalled engine keeps those pointees too, for each codec.
-- `vidr`: `VulkanEncoder` reads `maxRateControlLayers`, and refuses a bitrate mode by name on a driver that lists no layer. A VBR pair that a clamp makes equal takes CBR where the driver lists it.
-- `vidr`: `VulkanEncoder` chooses its level from the size, the frame rate limit `fR`, and the peak bitrate against MaxBR. A stream past each level the Std enums state, a level past the driver's maximum, and a small HEVC CTB where ITU-T H.265 A.4.1 d) forbids it each take `EncodeError::VulkanRefused`.
-- `vidr`: each HEVC, AV1, and VP9 decode session opens at the floor H.264 already took. A VP9 frame inside that floor keeps its references, and a larger one keeps the named refusal. `gen_nvdec.py` writes small H.264 and HEVC streams for `tests/vulkan/small.rs`.
-- `vidr`: an HEVC SPS with an inter-predicted `st_ref_pic_set` read the wrong number of flags in the next set when a source entry landed on delta 0. `NumDeltaPocs` now follows (7-61) and (7-62).
-- `vidr`: `HevcDecoder` refuses more bad input by name. A valid stream holds none of these cases.
-  - A picture that does not start a coded video sequence and changes size or bit depth returns a named error (7.4.2.4.2). The decoder took it, and its references kept the old size.
-  - A slice segment that names another PPS than the first slice segment of its picture returns a named error (7.4.7.1). The decoder read its header under another SPS, and decoded it under the first.
-  - A slice segment at or before an address that a slice segment of its picture has passed returns a named error (7.4.2.4.5). The decoder decoded those CTBs again.
-  - A buffer above `MaxDpbSize` at the picture size, level 6.2 (A-2), returns a named error before any picture allocates. So does a reference picture set above it, before 8.3.3 generates a picture for each entry. The decoder allowed 16 full-size pictures from a few bytes.
-  - One `send` stops at the luma samples of 16 full-size pictures, so a packet of many small pictures cannot fill memory before `receive`.
-- `vidr-remaster`: a second signal removes the temporary directory before `process::exit`. `TempOutput` registers its directory, and `remove_temp_directories` removes every registered one. `ctrlc` calls the handler on its own thread, outside signal context, so the removal runs there.
-- `vidr-remaster`: the provenance sidecar is written beside the temporary output before the publish, and renames into place after it. A failure to hash or write it now leaves no output. Only the rename can fail after the publish, and that gives `RunOutcome::OutputWithoutSidecar`, report status `output_without_sidecar`, exit code 1, and an error that names both paths. The sidecar bytes are unchanged, since a record holds no output path.
-- `vidr-remaster`: a report that does not write after the publish keeps the run complete. The command prints a warning with the report path and the cause, and exits 0.
-- `vidr-remaster`: `report.json` is written atomically: a temporary file in the same directory, a sync, then a rename. It keeps the mode a plain write gives, and so does the sidecar, which was owner-only before.
-- `vidr`: NVDEC decode of VP9 reported matrix coefficients 0 (identity) and limited range for every stream, because NVDEC returns an all-zero video signal description for VP9. `ColorFacts::yuv_spec` returned `None`, so frame conversion refused a BT.709 VP9 stream. `NvdecDecoder` now reads `color_space` and `color_range` from the latest key frame header, maps `color_space` to H.273 `MatrixCoefficients`, and reports transfer and primaries as unspecified, because VP9 carries neither. A stream with no key frame header yet reports matrix 2, never 0.
-- `vidr`: `frame::to_rgb_reusing` writes an even frame into a buffer the caller keeps, and `frame::reuse_tensor` keeps such a buffer. `FrameError::OutOfMemory` separates an allocation failure from other numr errors.
-- `vidr-remaster`: the model catalog in `catalog`, in the default build, with no network code.
-  - `catalog_entry` states each model's directory name, download URL, licence, network, and Cargo feature.
-  - `models_root_from_env` reads `--models-dir` or `VIDR_MODELS_DIR`. `resolve_model_dir` returns the model's directory. A missing directory or checkpoint names the expected path and the URL.
-  - `require_model` refuses a model by name when its feature is off. `licence_notice` states that `purevision` uses CC BY-NC-SA 4.0, for a run's report and for these errors.
-- `vidr-remaster`: `RemasterTransform`, a `FrameTransform` over any numr backend with the `transform` feature, and the features `mp4`, `mkv`, `h264`, `hevc`, `model-srvgg`, `model-rrdb`, `f16`, and `cuda`.
-  - `load` and `from_model` run `to_rgb` at F16 NHWC, `SrModel::forward_native`, a cast to F32, an antialiased bicubic resize to the target, and `from_rgb`. An equal size skips the cast and the resize. `from_rgb` clamps RGB to 0..1, as the PoC does.
-  - `resize_only` runs the same steps without a model, for `--from-upscaled`.
-  - The output format follows each frame's bit depth, and `ColorPlan` supplies both colour specs. RGB and resize buffers persist across frames of one size. Output planes are new per frame, because the encoder holds them.
-  - An allocation failure names the frame size, the model, and the next action: `--model fast` or a smaller source.
-- `vidr-remaster`: `coded_output_size` turns a display output size into the encoder's size, with the sides swapped for a 90 or 270 degree source.
+- Models: `fast`, `realesrgan`, and `purevision`, on CUDA or the CPU. On WebGPU, only `fast` has run.
+- Output check: the output keeps the source's frame count and timing, or the run fails.
+- Records: each output gets a provenance sidecar, and each run writes `report.json`.

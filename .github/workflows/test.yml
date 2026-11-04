@@ -19,7 +19,7 @@
 #   audit    — cargo-deny: advisories, licences, sources, banned crates
 #
 # No job installs a CUDA toolkit, a GPU driver, or a hardware video stack.
-# Hardware features (`cuda`, `nvdec`, `nvenc`, `vulkan-video`, `vaapi`) stay out
+# Hardware features (`cuda`, `nvdec`, `nvenc`, `vulkan-video`) stay out
 # of every feature set, so every hardware path sits behind its gate and the rest
 # compiles without it. `nvdec` loads libnvcuvid and `nvenc` loads
 # libnvidia-encode at run time, but both enable numr's `cuda` feature, whose
