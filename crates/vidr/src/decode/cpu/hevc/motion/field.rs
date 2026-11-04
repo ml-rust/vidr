@@ -11,6 +11,8 @@ use super::types::{PbMotion, RefLists};
 
 /// The smallest prediction block side is 4 luma samples.
 const UNIT_LOG2: u32 = 2;
+/// The row length from which [`MotionField::fill`] copies its first row.
+const FILL_BY_COPY_UNITS: usize = 8;
 
 /// Motion and reference lists of one picture. A coding unit fills its area before
 /// any later block reads it, so a new picture clears nothing but the slice tables.
@@ -82,14 +84,28 @@ impl MotionField {
         let right = (((x + width) >> UNIT_LOG2) as usize).min(self.stride);
         let top = (y >> UNIT_LOG2) as usize;
         let rows = (height >> UNIT_LOG2) as usize;
-        for row in self
-            .units
-            .chunks_exact_mut(self.stride)
-            .skip(top)
-            .take(rows)
-        {
-            if let Some(cells) = row.get_mut(left..right) {
-                cells.fill(motion);
+        let bottom = (top + rows).min(self.units.len() / self.stride);
+        if left >= right || top >= bottom {
+            return;
+        }
+        let first = top * self.stride + left;
+        let count = right - left;
+        // Past a few units, one filled row and a copy per row cost less than a store per
+        // unit.
+        if count < FILL_BY_COPY_UNITS {
+            for row in top..bottom {
+                let start = row * self.stride + left;
+                if let Some(cells) = self.units.get_mut(start..start + count) {
+                    cells.fill(motion);
+                }
+            }
+        } else if let Some(cells) = self.units.get_mut(first..first + count) {
+            cells.fill(motion);
+            for row in top + 1..bottom {
+                let start = row * self.stride + left;
+                if start + count <= self.units.len() {
+                    self.units.copy_within(first..first + count, start);
+                }
             }
         }
     }
@@ -100,11 +116,16 @@ impl MotionField {
         self.units.get(index).copied().unwrap_or_default()
     }
 
+    /// The index of the reference lists of the slice covering a luma location. Two
+    /// locations with one index read one table.
+    pub(crate) fn table_at(&self, x: u32, y: u32) -> Option<u32> {
+        let rs = (y >> self.ctb_log2) as usize * self.width_in_ctbs + (x >> self.ctb_log2) as usize;
+        self.ctb_table.get(rs).copied()
+    }
+
     /// The reference lists of the slice covering a luma location.
     pub(crate) fn refs_at(&self, x: u32, y: u32) -> Option<&RefLists> {
-        let rs = (y >> self.ctb_log2) as usize * self.width_in_ctbs + (x >> self.ctb_log2) as usize;
-        let table = *self.ctb_table.get(rs)?;
-        self.tables.get(table as usize)
+        self.tables.get(self.table_at(x, y)? as usize)
     }
 
     /// `PicOrderCnt` of the two references of `motion` at a luma location. An unused

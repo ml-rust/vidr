@@ -1,8 +1,13 @@
 //! Deblocking kernels: the sample decisions and filters of 8.7.2.5.3 and 8.7.2.5.6
 //! to 8.7.2.5.8, over a plane's samples. A vertical edge and a horizontal edge
-//! differ only in the two index steps.
+//! differ only in the two index steps. A section loads into one vector per distance from
+//! the edge, with one lane per line, and the filters run with no branch per line.
+//! Samples of up to 10 bits keep every sum inside 16 bits.
+
+use fearless_simd::{Bytes, Simd, i16x8, i32x4, i64x2, mask16x8};
 
 use super::sample::Sample;
+use super::simd::clip_x8;
 
 /// `β′` (Table 8-12), for `Q` 0 to 51.
 const BETA_PRIME: [u8; 52] = [
@@ -63,27 +68,177 @@ pub(crate) struct EdgeFilter {
     pub(crate) max_value: i32,
 }
 
-/// `p0` to `p3`, or `q0` to `q3`, of one line.
-fn side<S: Sample>(samples: &[S], first: usize, step: isize) -> [i32; 4] {
-    let at = |distance: isize| samples[first.wrapping_add_signed(distance * step)].to_i32();
-    [at(0), at(1), at(2), at(3)]
+/// The samples of one section: index 0 to 3 is `p3` to `p0`, and index 4 to 7 is `q0` to
+/// `q3`. Lanes 0 to 3 of each vector hold the lines. The other lanes hold no meaning.
+type SectionLanes<V> = [i16x8<V>; 8];
+
+/// Two vectors of 32-bit lanes zipped: `( a0, b0, a1, b1 )`, `( a2, b2, a3, b3 )`.
+#[inline(always)]
+fn zip32<V: Simd>(simd: V, a: i16x8<V>, b: i16x8<V>) -> (i16x8<V>, i16x8<V>) {
+    let (low, high) = simd.interleave_i32x4(a.bitcast::<i32x4<V>>(), b.bitcast());
+    (low.bitcast(), high.bitcast())
 }
 
-/// `Abs( x2 - 2 * x1 + x0 )`, (8-352) to (8-355).
-const fn second_difference(side: &[i32; 4]) -> i32 {
-    (side[2] - 2 * side[1] + side[0]).abs()
+/// The upper 64 bits of `a` moved to its lower 64 bits.
+#[inline(always)]
+fn upper_half<V: Simd>(simd: V, a: i16x8<V>) -> i16x8<V> {
+    let lanes: i64x2<V> = a.bitcast();
+    simd.zip_high_i64x2(lanes, lanes).bitcast()
 }
 
-/// The decision process for a luma sample (8.7.2.5.6).
-const fn strong_line(p: &[i32; 4], q: &[i32; 4], dpq: i32, filter: &EdgeFilter) -> bool {
-    dpq < (filter.beta >> 2)
-        && (p[3] - p[0]).abs() + (q[0] - q[3]).abs() < (filter.beta >> 3)
-        && (p[0] - q[0]).abs() < ((5 * filter.tc + 1) >> 1)
+/// The lower 64 bits of `a` then the lower 64 bits of `b`, and the same of the upper 64
+/// bits.
+#[inline(always)]
+fn zip64<V: Simd>(simd: V, a: i16x8<V>, b: i16x8<V>) -> (i16x8<V>, i16x8<V>) {
+    let (low, high) = simd.interleave_i64x2(a.bitcast::<i64x2<V>>(), b.bitcast());
+    (low.bitcast(), high.bitcast())
+}
+
+/// One line of eight samples of a vertical edge.
+#[inline(always)]
+fn load_row<V: Simd, S: Sample>(simd: V, samples: &[S], start: usize) -> Option<i16x8<V>> {
+    let lanes = samples.get(start..)?.first_chunk::<8>()?;
+    Some(S::load_x8(simd, lanes))
+}
+
+/// The four lines at one distance from an edge that is not vertical.
+#[inline(always)]
+fn load_lines<V: Simd, S: Sample>(
+    simd: V,
+    samples: &[S],
+    start: usize,
+    along: usize,
+) -> Option<i16x8<V>> {
+    let mut lines = [S::default(); 8];
+    if along == 1 {
+        let run = samples.get(start..)?.first_chunk::<SECTION_LINES>()?;
+        for (line, &sample) in lines.iter_mut().zip(run) {
+            *line = sample;
+        }
+    } else {
+        for (index, line) in lines.iter_mut().enumerate().take(SECTION_LINES) {
+            *line = *samples.get(start + index * along)?;
+        }
+    }
+    Some(S::load_x8(simd, &lines))
+}
+
+/// Reads a section that [`EdgeSection::fits`] accepted. A vertical edge reads four rows
+/// of eight samples and transposes them. Any other edge reads eight runs of four lines.
+#[inline(always)]
+fn load_section<V: Simd, S: Sample>(
+    simd: V,
+    samples: &[S],
+    section: EdgeSection,
+) -> Option<SectionLanes<V>> {
+    let (first, across, along) = (
+        section.q0.checked_sub(4 * section.across)?,
+        section.across,
+        section.along,
+    );
+    if across == 1 {
+        let r0 = load_row(simd, samples, first)?;
+        let r1 = load_row(simd, samples, first + along)?;
+        let r2 = load_row(simd, samples, first + 2 * along)?;
+        let r3 = load_row(simd, samples, first + 3 * along)?;
+        let (a0, a1) = simd.interleave_i16x8(r0, r1);
+        let (b0, b1) = simd.interleave_i16x8(r2, r3);
+        let (p3, p1) = zip32(simd, a0, b0);
+        let (q0, q2) = zip32(simd, a1, b1);
+        return Some([
+            p3,
+            upper_half(simd, p3),
+            p1,
+            upper_half(simd, p1),
+            q0,
+            upper_half(simd, q0),
+            q2,
+            upper_half(simd, q2),
+        ]);
+    }
+    Some([
+        load_lines(simd, samples, first, along)?,
+        load_lines(simd, samples, first + across, along)?,
+        load_lines(simd, samples, first + 2 * across, along)?,
+        load_lines(simd, samples, first + 3 * across, along)?,
+        load_lines(simd, samples, first + 4 * across, along)?,
+        load_lines(simd, samples, first + 5 * across, along)?,
+        load_lines(simd, samples, first + 6 * across, along)?,
+        load_lines(simd, samples, first + 7 * across, along)?,
+    ])
+}
+
+/// Writes a section that [`EdgeSection::fits`] accepted. A vertical edge writes all eight
+/// samples of each line, and any other edge skips `p3` and `q3`. Unchanged lanes hold
+/// their old samples.
+#[inline(always)]
+fn store_section<V: Simd, S: Sample>(
+    simd: V,
+    samples: &mut [S],
+    section: EdgeSection,
+    lanes: &SectionLanes<V>,
+) {
+    let first = section.q0 - 4 * section.across;
+    if section.across == 1 {
+        let [p3, p2, p1, p0, q0, q1, q2, q3] = *lanes;
+        let (e0, _) = simd.interleave_i16x8(p3, p2);
+        let (e1, _) = simd.interleave_i16x8(p1, p0);
+        let (e2, _) = simd.interleave_i16x8(q0, q1);
+        let (e3, _) = simd.interleave_i16x8(q2, q3);
+        let (f0, f1) = zip32(simd, e0, e1);
+        let (g0, g1) = zip32(simd, e2, e3);
+        let (r0, r1) = zip64(simd, f0, g0);
+        let (r2, r3) = zip64(simd, f1, g1);
+        for (line, row) in [r0, r1, r2, r3].into_iter().enumerate() {
+            if let Some(target) = samples
+                .get_mut(first + line * section.along..)
+                .and_then(<[S]>::first_chunk_mut::<8>)
+            {
+                *target = S::pack_x8(simd, row);
+            }
+        }
+        return;
+    }
+    for (distance, &lane) in lanes.iter().enumerate().take(7).skip(1) {
+        let start = first + distance * section.across;
+        let packed = S::pack_x8(simd, lane);
+        if section.along == 1 {
+            if let Some(target) = samples
+                .get_mut(start..)
+                .and_then(<[S]>::first_chunk_mut::<SECTION_LINES>)
+            {
+                for (sample, &value) in target.iter_mut().zip(&packed) {
+                    *sample = value;
+                }
+            }
+        } else {
+            for (index, &value) in packed.iter().enumerate().take(SECTION_LINES) {
+                if let Some(target) = samples.get_mut(start + index * section.along) {
+                    *target = value;
+                }
+            }
+        }
+    }
+}
+
+/// `Abs( x2 - 2 * x1 + x0 )`, (8-352) to (8-355), in each lane.
+#[inline(always)]
+fn second_difference<V: Simd>(simd: V, x0: i16x8<V>, x1: i16x8<V>, x2: i16x8<V>) -> i16x8<V> {
+    let doubled = simd.add_i16x8(x1, x1);
+    simd.abs_i16x8(simd.add_i16x8(simd.sub_i16x8(x2, doubled), x0))
+}
+
+/// `Abs( a - b )` in each lane.
+#[inline(always)]
+fn distance<V: Simd>(simd: V, a: i16x8<V>, b: i16x8<V>) -> i16x8<V> {
+    simd.abs_i16x8(simd.sub_i16x8(a, b))
 }
 
 /// The decision and filtering of one luma section (8.7.2.5.3, 8.7.2.5.4). A section
 /// outside `samples` is left alone.
-pub(crate) fn filter_luma_section<S: Sample>(
+#[inline(always)]
+pub(crate) fn luma_section<V: Simd, S: Sample>(
+    simd: V,
     samples: &mut [S],
     section: EdgeSection,
     filter: &EdgeFilter,
@@ -91,123 +246,186 @@ pub(crate) fn filter_luma_section<S: Sample>(
     if !section.fits(samples.len(), 4) {
         return;
     }
-    let across = section.across as isize;
-    let last = section.q0 + (SECTION_LINES - 1) * section.along;
-    let (p_first, q_first) = (
-        side(samples, section.q0 - section.across, -across),
-        side(samples, section.q0, across),
-    );
-    let (p_last, q_last) = (
-        side(samples, last - section.across, -across),
-        side(samples, last, across),
-    );
-    let (dp0, dp3) = (second_difference(&p_first), second_difference(&p_last));
-    let (dq0, dq3) = (second_difference(&q_first), second_difference(&q_last));
+    let Some(lanes) = load_section(simd, samples, section) else {
+        return;
+    };
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = lanes;
+    let dp: [i16; 8] = second_difference(simd, p0, p1, p2).into();
+    let dq: [i16; 8] = second_difference(simd, q0, q1, q2).into();
+    let (dp0, dp3) = (i32::from(dp[0]), i32::from(dp[3]));
+    let (dq0, dq3) = (i32::from(dq[0]), i32::from(dq[3]));
     let (dpq0, dpq3) = (dp0 + dq0, dp3 + dq3);
     if dpq0 + dpq3 >= filter.beta {
         return;
     }
-    let strong = strong_line(&p_first, &q_first, 2 * dpq0, filter)
-        && strong_line(&p_last, &q_last, 2 * dpq3, filter);
-    let side_limit = (filter.beta + (filter.beta >> 1)) >> 3;
-    let extend_p = dp0 + dp3 < side_limit;
-    let extend_q = dq0 + dq3 < side_limit;
-    for line in 0..SECTION_LINES {
-        let q0 = section.q0 + line * section.along;
-        let p = side(samples, q0 - section.across, -across);
-        let q = side(samples, q0, across);
-        let (new_p, new_q) = if strong {
-            strong_filter(&p, &q, filter.tc)
-        } else if let Some(values) = weak_filter(&p, &q, filter, extend_p, extend_q) {
-            values
-        } else {
-            continue;
-        };
-        if filter.modify_p {
-            write_side(
-                samples,
-                q0 - section.across,
-                -across,
-                &new_p,
-                filter.max_value,
-            );
-        }
-        if filter.modify_q {
-            write_side(samples, q0, across, &new_q, filter.max_value);
-        }
+    // The decision process for a luma sample (8.7.2.5.6), on lines 0 and 3.
+    let outer: [i16; 8] = simd
+        .add_i16x8(distance(simd, p3, p0), distance(simd, q0, q3))
+        .into();
+    let across: [i16; 8] = distance(simd, p0, q0).into();
+    let line_is_strong = |line: usize, dpq: i32| {
+        dpq < (filter.beta >> 2)
+            && i32::from(outer[line]) < (filter.beta >> 3)
+            && i32::from(across[line]) < ((5 * filter.tc + 1) >> 1)
+    };
+    let strong = line_is_strong(0, 2 * dpq0) && line_is_strong(3, 2 * dpq3);
+    let mut new_lanes = if strong {
+        strong_filter(simd, &lanes, filter)
+    } else {
+        let side_limit = (filter.beta + (filter.beta >> 1)) >> 3;
+        let extend = (dp0 + dp3 < side_limit, dq0 + dq3 < side_limit);
+        weak_filter(simd, &lanes, filter, extend)
+    };
+    let max = simd.splat_i16x8(filter.max_value as i16);
+    for lane in &mut new_lanes {
+        *lane = clip_x8(simd, *lane, max);
     }
-}
-
-/// Writes the entries that hold a value. `first` and `step` follow [`side`].
-fn write_side<S: Sample>(
-    samples: &mut [S],
-    first: usize,
-    step: isize,
-    values: &[Option<i32>; 3],
-    max_value: i32,
-) {
-    for (distance, value) in values.iter().enumerate() {
-        if let Some(value) = *value {
-            let index = first.wrapping_add_signed(distance as isize * step);
-            samples[index] = S::clipped(value, max_value);
-        }
+    if !filter.modify_p {
+        new_lanes[..4].copy_from_slice(&lanes[..4]);
     }
+    if !filter.modify_q {
+        new_lanes[4..].copy_from_slice(&lanes[4..]);
+    }
+    store_section(simd, samples, section, &new_lanes);
 }
 
-/// (8-389) to (8-394).
-fn strong_filter(p: &[i32; 4], q: &[i32; 4], tc: i32) -> ([Option<i32>; 3], [Option<i32>; 3]) {
-    let limit = 2 * tc;
-    let clip = |value: i32, centre: i32| Some(value.clamp(centre - limit, centre + limit));
-    (
-        [
-            clip(
-                (p[2] + 2 * p[1] + 2 * p[0] + 2 * q[0] + q[1] + 4) >> 3,
-                p[0],
-            ),
-            clip((p[2] + p[1] + p[0] + q[0] + 2) >> 2, p[1]),
-            clip((2 * p[3] + 3 * p[2] + p[1] + p[0] + q[0] + 4) >> 3, p[2]),
-        ],
-        [
-            clip(
-                (p[1] + 2 * p[0] + 2 * q[0] + 2 * q[1] + q[2] + 4) >> 3,
-                q[0],
-            ),
-            clip((p[0] + q[0] + q[1] + q[2] + 2) >> 2, q[1]),
-            clip((p[0] + q[0] + q[1] + 3 * q[2] + 2 * q[3] + 4) >> 3, q[2]),
-        ],
-    )
+/// One sum of (8-389) to (8-394), clipped to `2 * tC` around `centre`.
+#[inline(always)]
+fn strong_value<V: Simd>(
+    simd: V,
+    sum: i16x8<V>,
+    shift: u32,
+    centre: i16x8<V>,
+    limit: i16x8<V>,
+) -> i16x8<V> {
+    let value = simd.shr_i16x8(sum, shift);
+    let low = simd.sub_i16x8(centre, limit);
+    let high = simd.add_i16x8(centre, limit);
+    simd.min_i16x8(simd.max_i16x8(value, low), high)
 }
 
-/// Filtered `p` and `q` samples. `None` leaves that sample as it is.
-type LumaFilterResult = ([Option<i32>; 3], [Option<i32>; 3]);
+/// The sum of `terms` in each lane.
+#[inline(always)]
+fn sum_of<V: Simd, const N: usize>(simd: V, terms: [i16x8<V>; N]) -> i16x8<V> {
+    let mut sum = simd.splat_i16x8(0);
+    for term in terms {
+        sum = simd.add_i16x8(sum, term);
+    }
+    sum
+}
 
-/// (8-395) to (8-402), or `None` when `Abs( Δ )` reaches `tC * 10`.
-fn weak_filter(
-    p: &[i32; 4],
-    q: &[i32; 4],
+/// (8-389) to (8-394) on all lines of a section. `p3` and `q3` stay.
+#[inline(always)]
+fn strong_filter<V: Simd>(
+    simd: V,
+    lanes: &SectionLanes<V>,
     filter: &EdgeFilter,
-    extend_p: bool,
-    extend_q: bool,
-) -> Option<LumaFilterResult> {
-    let tc = filter.tc;
-    let delta = (9 * (q[0] - p[0]) - 3 * (q[1] - p[1]) + 8) >> 4;
-    if delta.abs() >= tc * 10 {
-        return None;
-    }
-    let delta = delta.clamp(-tc, tc);
+) -> SectionLanes<V> {
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = *lanes;
+    let limit = simd.splat_i16x8((2 * filter.tc) as i16);
+    let (two, four) = (simd.splat_i16x8(2), simd.splat_i16x8(4));
+    // `p0 + q0`, a term of every sum.
+    let c = simd.add_i16x8(p0, q0);
+    let new_p0 = strong_value(
+        simd,
+        sum_of(simd, [p2, p1, p1, c, c, q1, four]),
+        3,
+        p0,
+        limit,
+    );
+    let new_p1 = strong_value(simd, sum_of(simd, [p2, p1, c, two]), 2, p1, limit);
+    let new_p2 = strong_value(
+        simd,
+        sum_of(simd, [p3, p3, p2, p2, p2, p1, c, four]),
+        3,
+        p2,
+        limit,
+    );
+    let new_q0 = strong_value(
+        simd,
+        sum_of(simd, [p1, c, c, q1, q1, q2, four]),
+        3,
+        q0,
+        limit,
+    );
+    let new_q1 = strong_value(simd, sum_of(simd, [c, q1, q2, two]), 2, q1, limit);
+    let new_q2 = strong_value(
+        simd,
+        sum_of(simd, [c, q1, q2, q2, q2, q3, q3, four]),
+        3,
+        q2,
+        limit,
+    );
+    [p3, new_p2, new_p1, new_p0, new_q0, new_q1, new_q2, q3]
+}
+
+/// The change of `p1` or `q1`, (8-398) and (8-399), added to `middle` where `apply` holds.
+/// `signed_delta` is `Δ` for `p1` and `-Δ` for `q1`.
+#[inline(always)]
+fn weak_side<V: Simd>(
+    simd: V,
+    far: i16x8<V>,
+    near: i16x8<V>,
+    middle: i16x8<V>,
+    signed_delta: i16x8<V>,
+    apply: mask16x8<V>,
+    half: i16,
+) -> i16x8<V> {
+    let mean = simd.shr_i16x8(sum_of(simd, [far, near, simd.splat_i16x8(1)]), 1);
+    let step = simd.shr_i16x8(
+        simd.add_i16x8(simd.sub_i16x8(mean, middle), signed_delta),
+        1,
+    );
+    let step = simd.min_i16x8(
+        simd.max_i16x8(step, simd.splat_i16x8(-half)),
+        simd.splat_i16x8(half),
+    );
+    simd.add_i16x8(middle, simd.select_i16x8(apply, step, simd.splat_i16x8(0)))
+}
+
+/// (8-395) to (8-402) on all lines of a section. A line with `Abs( Δ )` at `tC * 10` or
+/// more takes a zero change. `extend` holds `dEp` and `dEq`. A plane sample holds at most
+/// `max_value`, so writing an unchanged line changes nothing.
+#[inline(always)]
+fn weak_filter<V: Simd>(
+    simd: V,
+    lanes: &SectionLanes<V>,
+    filter: &EdgeFilter,
+    extend: (bool, bool),
+) -> SectionLanes<V> {
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = *lanes;
+    let tc = filter.tc as i16;
     let half = tc >> 1;
-    let p1 = extend_p.then(|| {
-        let change = (((p[2] + p[0] + 1) >> 1) - p[1] + delta) >> 1;
-        p[1] + change.clamp(-half, half)
-    });
-    let q1 = extend_q.then(|| {
-        let change = (((q[2] + q[0] + 1) >> 1) - q[1] - delta) >> 1;
-        q[1] + change.clamp(-half, half)
-    });
-    Some((
-        [Some(p[0] + delta), p1, None],
-        [Some(q[0] - delta), q1, None],
-    ))
+    let zero = simd.splat_i16x8(0);
+    let delta = simd.shr_i16x8(
+        simd.add_i16x8(
+            simd.sub_i16x8(
+                simd.mul_i16x8(simd.sub_i16x8(q0, p0), simd.splat_i16x8(9)),
+                simd.mul_i16x8(simd.sub_i16x8(q1, p1), simd.splat_i16x8(3)),
+            ),
+            simd.splat_i16x8(8),
+        ),
+        4,
+    );
+    let apply = simd.simd_lt_i16x8(simd.abs_i16x8(delta), simd.splat_i16x8(tc * 10));
+    let clipped = simd.min_i16x8(
+        simd.max_i16x8(delta, simd.splat_i16x8(-tc)),
+        simd.splat_i16x8(tc),
+    );
+    let change = simd.select_i16x8(apply, clipped, zero);
+    let new_p0 = simd.add_i16x8(p0, change);
+    let new_q0 = simd.sub_i16x8(q0, change);
+    let new_p1 = if extend.0 {
+        weak_side(simd, p2, p0, p1, clipped, apply, half)
+    } else {
+        p1
+    };
+    let new_q1 = if extend.1 {
+        weak_side(simd, q2, q0, q1, simd.sub_i16x8(zero, clipped), apply, half)
+    } else {
+        q1
+    };
+    [p3, p2, new_p1, new_p0, new_q0, new_q1, q2, q3]
 }
 
 /// The filtering of one chroma section (8.7.2.5.5, 8.7.2.5.8). A section outside
@@ -240,178 +458,9 @@ pub(crate) fn filter_chroma_section<S: Sample>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "deblock_simd_tests.rs"]
+mod simd_tests;
 
-    const STRIDE: usize = 8;
-
-    const fn filter(beta: i32, tc: i32) -> EdgeFilter {
-        EdgeFilter {
-            beta,
-            tc,
-            modify_p: true,
-            modify_q: true,
-            max_value: 255,
-        }
-    }
-
-    /// Four lines of eight samples with the same values, and the edge in the middle.
-    fn lines(line: [u8; 8]) -> Vec<u8> {
-        line.repeat(4)
-    }
-
-    const VERTICAL: EdgeSection = EdgeSection {
-        q0: 4,
-        across: 1,
-        along: STRIDE,
-    };
-
-    #[test]
-    fn the_tables_read_table_8_12() {
-        assert_eq!(beta(15, 0, 8), 0);
-        assert_eq!(beta(16, 0, 8), 6);
-        assert_eq!(beta(28, 0, 8), 18);
-        assert_eq!(beta(29, 0, 8), 20);
-        assert_eq!(beta(51, 0, 8), 64);
-        // Slice offset 3: Q = 25 + 6.
-        assert_eq!(beta(25, 3, 8), 24);
-        // Q clips to 51, and 10 bits scale by 4.
-        assert_eq!(beta(60, 6, 10), 256);
-        assert_eq!(tc(17, 0, 8), 0);
-        assert_eq!(tc(18, 0, 8), 1);
-        assert_eq!(tc(27, 0, 8), 2);
-        assert_eq!(tc(53, 0, 8), 24);
-        assert_eq!(tc(70, 0, 10), 96);
-        assert_eq!(tc(-5, -6, 8), 0);
-    }
-
-    /// Flat sides and a step of 4, with beta 16 and tC 2: d is 0. dSam needs
-    /// Abs( p0 - q0 ) below ( 5 * 2 + 1 ) >> 1 = 5, so the strong filter runs.
-    #[test]
-    fn a_small_step_takes_the_strong_filter() {
-        let mut samples = lines([100, 100, 100, 100, 104, 104, 104, 104]);
-        filter_luma_section(&mut samples, VERTICAL, &filter(16, 2));
-        // p0: ( 100 + 200 + 200 + 208 + 104 + 4 ) >> 3 = 102. p1: 406 >> 2 = 101.
-        // p2: ( 200 + 300 + 100 + 100 + 104 + 4 ) >> 3 = 101.
-        // q0: ( 100 + 200 + 208 + 208 + 104 + 4 ) >> 3 = 103. q1: 414 >> 2 = 103.
-        // q2: ( 100 + 104 + 104 + 312 + 208 + 4 ) >> 3 = 104.
-        let expected = [100, 101, 101, 102, 103, 103, 104, 104];
-        for row in samples.chunks(STRIDE) {
-            assert_eq!(row, expected);
-        }
-    }
-
-    /// d = 0 again, but a step of 20 fails the third dSam test. The weak filter gets
-    /// Δ = ( 9 * 20 - 3 * 20 + 8 ) >> 4 = 8, clipped to tC 4. dp is 0, below the side
-    /// limit.
-    #[test]
-    fn a_large_step_takes_the_weak_filter() {
-        let mut samples = lines([100, 100, 100, 100, 120, 120, 120, 120]);
-        filter_luma_section(&mut samples, VERTICAL, &filter(16, 4));
-        // p1: ( 100 - 100 + 4 ) >> 1 = 2, within tC >> 1. q1: ( 120 - 120 - 4 ) >> 1 = -2.
-        let expected = [100, 100, 102, 104, 116, 118, 120, 120];
-        for row in samples.chunks(STRIDE) {
-            assert_eq!(row, expected);
-        }
-    }
-
-    /// Abs( Δ ) at tC * 10 turns the line off: Δ = ( 9 * 60 - 3 * 60 + 8 ) >> 4 = 23,
-    /// and tC 2 gives a limit of 20.
-    #[test]
-    fn a_very_large_step_stays() {
-        let line = [50, 50, 50, 50, 110, 110, 110, 110];
-        let mut samples = lines(line);
-        filter_luma_section(&mut samples, VERTICAL, &filter(16, 2));
-        assert_eq!(samples, lines(line));
-    }
-
-    /// dp is 8 on both lines, so d = 16 reaches beta 16 and dE stays 0.
-    #[test]
-    fn a_busy_edge_stays() {
-        let line = [100, 100, 104, 100, 100, 100, 100, 100];
-        let mut samples = lines(line);
-        filter_luma_section(&mut samples, VERTICAL, &filter(16, 2));
-        assert_eq!(samples, lines(line));
-    }
-
-    /// nDp 0 keeps the p side, and q still changes (8.7.2.5.7).
-    #[test]
-    fn a_protected_side_keeps_its_samples() {
-        let mut samples = lines([100, 100, 100, 100, 104, 104, 104, 104]);
-        let protected = EdgeFilter {
-            modify_p: false,
-            ..filter(16, 2)
-        };
-        filter_luma_section(&mut samples, VERTICAL, &protected);
-        for row in samples.chunks(STRIDE) {
-            assert_eq!(row, [100, 100, 100, 100, 103, 103, 104, 104]);
-        }
-    }
-
-    /// The same filter on rows: a horizontal edge swaps the steps.
-    #[test]
-    fn a_horizontal_edge_filters_columns() {
-        let mut samples = vec![0u16; 8 * 4];
-        for row in 0..8 {
-            let value = if row < 4 { 100 } else { 104 };
-            samples[row * 4..row * 4 + 4].fill(value);
-        }
-        let section = EdgeSection {
-            q0: 16,
-            across: 4,
-            along: 1,
-        };
-        filter_luma_section(&mut samples, section, &filter(16, 2));
-        for x in 0..4 {
-            let column: Vec<u16> = (0..8).map(|y| samples[y * 4 + x]).collect();
-            assert_eq!(column, [100, 101, 101, 102, 103, 103, 104, 104]);
-        }
-    }
-
-    /// (8-403): Δ = ( ( 8 << 2 ) + 100 - 108 + 4 ) >> 3 = 3, clipped to tC 2.
-    #[test]
-    fn chroma_moves_one_sample_on_each_side() {
-        let mut samples = lines([0, 0, 100, 100, 108, 108, 0, 0]);
-        let section = EdgeSection {
-            q0: 4,
-            across: 1,
-            along: STRIDE,
-        };
-        filter_chroma_section(&mut samples, section, &filter(0, 2));
-        for row in samples.chunks(STRIDE) {
-            assert_eq!(row, [0, 0, 100, 102, 106, 108, 0, 0]);
-        }
-    }
-
-    #[test]
-    fn a_small_chroma_step_rounds_to_no_change() {
-        let mut samples = lines([0, 0, 254, 254, 255, 255, 0, 0]);
-        let section = EdgeSection {
-            q0: 4,
-            across: 1,
-            along: STRIDE,
-        };
-        filter_chroma_section(&mut samples, section, &filter(0, 8));
-        // Δ = ( 4 + 254 - 255 + 4 ) >> 3 = 0, so nothing moves.
-        assert_eq!(samples, lines([0, 0, 254, 254, 255, 255, 0, 0]));
-    }
-
-    #[test]
-    fn a_section_outside_the_samples_is_left_alone() {
-        let mut samples = vec![7u8; 16];
-        let at_start = EdgeSection {
-            q0: 2,
-            across: 1,
-            along: 4,
-        };
-        filter_luma_section(&mut samples, at_start, &filter(64, 24));
-        let past_end = EdgeSection {
-            q0: 12,
-            across: 1,
-            along: 4,
-        };
-        filter_luma_section(&mut samples, past_end, &filter(64, 24));
-        filter_chroma_section(&mut samples, past_end, &filter(64, 24));
-        assert_eq!(samples, vec![7u8; 16]);
-    }
-}
+#[cfg(test)]
+#[path = "deblock_tests.rs"]
+mod tests;

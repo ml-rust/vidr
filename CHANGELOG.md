@@ -125,6 +125,10 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 - `vidr`: `OutputPlanes` has a private field. Build one with `OutputPlanes::new` in place of a struct literal. `y` and `uv` stay public.
 - `vidr`: `DtsClock` moves from `encode::nvenc` to `encode`, behind `encode`, so another encoder can reuse it.
 - `vidr-remaster`: `RunOutcome::Complete::report` is now `Option<PathBuf>`. `None` means the report did not write.
+- `vidr`: the CPU HEVC decoder's hot kernels run on explicit vector types through `fearless_simd`, with no change to any output sample. The `cpu-hevc` feature depends on it. The decoder selects AVX2 on x86-64 or NEON on AArch64 at run time, and any other CPU takes a scalar form. The tree keeps `forbid(unsafe_code)`.
+  - Motion compensation reads the reference plane directly for a block inside the picture, and copies only for a block across an edge. Each stage runs on explicit 16-bit vectors, with 16-bit sums at 8 bits and dot products on pairs of lanes elsewhere.
+  - Prediction writes, residual addition, SAO edge and band offsets, the luma deblocking filters, and the inverse DCT run on explicit vectors. The DCT stops at the extent of the coded levels.
+  - Deblocking scans its edge rows once and skips repeated motion comparisons along an edge.
 
 ### Fixed
 

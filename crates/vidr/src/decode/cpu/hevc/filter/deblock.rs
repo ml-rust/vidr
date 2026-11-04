@@ -2,10 +2,13 @@
 //! direction touch no common samples, so their order does not matter. Vertical edges
 //! run first, because horizontal edges read their result (8.7.2.1).
 
+use fearless_simd::Simd;
+
 use crate::decode::cpu::dsp::deblock::{
-    EdgeFilter, EdgeSection, beta, filter_chroma_section, filter_luma_section, tc,
+    EdgeFilter, EdgeSection, beta, filter_chroma_section, luma_section, tc,
 };
 use crate::decode::cpu::dsp::sample::Sample;
+use crate::decode::cpu::dsp::simd::{Cpu, with_simd};
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
 use crate::decode::cpu::hevc::picture::{Picture, Plane};
@@ -58,16 +61,17 @@ impl DeblockContext<'_> {
         (filter.beta_offset_div2, filter.tc_offset_div2)
     }
 
-    /// (8-348) to (8-351), with the side flags of 8.7.2.5.7.
-    fn luma_filter(&self, sides: Sides, strength: u8) -> EdgeFilter {
+    /// (8-348) to (8-351), with the side flags of 8.7.2.5.7. `protected` is false when no
+    /// block of the picture holds the side flag.
+    fn luma_filter(&self, sides: Sides, strength: u8, protected: bool) -> EdgeFilter {
         let bit_depth = self.params.bit_depth;
         let qp_l = self.average_qp(sides);
         let (beta_offset, tc_offset) = self.slice_offsets(sides);
         EdgeFilter {
             beta: beta(qp_l, beta_offset, bit_depth),
             tc: tc(qp_l + 2 * (i32::from(strength) - 1), tc_offset, bit_depth),
-            modify_p: !self.maps.no_filter(sides.p.0, sides.p.1),
-            modify_q: !self.maps.no_filter(sides.q.0, sides.q.1),
+            modify_p: !protected || !self.maps.no_filter(sides.p.0, sides.p.1),
+            modify_q: !protected || !self.maps.no_filter(sides.q.0, sides.q.1),
             max_value: (1 << bit_depth) - 1,
         }
     }
@@ -92,25 +96,45 @@ pub(crate) fn deblock_picture<S: Sample>(picture: &mut Picture<S>, context: &Deb
     if !context.edges.has_edges() {
         return;
     }
-    vertical_edges(picture, context);
-    horizontal_edges(picture, context);
+    deblock_on(Cpu::detected(), picture, context);
 }
 
-fn vertical_edges<S: Sample>(picture: &mut Picture<S>, context: &DeblockContext<'_>) {
+/// [`deblock_picture`] compiled for `cpu`.
+fn deblock_on<S: Sample>(cpu: Cpu, picture: &mut Picture<S>, context: &DeblockContext<'_>) {
+    let protected = context.maps.any_no_filter();
+    with_simd!(cpu, simd => {
+        vertical_edges(simd, picture, context, protected);
+        horizontal_edges(simd, picture, context, protected);
+    });
+}
+
+#[inline(always)]
+fn vertical_edges<V: Simd, S: Sample>(
+    simd: V,
+    picture: &mut Picture<S>,
+    context: &DeblockContext<'_>,
+    protected: bool,
+) {
     let (width, height) = (context.params.width, context.params.height);
-    for y in (0..height).step_by(SECTION as usize) {
-        for x in (GRID..width).step_by(GRID as usize) {
-            let strength = context.edges.vertical_at(x, y);
-            if strength > 0 {
-                let sides = Sides {
-                    q: (x, y),
-                    p: (x - 1, y),
-                };
-                let filter = context.luma_filter(sides, strength);
-                let plane = picture.luma_mut();
-                let section = vertical_section(plane, x as usize, y as usize);
-                filter_luma_section(plane.samples_mut(), section, &filter);
-            }
+    for (y, row) in (0..height)
+        .step_by(SECTION as usize)
+        .zip(context.edges.vertical_rows())
+    {
+        // Column 0 is the picture edge, and no edge lies there.
+        for (x, &strength) in (0..width)
+            .step_by(GRID as usize)
+            .zip(row)
+            .skip(1)
+            .filter(|(_, strength)| **strength > 0)
+        {
+            let sides = Sides {
+                q: (x, y),
+                p: (x - 1, y),
+            };
+            let filter = context.luma_filter(sides, strength, protected);
+            let plane = picture.luma_mut();
+            let section = vertical_section(plane, x as usize, y as usize);
+            luma_section(simd, plane.samples_mut(), section, &filter);
         }
     }
     for y in (0..height).step_by(CHROMA_SECTION as usize) {
@@ -128,21 +152,33 @@ fn vertical_edges<S: Sample>(picture: &mut Picture<S>, context: &DeblockContext<
     }
 }
 
-fn horizontal_edges<S: Sample>(picture: &mut Picture<S>, context: &DeblockContext<'_>) {
+#[inline(always)]
+fn horizontal_edges<V: Simd, S: Sample>(
+    simd: V,
+    picture: &mut Picture<S>,
+    context: &DeblockContext<'_>,
+    protected: bool,
+) {
     let (width, height) = (context.params.width, context.params.height);
-    for y in (GRID..height).step_by(GRID as usize) {
-        for x in (0..width).step_by(SECTION as usize) {
-            let strength = context.edges.horizontal_at(x, y);
-            if strength > 0 {
-                let sides = Sides {
-                    q: (x, y),
-                    p: (x, y - 1),
-                };
-                let filter = context.luma_filter(sides, strength);
-                let plane = picture.luma_mut();
-                let section = horizontal_section(plane, x as usize, y as usize);
-                filter_luma_section(plane.samples_mut(), section, &filter);
-            }
+    // Row 0 is the picture edge, and no edge lies there.
+    for (y, row) in (0..height)
+        .step_by(GRID as usize)
+        .zip(context.edges.horizontal_rows())
+        .skip(1)
+    {
+        for (x, &strength) in (0..width)
+            .step_by(SECTION as usize)
+            .zip(row)
+            .filter(|(_, strength)| **strength > 0)
+        {
+            let sides = Sides {
+                q: (x, y),
+                p: (x, y - 1),
+            };
+            let filter = context.luma_filter(sides, strength, protected);
+            let plane = picture.luma_mut();
+            let section = horizontal_section(plane, x as usize, y as usize);
+            luma_section(simd, plane.samples_mut(), section, &filter);
         }
     }
     for y in (CHROMA_GRID..height).step_by(CHROMA_GRID as usize) {

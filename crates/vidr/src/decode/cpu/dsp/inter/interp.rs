@@ -1,22 +1,36 @@
 //! Fractional sample interpolation (8.5.3.3.3).
 //!
-//! Each call copies its reference area into a dense scratch buffer through clamped
-//! coordinates, (8-222), (8-223), (8-239), and (8-240). The filters then run on one
-//! path for every location and sample type.
+//! A block inside the picture reads the reference plane directly. A block across an edge
+//! first copies its reference area into a dense scratch buffer through clamped
+//! coordinates, (8-222), (8-223), (8-239), and (8-240). The same stages run on both: each
+//! input row widens to 16-bit lanes, then the filters run in vector blocks of 16 and 8.
+//!
+//! A block computes whole vectors. Lanes past its width land in working memory that
+//! nothing reads, so a row has no scalar tail. Every plane sample holds at most
+//! `( 1 << bit_depth ) - 1`.
+
+use fearless_simd::{Simd, i16x8, i16x16};
 
 use crate::decode::cpu::dsp::sample::Sample;
+use crate::decode::cpu::dsp::simd::{
+    Cpu, load_i16x8, load_i16x16, store_i16x8, store_i16x16, with_simd,
+};
+
+use super::fir::{sum16_x8, sum16_x16, sum32_x8, sum32_x16};
 
 /// The largest prediction block side.
-const MAX_BLOCK: usize = 64;
+pub(crate) const MAX_BLOCK: usize = 64;
 /// The most taps of a filter.
 const MAX_TAPS: usize = 8;
 /// Samples per row and rows in the reference scratch.
 const FETCH_SIZE: usize = MAX_BLOCK + MAX_TAPS - 1;
+/// Lanes per row of widened input: a whole number of vectors covering `FETCH_SIZE`.
+const WIDE_ROW: usize = FETCH_SIZE + 1;
 /// `shift2`: 6 at every bit depth.
 const SECOND_STAGE_SHIFT: u32 = 6;
 
 /// The 8-tap luma filters by fraction, from `-3` to `+4` (8-224) to (8-229).
-const LUMA_FILTERS: [[i32; 8]; 4] = [
+const LUMA_FILTERS: [[i16; 8]; 4] = [
     [0, 0, 0, 64, 0, 0, 0, 0],
     [-1, 4, -10, 58, 17, -5, 1, 0],
     [-1, 4, -11, 40, 40, -11, 4, -1],
@@ -24,7 +38,7 @@ const LUMA_FILTERS: [[i32; 8]; 4] = [
 ];
 
 /// The 4-tap chroma filters by fraction, from `-1` to `+2` (8-241) to (8-247).
-const CHROMA_FILTERS: [[i32; 4]; 8] = [
+static CHROMA_FILTERS: [[i16; 4]; 8] = [
     [0, 64, 0, 0],
     [-2, 58, 10, -2],
     [-4, 54, 16, -2],
@@ -74,17 +88,16 @@ impl PredSamples {
     }
 
     /// `width` values of row `y`.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn row(&self, y: usize, width: usize) -> &[i16] {
         let start = y * MAX_BLOCK;
         self.samples.get(start..start + width).unwrap_or_default()
     }
 
-    fn row_mut(&mut self, y: usize, width: usize) -> &mut [i16] {
-        let start = y * MAX_BLOCK;
-        self.samples
-            .get_mut(start..start + width)
-            .unwrap_or_default()
+    /// All 64 values of row `y`, or `None` past the last row.
+    #[inline(always)]
+    pub(crate) fn full_row(&self, y: usize) -> Option<&[i16; MAX_BLOCK]> {
+        self.samples.as_chunks::<MAX_BLOCK>().0.get(y)
     }
 }
 
@@ -92,6 +105,8 @@ impl PredSamples {
 #[derive(Clone, Debug)]
 pub(crate) struct InterpScratch {
     reference: [u16; FETCH_SIZE * FETCH_SIZE],
+    /// The input rows as 16-bit lanes.
+    widened: [i16; WIDE_ROW * FETCH_SIZE],
     /// The first-stage values of a block with two fractions: `a`, `b`, `c`, `aY`.
     first_stage: [i16; MAX_BLOCK * FETCH_SIZE],
 }
@@ -101,6 +116,7 @@ impl InterpScratch {
     pub(crate) const fn new() -> Self {
         Self {
             reference: [0; FETCH_SIZE * FETCH_SIZE],
+            widened: [0; WIDE_ROW * FETCH_SIZE],
             first_stage: [0; MAX_BLOCK * FETCH_SIZE],
         }
     }
@@ -119,6 +135,76 @@ pub(crate) struct RefBlock {
     pub(crate) height: usize,
 }
 
+/// Rows of a dense area of samples. A row runs on past its width into whatever follows
+/// it, because a whole-vector load can read further than a block needs.
+#[derive(Clone, Copy, Debug)]
+struct Rows<'a, T> {
+    /// The first sample of the first row, and all that follows it.
+    samples: &'a [T],
+    /// Samples from one row start to the next.
+    stride: usize,
+}
+
+impl<'a, T> Rows<'a, T> {
+    /// Row `y` and all that follows it, or an empty row past the end of `samples`.
+    #[inline(always)]
+    fn row(&self, y: usize) -> &'a [T] {
+        self.samples.get(y * self.stride..).unwrap_or_default()
+    }
+}
+
+/// The values every stage of one block reads.
+#[derive(Clone, Copy, Debug)]
+struct Job {
+    /// The reference area the filters read, with the extra samples of their taps.
+    area: RefBlock,
+    /// Output samples per row.
+    width: usize,
+    /// Output rows.
+    height: usize,
+    /// True at 8 bits, where a first-stage sum fits 16 bits and `shift1` is 0.
+    eight_bit: bool,
+    /// `shift1`: `Min( 4, BitDepth - 8 )`.
+    shift1: u32,
+    /// `shift3`: `Max( 2, 14 - BitDepth )`.
+    shift3: u32,
+}
+
+impl Job {
+    /// `TAPS` is even, and position `TAPS / 2 - 1` of a filter is the sample at the
+    /// integer location.
+    fn new<const TAPS: usize>(block: RefBlock, fractions: (bool, bool), bit_depth: u32) -> Self {
+        let width = block.width.min(MAX_BLOCK);
+        let height = block.height.min(MAX_BLOCK);
+        let before = TAPS as i32 / 2 - 1;
+        Self {
+            area: RefBlock {
+                x: if fractions.0 {
+                    block.x.saturating_sub(before)
+                } else {
+                    block.x
+                },
+                y: if fractions.1 {
+                    block.y.saturating_sub(before)
+                } else {
+                    block.y
+                },
+                width: if fractions.0 { width + TAPS - 1 } else { width },
+                height: if fractions.1 {
+                    height + TAPS - 1
+                } else {
+                    height
+                },
+            },
+            width,
+            height,
+            eight_bit: bit_depth == 8,
+            shift1: bit_depth.saturating_sub(8).min(4),
+            shift3: 14u32.saturating_sub(bit_depth).max(2),
+        }
+    }
+}
+
 /// `predSampleLXL` of a block (8.5.3.3.3.2). `frac` holds `xFracL` and `yFracL`, each
 /// taken modulo 4.
 pub(crate) fn interpolate_luma<S: Sample>(
@@ -129,17 +215,7 @@ pub(crate) fn interpolate_luma<S: Sample>(
     scratch: &mut InterpScratch,
     out: &mut PredSamples,
 ) {
-    let filters = (LUMA_FILTERS[frac.0 & 3], LUMA_FILTERS[frac.1 & 3]);
-    interpolate(
-        plane,
-        block,
-        frac.0 & 3 != 0,
-        frac.1 & 3 != 0,
-        &filters,
-        bit_depth,
-        scratch,
-        out,
-    );
+    luma_on(Cpu::detected(), plane, block, frac, bit_depth, scratch, out);
 }
 
 /// `predSampleLXC` of a block (8.5.3.3.3.3). `frac` holds `xFracC` and `yFracC`, each
@@ -152,107 +228,416 @@ pub(crate) fn interpolate_chroma<S: Sample>(
     scratch: &mut InterpScratch,
     out: &mut PredSamples,
 ) {
-    let filters = (CHROMA_FILTERS[frac.0 & 7], CHROMA_FILTERS[frac.1 & 7]);
-    interpolate(
-        plane,
-        block,
-        frac.0 & 7 != 0,
-        frac.1 & 7 != 0,
-        &filters,
-        bit_depth,
-        scratch,
-        out,
-    );
+    chroma_on(Cpu::detected(), plane, block, frac, bit_depth, scratch, out);
 }
 
-/// The stages of Table 8-8 and Table 8-9. `TAPS` is even, and position `TAPS / 2 - 1`
-/// of a filter is the sample at the integer location.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the plane, block, and kernel state stay plain arguments for the two callers"
-)]
-fn interpolate<S: Sample, const TAPS: usize>(
+/// [`interpolate_luma`] compiled for `cpu`.
+fn luma_on<S: Sample>(
+    cpu: Cpu,
     plane: &RefPlane<'_, S>,
     block: RefBlock,
-    x_fraction: bool,
-    y_fraction: bool,
-    filters: &([i32; TAPS], [i32; TAPS]),
+    frac: (usize, usize),
     bit_depth: u32,
     scratch: &mut InterpScratch,
     out: &mut PredSamples,
 ) {
-    let width = block.width.min(MAX_BLOCK);
-    let height = block.height.min(MAX_BLOCK);
-    let before = TAPS as i32 / 2 - 1;
-    let shift1 = bit_depth.saturating_sub(8).min(4);
-    let shift3 = 14u32.saturating_sub(bit_depth).max(2);
-    let fetch = RefBlock {
-        x: if x_fraction {
-            block.x.saturating_sub(before)
-        } else {
-            block.x
-        },
-        y: if y_fraction {
-            block.y.saturating_sub(before)
-        } else {
-            block.y
-        },
-        width: if x_fraction { width + TAPS - 1 } else { width },
-        height: if y_fraction {
-            height + TAPS - 1
-        } else {
-            height
-        },
-    };
-    fetch_reference(plane, fetch, &mut scratch.reference);
+    let frac = (frac.0 & 3, frac.1 & 3);
+    let job = Job::new::<8>(block, (frac.0 != 0, frac.1 != 0), bit_depth);
     let InterpScratch {
         reference,
+        widened,
         first_stage,
     } = scratch;
-    let reference = reference.as_slice();
-    match (x_fraction, y_fraction) {
-        (false, false) => {
-            for y in 0..height {
-                let source = fetched_row(reference, y, width);
-                for (target, &sample) in out.row_mut(y, width).iter_mut().zip(source) {
-                    *target = (i32::from(sample) << shift3) as i16;
-                }
-            }
-        }
-        (true, false) => {
-            for y in 0..height {
-                let source = fetched_row(reference, y, width + TAPS - 1);
-                horizontal(source, &filters.0, shift1, out.row_mut(y, width));
-            }
-        }
-        (false, true) => {
-            let rows = |index: usize| fetched_row(reference, index, width);
-            vertical(rows, &filters.1, shift1, width, height, out);
-        }
+    if let Some(rows) = direct_rows(plane, job.area) {
+        with_simd!(cpu, simd => luma_stages(simd, rows, frac, &job, widened, first_stage, out));
+    } else {
+        fetch_reference(plane, job.area, reference);
+        let rows = copied_rows(reference);
+        with_simd!(cpu, simd => luma_stages(simd, rows, frac, &job, widened, first_stage, out));
+    }
+}
+
+/// [`interpolate_chroma`] compiled for `cpu`.
+fn chroma_on<S: Sample>(
+    cpu: Cpu,
+    plane: &RefPlane<'_, S>,
+    block: RefBlock,
+    frac: (usize, usize),
+    bit_depth: u32,
+    scratch: &mut InterpScratch,
+    out: &mut PredSamples,
+) {
+    let frac = (frac.0 & 7, frac.1 & 7);
+    let job = Job::new::<4>(block, (frac.0 != 0, frac.1 != 0), bit_depth);
+    let InterpScratch {
+        reference,
+        widened,
+        first_stage,
+    } = scratch;
+    if let Some(rows) = direct_rows(plane, job.area) {
+        with_simd!(cpu, simd => chroma_stages(simd, rows, frac, &job, widened, first_stage, out));
+    } else {
+        fetch_reference(plane, job.area, reference);
+        let rows = copied_rows(reference);
+        with_simd!(cpu, simd => chroma_stages(simd, rows, frac, &job, widened, first_stage, out));
+    }
+}
+
+/// The rows of `area` in the plane, or `None` when `area` crosses a plane edge.
+fn direct_rows<'a, S: Sample>(plane: &RefPlane<'a, S>, area: RefBlock) -> Option<Rows<'a, S>> {
+    let x = usize::try_from(area.x).ok()?;
+    let y = usize::try_from(area.y).ok()?;
+    if x.checked_add(area.width)? > plane.width || y.checked_add(area.height)? > plane.height {
+        return None;
+    }
+    let start = y.checked_mul(plane.stride)?.checked_add(x)?;
+    Some(Rows {
+        samples: plane.samples.get(start..)?,
+        stride: plane.stride,
+    })
+}
+
+/// The rows of the reference scratch.
+fn copied_rows(reference: &[u16]) -> Rows<'_, u16> {
+    Rows {
+        samples: reference,
+        stride: FETCH_SIZE,
+    }
+}
+
+/// Runs `body` with one luma filter of `frac` 1, 2, or 3, as a constant.
+#[inline(always)]
+fn with_luma_taps(frac: usize, mut body: impl FnMut(&[i16; 8])) {
+    match frac {
+        1 => body(&LUMA_FILTERS[1]),
+        2 => body(&LUMA_FILTERS[2]),
+        _ => body(&LUMA_FILTERS[3]),
+    }
+}
+
+/// The stages of Table 8-8.
+#[inline(always)]
+fn luma_stages<V: Simd, T: Sample>(
+    simd: V,
+    rows: Rows<'_, T>,
+    frac: (usize, usize),
+    job: &Job,
+    widened: &mut [i16],
+    first_stage: &mut [i16],
+    out: &mut PredSamples,
+) {
+    let (width, height) = (job.width, job.height);
+    let target = out.samples.as_chunks_mut::<MAX_BLOCK>().0;
+    if frac == (0, 0) {
+        full_sample_stage(simd, rows, job, target);
+        return;
+    }
+    widen_rows(simd, rows, job, widened);
+    let wide = widened.as_chunks::<WIDE_ROW>().0;
+    match (frac.0 != 0, frac.1 != 0) {
+        (true, false) => with_luma_taps(
+            frac.0,
+            #[inline(always)]
+            |taps| horizontal_stage(simd, wide, taps, job, (width, height), target),
+        ),
+        (false, _) => with_luma_taps(
+            frac.1,
+            #[inline(always)]
+            |taps| vertical_first_stage(simd, wide, taps, job, target),
+        ),
         (true, true) => {
-            for y in 0..height + TAPS - 1 {
-                let source = fetched_row(reference, y, width + TAPS - 1);
-                let start = y * MAX_BLOCK;
-                let target = first_stage
-                    .get_mut(start..start + width)
-                    .unwrap_or_default();
-                horizontal(source, &filters.0, shift1, target);
-            }
-            let stage: &[i16] = first_stage;
-            let rows = |index: usize| {
-                let start = index * MAX_BLOCK;
-                stage.get(start..start + width).unwrap_or_default()
-            };
-            vertical(rows, &filters.1, SECOND_STAGE_SHIFT, width, height, out);
+            let stage_target = first_stage.as_chunks_mut::<MAX_BLOCK>().0;
+            with_luma_taps(
+                frac.0,
+                #[inline(always)]
+                |taps| horizontal_stage(simd, wide, taps, job, (width, height + 7), stage_target),
+            );
+            let stage = first_stage.as_chunks::<MAX_BLOCK>().0;
+            with_luma_taps(
+                frac.1,
+                #[inline(always)]
+                |taps| vertical_second_stage(simd, stage, taps, job, target),
+            );
         }
     }
 }
 
-/// Row `y` of the reference scratch, `width` samples long.
-#[inline]
-fn fetched_row(reference: &[u16], y: usize, width: usize) -> &[u16] {
-    let start = y * FETCH_SIZE;
-    reference.get(start..start + width).unwrap_or_default()
+/// The stages of Table 8-9.
+#[inline(always)]
+fn chroma_stages<V: Simd, T: Sample>(
+    simd: V,
+    rows: Rows<'_, T>,
+    frac: (usize, usize),
+    job: &Job,
+    widened: &mut [i16],
+    first_stage: &mut [i16],
+    out: &mut PredSamples,
+) {
+    let (width, height) = (job.width, job.height);
+    let target = out.samples.as_chunks_mut::<MAX_BLOCK>().0;
+    if frac == (0, 0) {
+        full_sample_stage(simd, rows, job, target);
+        return;
+    }
+    widen_rows(simd, rows, job, widened);
+    let wide = widened.as_chunks::<WIDE_ROW>().0;
+    let (x_taps, y_taps) = (&CHROMA_FILTERS[frac.0], &CHROMA_FILTERS[frac.1]);
+    match (frac.0 != 0, frac.1 != 0) {
+        (true, false) => horizontal_stage(simd, wide, x_taps, job, (width, height), target),
+        (false, _) => vertical_first_stage(simd, wide, y_taps, job, target),
+        (true, true) => {
+            let stage_target = first_stage.as_chunks_mut::<MAX_BLOCK>().0;
+            horizontal_stage(simd, wide, x_taps, job, (width, height + 3), stage_target);
+            let stage = first_stage.as_chunks::<MAX_BLOCK>().0;
+            vertical_second_stage(simd, stage, y_taps, job, target);
+        }
+    }
+}
+
+/// Eight samples from the start of `src` as lanes. Near the end of the samples, the
+/// lanes past `src` read as zero.
+#[inline(always)]
+fn load_samples_x8<V: Simd, T: Sample>(simd: V, src: &[T]) -> i16x8<V> {
+    if let Some(lanes) = src.first_chunk::<8>() {
+        T::load_x8(simd, lanes)
+    } else {
+        let mut lanes = [T::default(); 8];
+        for (lane, &sample) in lanes.iter_mut().zip(src) {
+            *lane = sample;
+        }
+        T::load_x8(simd, &lanes)
+    }
+}
+
+/// A full-sample location: `sample << shift3`, with the bits past 16 dropped.
+#[inline(always)]
+fn full_sample_stage<V: Simd, T: Sample>(
+    simd: V,
+    rows: Rows<'_, T>,
+    job: &Job,
+    target: &mut [[i16; MAX_BLOCK]],
+) {
+    let (width, shift) = (job.width, job.shift3);
+    for (y, line) in target.iter_mut().enumerate().take(job.height) {
+        let source = rows.row(y);
+        write_line(
+            line,
+            width,
+            #[inline(always)]
+            |x| {
+                let lanes = load_samples_x8(simd, source.get(x..).unwrap_or_default());
+                simd.shl_i16x8(lanes, shift)
+            },
+            #[inline(always)]
+            |x| {
+                let lanes = match source.get(x..).and_then(<[T]>::first_chunk::<16>) {
+                    Some(lanes) => T::load_x16(simd, lanes),
+                    None => simd.splat_i16x16(0),
+                };
+                simd.shl_i16x16(lanes, shift)
+            },
+        );
+    }
+}
+
+/// Widens each row of the reference area to 16-bit lanes.
+#[inline(always)]
+fn widen_rows<V: Simd, T: Sample>(simd: V, rows: Rows<'_, T>, job: &Job, widened: &mut [i16]) {
+    let targets = widened.as_chunks_mut::<WIDE_ROW>().0;
+    let width = job.area.width;
+    for (y, line) in targets.iter_mut().enumerate().take(job.area.height) {
+        let source = rows.row(y);
+        let mut x = 0;
+        while x < width {
+            let lanes = load_samples_x8(simd, source.get(x..).unwrap_or_default());
+            store_i16x8(lanes, line, x);
+            x += 8;
+        }
+    }
+}
+
+/// Writes `width` lanes of one output row, in whole vectors. `x8` and `x16` return the
+/// vector at a lane index. Each index is a multiple of 8 below 64, so the bounds of every
+/// load and store of a `MAX_BLOCK` row fold away through the masks below.
+#[inline(always)]
+fn write_line<V: Simd>(
+    line: &mut [i16; MAX_BLOCK],
+    width: usize,
+    x8: impl Fn(usize) -> i16x8<V>,
+    x16: impl Fn(usize) -> i16x16<V>,
+) {
+    let mut x = 0;
+    while x + 16 <= width {
+        let at = x & 48;
+        store_i16x16(x16(at), line, at);
+        x += 16;
+    }
+    while x < width {
+        let at = x & 56;
+        store_i16x8(x8(at), line, at);
+        x += 8;
+    }
+}
+
+/// `a`, `b`, `c`, `ab` to `ah`: output lane `x` reads lanes `x` to `x + TAPS - 1` of its
+/// input row. `size` holds the output width and height.
+#[inline(always)]
+fn horizontal_stage<V: Simd, const TAPS: usize>(
+    simd: V,
+    wide: &[[i16; WIDE_ROW]],
+    taps: &[i16; TAPS],
+    job: &Job,
+    size: (usize, usize),
+    target: &mut [[i16; MAX_BLOCK]],
+) {
+    let shift = job.shift1;
+    for (line, row) in target.iter_mut().zip(wide).take(size.1) {
+        if job.eight_bit {
+            write_line(
+                line,
+                size.0,
+                #[inline(always)]
+                |x| {
+                    sum16_x8(
+                        simd,
+                        taps,
+                        #[inline(always)]
+                        |k| load_i16x8(simd, row, x + k),
+                    )
+                },
+                #[inline(always)]
+                |x| {
+                    sum16_x16(
+                        simd,
+                        taps,
+                        #[inline(always)]
+                        |k| load_i16x16(simd, row, x + k),
+                    )
+                },
+            );
+        } else {
+            write_line(
+                line,
+                size.0,
+                #[inline(always)]
+                |x| {
+                    sum32_x8(
+                        simd,
+                        taps,
+                        shift,
+                        #[inline(always)]
+                        |k| load_i16x8(simd, row, x + k),
+                    )
+                },
+                #[inline(always)]
+                |x| {
+                    sum32_x16(
+                        simd,
+                        taps,
+                        shift,
+                        #[inline(always)]
+                        |k| load_i16x16(simd, row, x + k),
+                    )
+                },
+            );
+        }
+    }
+}
+
+/// The vertical stage on widened samples: output row `y` reads rows `y` to
+/// `y + TAPS - 1`.
+#[inline(always)]
+fn vertical_first_stage<V: Simd, const TAPS: usize>(
+    simd: V,
+    wide: &[[i16; WIDE_ROW]],
+    taps: &[i16; TAPS],
+    job: &Job,
+    target: &mut [[i16; MAX_BLOCK]],
+) {
+    if job.eight_bit {
+        for (y, line) in target.iter_mut().enumerate().take(job.height) {
+            let Some(rows) = wide.get(y..).and_then(<[_]>::first_chunk::<TAPS>) else {
+                return;
+            };
+            write_line(
+                line,
+                job.width,
+                #[inline(always)]
+                |x| {
+                    sum16_x8(
+                        simd,
+                        taps,
+                        #[inline(always)]
+                        |k| load_i16x8(simd, &rows[k], x),
+                    )
+                },
+                #[inline(always)]
+                |x| {
+                    sum16_x16(
+                        simd,
+                        taps,
+                        #[inline(always)]
+                        |k| load_i16x16(simd, &rows[k], x),
+                    )
+                },
+            );
+        }
+    } else {
+        vertical_sum32(simd, wide, taps, job.shift1, job, target);
+    }
+}
+
+/// The vertical stage on first-stage values.
+#[inline(always)]
+fn vertical_second_stage<V: Simd, const TAPS: usize>(
+    simd: V,
+    stage: &[[i16; MAX_BLOCK]],
+    taps: &[i16; TAPS],
+    job: &Job,
+    target: &mut [[i16; MAX_BLOCK]],
+) {
+    vertical_sum32(simd, stage, taps, SECOND_STAGE_SHIFT, job, target);
+}
+
+/// The vertical stage in 32-bit sums.
+#[inline(always)]
+fn vertical_sum32<V: Simd, const TAPS: usize, const ROW: usize>(
+    simd: V,
+    input: &[[i16; ROW]],
+    taps: &[i16; TAPS],
+    shift: u32,
+    job: &Job,
+    target: &mut [[i16; MAX_BLOCK]],
+) {
+    for (y, line) in target.iter_mut().enumerate().take(job.height) {
+        let Some(rows) = input.get(y..).and_then(<[_]>::first_chunk::<TAPS>) else {
+            return;
+        };
+        write_line(
+            line,
+            job.width,
+            #[inline(always)]
+            |x| {
+                sum32_x8(
+                    simd,
+                    taps,
+                    shift,
+                    #[inline(always)]
+                    |k| load_i16x8(simd, &rows[k], x),
+                )
+            },
+            #[inline(always)]
+            |x| {
+                sum32_x16(
+                    simd,
+                    taps,
+                    shift,
+                    #[inline(always)]
+                    |k| load_i16x16(simd, &rows[k], x),
+                )
+            },
+        );
+    }
 }
 
 /// Copies an area of `plane` into `reference`, each coordinate clamped to the plane.
@@ -288,68 +673,10 @@ fn fetch_reference<S: Sample>(plane: &RefPlane<'_, S>, area: RefBlock, reference
     }
 }
 
-/// One row of `a`, `b`, `c`, `ab` to `ah`: `source` starts at the first tap of the
-/// first sample.
-#[inline]
-fn horizontal<const TAPS: usize>(
-    source: &[u16],
-    filter: &[i32; TAPS],
-    shift: u32,
-    target: &mut [i16],
-) {
-    for (out, window) in target.iter_mut().zip(source.windows(TAPS)) {
-        let sum: i32 = window
-            .iter()
-            .zip(filter)
-            .map(|(&sample, &tap)| i32::from(sample) * tap)
-            .sum();
-        *out = (sum >> shift) as i16;
-    }
-}
-
-/// The input of the vertical stage: samples or first-stage values.
-trait StageValue: Copy {
-    fn widen(self) -> i32;
-}
-
-impl StageValue for u16 {
-    #[inline]
-    fn widen(self) -> i32 {
-        i32::from(self)
-    }
-}
-
-impl StageValue for i16 {
-    #[inline]
-    fn widen(self) -> i32 {
-        i32::from(self)
-    }
-}
-
-/// The vertical stage: `rows( i )` returns input row `i`, and output row `y` reads
-/// rows `y` to `y + TAPS - 1`.
-fn vertical<'a, T: StageValue + 'a, const TAPS: usize>(
-    rows: impl Fn(usize) -> &'a [T],
-    filter: &[i32; TAPS],
-    shift: u32,
-    width: usize,
-    height: usize,
-    out: &mut PredSamples,
-) {
-    let mut sums = [0i32; MAX_BLOCK];
-    for y in 0..height {
-        sums.fill(0);
-        for (index, &tap) in filter.iter().enumerate() {
-            for (sum, &value) in sums.iter_mut().zip(rows(y + index)) {
-                *sum += value.widen() * tap;
-            }
-        }
-        for (target, &sum) in out.row_mut(y, width).iter_mut().zip(&sums) {
-            *target = (sum >> shift) as i16;
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "interp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "interp_simd_tests.rs"]
+mod simd_tests;

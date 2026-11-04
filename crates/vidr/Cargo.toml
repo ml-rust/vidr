@@ -90,8 +90,8 @@ cpu-av1-asm = ["cpu-av1", "rav1r/asm"]
 cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
 # HEVC software decode written in this crate, pure Rust, Main and Main 10 at
 # 4:2:0. Each frame takes one copy through host memory. HEVC has patent pools: see
-# the README.
-cpu-hevc = ["frame", "hevc"]
+# the README. The kernels select AVX2 or NEON at run time through fearless_simd.
+cpu-hevc = ["frame", "hevc", "dep:fearless_simd"]
 
 [dependencies]
 numr = { version = "0.15", optional = true }
@@ -113,3 +113,12 @@ rav1r = { version = "0.1", optional = true, default-features = false, features =
 ] }
 # Pinned: conformance runs against this exact release.
 rusty_vp9 = { version = "=0.1.3", optional = true, default-features = false }
+# The vector types and CPU feature tokens of the HEVC kernels. The fallback feature gives
+# the scalar token on every target, for CPUs with neither AVX2 nor NEON and for the tests.
+fearless_simd = { version = "1.2", optional = true, features = [
+  "force_support_fallback",
+] }
+
+[[example]]
+name = "hevc_decode"
+required-features = ["cpu-hevc"]

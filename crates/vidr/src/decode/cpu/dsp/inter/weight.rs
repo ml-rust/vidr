@@ -1,8 +1,13 @@
 //! Weighted sample prediction (8.5.3.3.4): 14-bit intermediate values to samples.
 
-use crate::decode::cpu::dsp::sample::Sample;
+use fearless_simd::{Bytes, Simd, i16x8, i16x16};
 
-use super::interp::PredSamples;
+use crate::decode::cpu::dsp::sample::Sample;
+use crate::decode::cpu::dsp::simd::{
+    Cpu, clip_x8, clip_x16, load_i16x8, load_i16x16, tap_pair, with_simd,
+};
+
+use super::interp::{MAX_BLOCK, PredSamples};
 
 /// A plane of the current picture as the kernels write it.
 #[derive(Debug)]
@@ -43,16 +48,61 @@ pub(crate) const fn shift1(bit_depth: u32) -> u32 {
     if shift > 2 { shift } else { 2 }
 }
 
-/// Runs `write_row` on each target row, with its index in the block.
-fn write_rows<S: Sample>(
+/// Writes one row of samples in vectors of 16, then 8, then the rest from one vector of
+/// 8. `x8` and `x16` return the lanes at a column, a multiple of 8 below 64.
+#[inline(always)]
+fn write_row<V: Simd, S: Sample>(
+    simd: V,
+    target: &mut [S],
+    x8: impl Fn(usize) -> i16x8<V>,
+    x16: impl Fn(usize) -> i16x16<V>,
+) {
+    let (blocks, rest) = target.as_chunks_mut::<16>();
+    let mut x = 0;
+    for block in blocks {
+        *block = S::pack_x16(simd, x16(x & 48));
+        x += 16;
+    }
+    write_row_x8(simd, rest, x, x8);
+}
+
+/// [`write_row`] from column `x`, in vectors of 8 only.
+#[inline(always)]
+fn write_row_x8<V: Simd, S: Sample>(
+    simd: V,
+    target: &mut [S],
+    start: usize,
+    x8: impl Fn(usize) -> i16x8<V>,
+) {
+    let (blocks, rest) = target.as_chunks_mut::<8>();
+    let mut x = start;
+    for block in blocks {
+        *block = S::pack_x8(simd, x8(x & 56));
+        x += 8;
+    }
+    if !rest.is_empty() {
+        let lanes = S::pack_x8(simd, x8(x & 56));
+        for (sample, &lane) in rest.iter_mut().zip(&lanes) {
+            *sample = lane;
+        }
+    }
+}
+
+/// Runs `write` on each target row, with the source row of the same index. A block wider
+/// than [`MAX_BLOCK`] writes nothing.
+#[inline(always)]
+fn for_each_row<S: Sample>(
     plane: &mut TargetPlane<'_, S>,
     block: TargetBlock,
-    mut write_row: impl FnMut(usize, &mut [S]),
+    mut write: impl FnMut(usize, &mut [S]),
 ) {
+    if block.width > MAX_BLOCK {
+        return;
+    }
     for line in 0..block.height {
         let start = (block.y + line) * plane.stride + block.x;
         if let Some(target) = plane.samples.get_mut(start..start + block.width) {
-            write_row(line, target);
+            write(line, target);
         }
     }
 }
@@ -64,13 +114,52 @@ pub(crate) fn put_uni<S: Sample>(
     source: &PredSamples,
     bit_depth: u32,
 ) {
+    put_uni_on(Cpu::detected(), plane, block, source, bit_depth);
+}
+
+/// [`put_uni`] compiled for `cpu`. The rounding addition saturates at 16 bits, and the
+/// result stays exact: a saturated sum shifts to a value at or above the clip limit.
+fn put_uni_on<S: Sample>(
+    cpu: Cpu,
+    plane: &mut TargetPlane<'_, S>,
+    block: TargetBlock,
+    source: &PredSamples,
+    bit_depth: u32,
+) {
     let shift = shift1(bit_depth);
-    let offset = 1i32 << (shift - 1);
-    let max_value = (1i32 << bit_depth) - 1;
-    write_rows(plane, block, |line, target| {
-        for (out, &value) in target.iter_mut().zip(source.row(line, block.width)) {
-            *out = S::clipped((i32::from(value) + offset) >> shift, max_value);
-        }
+    let offset = 1i16 << (shift - 1);
+    let max_value = ((1i32 << bit_depth) - 1) as i16;
+    with_simd!(cpu, simd => {
+        for_each_row(
+            plane,
+            block,
+            #[inline(always)]
+            |line, target: &mut [S]| {
+                let Some(row) = source.full_row(line) else {
+                    return;
+                };
+                write_row(
+                    simd,
+                    target,
+                    #[inline(always)]
+                    |x| {
+                        let sum = simd.saturating_add_i16x8(
+                            load_i16x8(simd, row, x),
+                            simd.splat_i16x8(offset),
+                        );
+                        clip_x8(simd, simd.shr_i16x8(sum, shift), simd.splat_i16x8(max_value))
+                    },
+                    #[inline(always)]
+                    |x| {
+                        let sum = simd.saturating_add_i16x16(
+                            load_i16x16(simd, row, x),
+                            simd.splat_i16x16(offset),
+                        );
+                        clip_x16(simd, simd.shr_i16x16(sum, shift), simd.splat_i16x16(max_value))
+                    },
+                );
+            },
+        );
     });
 }
 
@@ -81,15 +170,57 @@ pub(crate) fn put_bi<S: Sample>(
     sources: [&PredSamples; 2],
     bit_depth: u32,
 ) {
+    put_bi_on(Cpu::detected(), plane, block, sources, bit_depth);
+}
+
+/// [`put_bi`] compiled for `cpu`. Each addition saturates at 16 bits, and the result
+/// stays exact: a sum saturated high shifts to a value at or above the clip limit, and a
+/// sum saturated low stays negative after the rounding offset.
+fn put_bi_on<S: Sample>(
+    cpu: Cpu,
+    plane: &mut TargetPlane<'_, S>,
+    block: TargetBlock,
+    sources: [&PredSamples; 2],
+    bit_depth: u32,
+) {
     let shift = shift1(bit_depth) + 1;
-    let offset = 1i32 << (shift - 1);
-    let max_value = (1i32 << bit_depth) - 1;
-    write_rows(plane, block, |line, target| {
-        let first = sources[0].row(line, block.width);
-        let second = sources[1].row(line, block.width);
-        for ((out, &a), &b) in target.iter_mut().zip(first).zip(second) {
-            *out = S::clipped((i32::from(a) + i32::from(b) + offset) >> shift, max_value);
-        }
+    let offset = 1i16 << (shift - 1);
+    let max_value = ((1i32 << bit_depth) - 1) as i16;
+    with_simd!(cpu, simd => {
+        for_each_row(
+            plane,
+            block,
+            #[inline(always)]
+            |line, target: &mut [S]| {
+                let (Some(first), Some(second)) =
+                    (sources[0].full_row(line), sources[1].full_row(line))
+                else {
+                    return;
+                };
+                write_row(
+                    simd,
+                    target,
+                    #[inline(always)]
+                    |x| {
+                        let pair = simd.saturating_add_i16x8(
+                            load_i16x8(simd, first, x),
+                            load_i16x8(simd, second, x),
+                        );
+                        let sum = simd.saturating_add_i16x8(pair, simd.splat_i16x8(offset));
+                        clip_x8(simd, simd.shr_i16x8(sum, shift), simd.splat_i16x8(max_value))
+                    },
+                    #[inline(always)]
+                    |x| {
+                        let pair = simd.saturating_add_i16x16(
+                            load_i16x16(simd, first, x),
+                            load_i16x16(simd, second, x),
+                        );
+                        let sum = simd.saturating_add_i16x16(pair, simd.splat_i16x16(offset));
+                        clip_x16(simd, simd.shr_i16x16(sum, shift), simd.splat_i16x16(max_value))
+                    },
+                );
+            },
+        );
     });
 }
 
@@ -102,15 +233,67 @@ pub(crate) fn put_weighted_uni<S: Sample>(
     list: usize,
     bit_depth: u32,
 ) {
+    put_weighted_uni_on(
+        Cpu::detected(),
+        plane,
+        block,
+        source,
+        weights,
+        list,
+        bit_depth,
+    );
+}
+
+/// [`put_weighted_uni`] compiled for `cpu`. A dot product on the pair of a lane and 1
+/// gives `value * weight + round`. `round` is at most `1 << 12`, and a weight is at most
+/// 255 (7.4.7.3), so both fit 16 bits. Saturating to 16 bits before the clip keeps the
+/// result.
+fn put_weighted_uni_on<S: Sample>(
+    cpu: Cpu,
+    plane: &mut TargetPlane<'_, S>,
+    block: TargetBlock,
+    source: &PredSamples,
+    weights: &BlockWeights,
+    list: usize,
+    bit_depth: u32,
+) {
     let (weight, offset) = (weights.weight[list], weights.offset[list]);
     let log2_wd = weights.log2_wd;
     let round = 1i32 << (log2_wd - 1);
-    let max_value = (1i32 << bit_depth) - 1;
-    write_rows(plane, block, |line, target| {
-        for (out, &value) in target.iter_mut().zip(source.row(line, block.width)) {
-            let scaled = (i32::from(value) * weight + round) >> log2_wd;
-            *out = S::clipped(scaled + offset, max_value);
-        }
+    let pair = tap_pair(weight as i16, round as i16);
+    let max_value = ((1i32 << bit_depth) - 1) as i16;
+    with_simd!(cpu, simd => {
+        for_each_row(
+            plane,
+            block,
+            #[inline(always)]
+            |line, target: &mut [S]| {
+                let Some(row) = source.full_row(line) else {
+                    return;
+                };
+                write_row_x8(
+                    simd,
+                    target,
+                    0,
+                    #[inline(always)]
+                    |x| {
+                        let pairs = weight_pairs(simd, pair);
+                        let (low, high) =
+                            simd.interleave_i16x8(load_i16x8(simd, row, x), simd.splat_i16x8(1));
+                        let low = simd.pairwise_dot_product_i16x8(low, pairs);
+                        let high = simd.pairwise_dot_product_i16x8(high, pairs);
+                        let offsets = simd.splat_i32x4(offset);
+                        let low = simd.add_i32x4(simd.shr_i32x4(low, log2_wd), offsets);
+                        let high = simd.add_i32x4(simd.shr_i32x4(high, log2_wd), offsets);
+                        clip_x8(
+                            simd,
+                            simd.saturating_narrow_i32x4(low, high),
+                            simd.splat_i16x8(max_value),
+                        )
+                    },
+                );
+            },
+        );
     });
 }
 
@@ -122,172 +305,70 @@ pub(crate) fn put_weighted_bi<S: Sample>(
     weights: &BlockWeights,
     bit_depth: u32,
 ) {
+    put_weighted_bi_on(Cpu::detected(), plane, block, sources, weights, bit_depth);
+}
+
+/// [`put_weighted_bi`] compiled for `cpu`. A dot product on the two lists gives the
+/// sum of products. A weight is at most 255 (7.4.7.3), so it fits 16 bits.
+fn put_weighted_bi_on<S: Sample>(
+    cpu: Cpu,
+    plane: &mut TargetPlane<'_, S>,
+    block: TargetBlock,
+    sources: [&PredSamples; 2],
+    weights: &BlockWeights,
+    bit_depth: u32,
+) {
     let [w0, w1] = weights.weight;
-    let log2_wd = weights.log2_wd;
-    let round = (weights.offset[0] + weights.offset[1] + 1) << log2_wd;
-    let max_value = (1i32 << bit_depth) - 1;
-    write_rows(plane, block, |line, target| {
-        let first = sources[0].row(line, block.width);
-        let second = sources[1].row(line, block.width);
-        for ((out, &a), &b) in target.iter_mut().zip(first).zip(second) {
-            let sum = i32::from(a) * w0 + i32::from(b) * w1 + round;
-            *out = S::clipped(sum >> (log2_wd + 1), max_value);
-        }
+    let pair = tap_pair(w0 as i16, w1 as i16);
+    let shift = weights.log2_wd + 1;
+    let round = (weights.offset[0] + weights.offset[1] + 1) << weights.log2_wd;
+    let max_value = ((1i32 << bit_depth) - 1) as i16;
+    with_simd!(cpu, simd => {
+        for_each_row(
+            plane,
+            block,
+            #[inline(always)]
+            |line, target: &mut [S]| {
+                let (Some(first), Some(second)) =
+                    (sources[0].full_row(line), sources[1].full_row(line))
+                else {
+                    return;
+                };
+                write_row_x8(
+                    simd,
+                    target,
+                    0,
+                    #[inline(always)]
+                    |x| {
+                        let pairs = weight_pairs(simd, pair);
+                        let (low, high) = simd.interleave_i16x8(
+                            load_i16x8(simd, first, x),
+                            load_i16x8(simd, second, x),
+                        );
+                        let rounds = simd.splat_i32x4(round);
+                        let low = simd.add_i32x4(simd.pairwise_dot_product_i16x8(low, pairs), rounds);
+                        let high = simd.add_i32x4(simd.pairwise_dot_product_i16x8(high, pairs), rounds);
+                        clip_x8(
+                            simd,
+                            simd.saturating_narrow_i32x4(
+                                simd.shr_i32x4(low, shift),
+                                simd.shr_i32x4(high, shift),
+                            ),
+                            simd.splat_i16x8(max_value),
+                        )
+                    },
+                );
+            },
+        );
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::decode::cpu::dsp::inter::interp::{InterpScratch, RefBlock, interpolate_luma};
-    use crate::decode::cpu::hevc::picture::Plane;
-
-    const BLOCK: TargetBlock = TargetBlock {
-        x: 1,
-        y: 1,
-        width: 2,
-        height: 1,
-    };
-
-    /// `predSamples` of a block filled with `value`, built by a full-sample read.
-    fn filled(value: u16, bit_depth: u32) -> PredSamples {
-        let mut source = Plane::<u16>::new(8, 8).unwrap();
-        for y in 0..8 {
-            source.row_mut(y).unwrap().fill(value);
-        }
-        let mut out = PredSamples::new();
-        let mut scratch = Box::new(InterpScratch::new());
-        interpolate_luma(
-            &source.view(),
-            RefBlock {
-                x: 0,
-                y: 0,
-                width: 4,
-                height: 4,
-            },
-            (0, 0),
-            bit_depth,
-            &mut scratch,
-            &mut out,
-        );
-        out
-    }
-
-    fn first_sample<S: Sample>(plane: &Plane<S>) -> i32 {
-        plane.row(1).unwrap()[1].to_i32()
-    }
-
-    /// A value through shift3 and (8-262) returns unchanged, and the neighbour stays.
-    #[test]
-    fn default_uni_returns_the_value() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        put_uni(&mut plane.target(), BLOCK, &filled(100, 8), 8);
-        assert_eq!(first_sample(&plane), 100);
-        assert_eq!(plane.row(1).unwrap()[3], 0);
-        assert_eq!(plane.row(0).unwrap()[1], 0);
-    }
-
-    /// (8-264): ( 100 << 6 + 201 << 6 + 64 ) >> 7 = 151.
-    #[test]
-    fn default_bi_rounds_the_mean_up() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        let (first, second) = (filled(100, 8), filled(201, 8));
-        put_bi(&mut plane.target(), BLOCK, [&first, &second], 8);
-        assert_eq!(first_sample(&plane), 151);
-    }
-
-    /// 10 bits: shift1 4. ( 512 << 4 + 8 ) >> 4 = 512.
-    #[test]
-    fn default_uni_at_10_bits() {
-        let mut plane = Plane::<u16>::new(4, 4).unwrap();
-        put_uni(&mut plane.target(), BLOCK, &filled(512, 10), 10);
-        assert_eq!(first_sample(&plane), 512);
-    }
-
-    /// (8-275): log2Wd 7 with a denominator of 1 at 8 bits. w0 3, o0 5.
-    /// ( 6400 * 3 + 64 ) >> 7 = 150, plus 5 is 155.
-    #[test]
-    fn explicit_uni_follows_8_275() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        let weights = BlockWeights {
-            log2_wd: 7,
-            weight: [3, 0],
-            offset: [5, 0],
-        };
-        put_weighted_uni(&mut plane.target(), BLOCK, &filled(100, 8), &weights, 0, 8);
-        assert_eq!(first_sample(&plane), 155);
-    }
-
-    /// The second list takes `w1` and `o1`. ( 6400 * -1 + 64 ) >> 7 = -50 at log2Wd
-    /// 7, plus 60 is 10.
-    #[test]
-    fn explicit_uni_reads_the_second_list() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        let weights = BlockWeights {
-            log2_wd: 7,
-            weight: [0, -1],
-            offset: [0, 60],
-        };
-        put_weighted_uni(&mut plane.target(), BLOCK, &filled(100, 8), &weights, 1, 8);
-        assert_eq!(first_sample(&plane), 10);
-    }
-
-    /// (8-277): log2Wd 6. a = 6400, b = 3200, w0 1, w1 3, o0 2, o1 3.
-    /// ( 6400 + 9600 + ( 6 << 6 ) ) >> 7 = 16384 >> 7 = 128.
-    #[test]
-    fn explicit_bi_follows_8_277() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        let weights = BlockWeights {
-            log2_wd: 6,
-            weight: [1, 3],
-            offset: [2, 3],
-        };
-        let (first, second) = (filled(100, 8), filled(50, 8));
-        put_weighted_bi(&mut plane.target(), BLOCK, [&first, &second], &weights, 8);
-        assert_eq!(first_sample(&plane), 128);
-    }
-
-    /// Weights of 1 << denominator with no offset equal the default process.
-    #[test]
-    fn unit_weights_equal_the_default_process() {
-        let weights = BlockWeights {
-            log2_wd: 6,
-            weight: [1, 1],
-            offset: [0, 0],
-        };
-        for (a, b) in [(100, 201), (3, 4), (255, 254)] {
-            let (first, second) = (filled(a, 8), filled(b, 8));
-            let mut with_default = Plane::<u8>::new(4, 4).unwrap();
-            let mut with_explicit = Plane::<u8>::new(4, 4).unwrap();
-            put_bi(&mut with_default.target(), BLOCK, [&first, &second], 8);
-            put_weighted_bi(
-                &mut with_explicit.target(),
-                BLOCK,
-                [&first, &second],
-                &weights,
-                8,
-            );
-            assert_eq!(first_sample(&with_default), first_sample(&with_explicit));
-        }
-    }
-
-    /// The result clips to the bit depth at both ends.
-    #[test]
-    fn results_clip() {
-        let mut plane = Plane::<u8>::new(4, 4).unwrap();
-        let high = BlockWeights {
-            log2_wd: 6,
-            weight: [4, 0],
-            offset: [0, 0],
-        };
-        put_weighted_uni(&mut plane.target(), BLOCK, &filled(100, 8), &high, 0, 8);
-        assert_eq!(first_sample(&plane), 255);
-        let low = BlockWeights {
-            log2_wd: 6,
-            weight: [-4, 0],
-            offset: [0, 0],
-        };
-        put_weighted_uni(&mut plane.target(), BLOCK, &filled(100, 8), &low, 0, 8);
-        assert_eq!(first_sample(&plane), 0);
-    }
+/// A splat of two 16-bit weights, as the second operand of a dot product on pairs.
+#[inline(always)]
+fn weight_pairs<V: Simd>(simd: V, pair: i32) -> i16x8<V> {
+    simd.splat_i32x4(pair).bitcast()
 }
+
+#[cfg(test)]
+#[path = "weight_tests.rs"]
+mod tests;

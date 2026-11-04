@@ -7,7 +7,9 @@ use crate::decode::cpu::dsp::inter::interp::{
 use crate::decode::cpu::dsp::inter::weight::{
     TargetBlock, TargetPlane, put_bi, put_uni, put_weighted_bi, put_weighted_uni,
 };
+use crate::decode::cpu::dsp::residual_add::add_residual_row;
 use crate::decode::cpu::dsp::sample::Sample;
+use crate::decode::cpu::dsp::simd::{Cpu, with_simd};
 use crate::decode::cpu::hevc::dpb::ref_lists::SliceRefs;
 use crate::decode::cpu::hevc::motion::context::{MotionContext, PbGeometry};
 use crate::decode::cpu::hevc::motion::field::MotionField;
@@ -181,6 +183,7 @@ impl Reconstructor {
             .map_or(records.tus.len(), |next| next.first_tu);
         let params = context.params;
         let max_value = (1i32 << params.bit_depth) - 1;
+        let cpu = Cpu::detected();
         for tu in records.tus.get(cu.first_tu..end).unwrap_or_default() {
             let tbs = records
                 .tbs
@@ -209,18 +212,19 @@ impl Reconstructor {
                 let (x, y) = (tb.x as usize / sub, tb.y as usize / sub);
                 let plane = picture.plane_mut(tb.c_idx);
                 let size = 1usize << tb.log2_size;
-                for line in 0..size {
-                    let target = plane
-                        .row_mut(y + line)
-                        .and_then(|samples| samples.get_mut(x..x + size));
-                    let Some(target) = target else {
-                        continue;
-                    };
-                    let added = self.residual.row(tb.log2_size, line);
-                    for (out, &value) in target.iter_mut().zip(added) {
-                        *out = S::clipped(out.to_i32() + value, max_value);
+                let residual = &self.residual;
+                with_simd!(cpu, simd => {
+                    for line in 0..size {
+                        let target = plane
+                            .row_mut(y + line)
+                            .and_then(|samples| samples.get_mut(x..x + size));
+                        let Some(target) = target else {
+                            continue;
+                        };
+                        let added = residual.row(tb.log2_size, line);
+                        add_residual_row(simd, target, added, max_value);
                     }
-                }
+                });
             }
         }
     }

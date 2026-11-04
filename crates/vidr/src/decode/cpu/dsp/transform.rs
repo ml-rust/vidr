@@ -1,21 +1,44 @@
 //! Inverse transforms and the transform bypass paths (8.6.2, 8.6.4, 8.6.5).
 //!
 //! A pass runs all rows of a square array at once: a row holds one frequency, and
-//! its columns are lanes. Each loop over lanes is plain integer arithmetic, so
-//! the compiler vectorises it. The result equals the matrix product of (8-317)
-//! exactly. Each matrix row is exactly even or odd about its centre.
+//! its columns are lanes. The lanes run on explicit 32-bit vectors. The result equals
+//! the matrix product of (8-317) exactly. Each matrix row is exactly even or odd about its centre.
+//!
+//! The extent of the coded levels bounds the DCT: a row past `max_y` and a column past
+//! `max_x` hold only zeros, and zeros transform to zeros.
+
+use fearless_simd::{Simd, SimdFrom, i32x4, i32x8};
 
 use super::scale::{COEFF_MAX, COEFF_MIN};
+use super::simd::{Cpu, with_simd};
 use super::transform_matrix::{DCT_COL0TO15, DST};
 
 /// Samples in the largest transform block.
 const BLOCK_SAMPLES: usize = 32 * 32;
 
+/// The location of the last level that is not zero, along each axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CoeffExtent {
+    /// The largest `xC` of a level.
+    pub(crate) max_x: usize,
+    /// The largest `yC` of a level.
+    pub(crate) max_y: usize,
+}
+
 /// One transform block of residual data, row by row with no gaps. A block of size
-/// `n` takes the first `n * n` entries.
+/// `n` takes the first `n * n` entries. The DCT reads each working array only where it
+/// wrote the same call, so a new block size clears none of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TbBlock {
     samples: [i32; BLOCK_SAMPLES],
+    /// The output of the column pass, by position and column.
+    columns: [i32; BLOCK_SAMPLES],
+    /// The input of the row pass, by frequency and row.
+    lanes: [i32; BLOCK_SAMPLES],
+    /// The output of the row pass, by position and row.
+    rows: [i32; BLOCK_SAMPLES],
+    /// The odd parts of one pass.
+    odd: [i32; BLOCK_SAMPLES],
 }
 
 impl TbBlock {
@@ -23,6 +46,10 @@ impl TbBlock {
     pub(crate) const fn new() -> Self {
         Self {
             samples: [0; BLOCK_SAMPLES],
+            columns: [0; BLOCK_SAMPLES],
+            lanes: [0; BLOCK_SAMPLES],
+            rows: [0; BLOCK_SAMPLES],
+            odd: [0; BLOCK_SAMPLES],
         }
     }
 
@@ -56,52 +83,154 @@ impl TbBlock {
     /// The first `n` rows as `n` arrays. `None` when they do not fit, and no
     /// size this module instantiates reaches that.
     fn square<const N: usize>(&mut self) -> Option<&mut [[i32; N]; N]> {
-        let (rows, _) = self.samples.as_chunks_mut::<N>();
-        rows.first_chunk_mut::<N>()
+        square_of(&mut self.samples)
     }
 }
 
-/// One DCT pass (8-317): `out[ i ][ lane ]` from `src[ j ][ lane ]`.
+/// The first `n` rows of `samples` as `n` arrays, or `None` when they do not fit.
+#[inline(always)]
+fn square_of<const N: usize>(samples: &mut [i32]) -> Option<&mut [[i32; N]; N]> {
+    let (rows, _) = samples.as_chunks_mut::<N>();
+    rows.first_chunk_mut::<N>()
+}
+
+/// `sums[ lane ] += coefficient * src[ lane ]` over the first `blocks` lane blocks. `BLOCK`
+/// is 4 or 8.
+#[inline(always)]
+fn add_scaled<V: Simd, const N: usize, const BLOCK: usize>(
+    simd: V,
+    sums: &mut [i32; N],
+    src: &[i32; N],
+    blocks: usize,
+    coefficient: i32,
+) {
+    if BLOCK == 8 {
+        let factor = simd.splat_i32x8(coefficient);
+        let targets = sums.as_chunks_mut::<8>().0;
+        let inputs = src.as_chunks::<8>().0;
+        for (target, input) in targets.iter_mut().zip(inputs).take(blocks) {
+            let product = simd.mul_i32x8(i32x8::simd_from(simd, *input), factor);
+            *target = simd
+                .add_i32x8(i32x8::simd_from(simd, *target), product)
+                .into();
+        }
+    } else {
+        let factor = simd.splat_i32x4(coefficient);
+        let targets = sums.as_chunks_mut::<4>().0;
+        let inputs = src.as_chunks::<4>().0;
+        for (target, input) in targets.iter_mut().zip(inputs).take(blocks) {
+            let product = simd.mul_i32x4(i32x4::simd_from(simd, *input), factor);
+            *target = simd
+                .add_i32x4(i32x4::simd_from(simd, *target), product)
+                .into();
+        }
+    }
+}
+
+/// `mirror = even - odd`, then `even = even + odd`, over the first `blocks` lane blocks.
+/// `BLOCK` is 4 or 8.
+#[inline(always)]
+fn butterfly<V: Simd, const N: usize, const BLOCK: usize>(
+    simd: V,
+    even: &mut [i32; N],
+    mirror: &mut [i32; N],
+    odd: &[i32; N],
+    blocks: usize,
+) {
+    if BLOCK == 8 {
+        let evens = even.as_chunks_mut::<8>().0;
+        let mirrors = mirror.as_chunks_mut::<8>().0;
+        let odds = odd.as_chunks::<8>().0;
+        for ((high, low), part) in evens.iter_mut().zip(mirrors).zip(odds).take(blocks) {
+            let (value, part) = (i32x8::simd_from(simd, *high), i32x8::simd_from(simd, *part));
+            *low = simd.sub_i32x8(value, part).into();
+            *high = simd.add_i32x8(value, part).into();
+        }
+    } else {
+        let evens = even.as_chunks_mut::<4>().0;
+        let mirrors = mirror.as_chunks_mut::<4>().0;
+        let odds = odd.as_chunks::<4>().0;
+        for ((high, low), part) in evens.iter_mut().zip(mirrors).zip(odds).take(blocks) {
+            let (value, part) = (i32x4::simd_from(simd, *high), i32x4::simd_from(simd, *part));
+            *low = simd.sub_i32x4(value, part).into();
+            *high = simd.add_i32x4(value, part).into();
+        }
+    }
+}
+
+/// (8-314) on the first `blocks` lane blocks of one row. `BLOCK` is 4 or 8.
+#[inline(always)]
+fn clip_row<V: Simd, const N: usize, const BLOCK: usize>(
+    simd: V,
+    row: &mut [i32; N],
+    blocks: usize,
+) {
+    if BLOCK == 8 {
+        let round = simd.splat_i32x8(64);
+        let (low, high) = (simd.splat_i32x8(COEFF_MIN), simd.splat_i32x8(COEFF_MAX));
+        for lanes in row.as_chunks_mut::<8>().0.iter_mut().take(blocks) {
+            let rounded = simd.add_i32x8(i32x8::simd_from(simd, *lanes), round);
+            *lanes = simd
+                .min_i32x8(simd.max_i32x8(simd.shr_i32x8(rounded, 7), low), high)
+                .into();
+        }
+    } else {
+        let round = simd.splat_i32x4(64);
+        let (low, high) = (simd.splat_i32x4(COEFF_MIN), simd.splat_i32x4(COEFF_MAX));
+        for lanes in row.as_chunks_mut::<4>().0.iter_mut().take(blocks) {
+            let rounded = simd.add_i32x4(i32x4::simd_from(simd, *lanes), round);
+            *lanes = simd
+                .min_i32x4(simd.max_i32x4(simd.shr_i32x4(rounded, 7), low), high)
+                .into();
+        }
+    }
+}
+
+/// One DCT pass (8-317): `out[ i ][ lane ]` from `src[ j ][ lane ]`, on the first
+/// `blocks` lane blocks of `BLOCK` lanes. `live` rows of `src` hold levels, and the
+/// others hold zeros and stay unread.
 ///
 /// The output of size `n` builds on the output of size `n / 2`. The even rows of
 /// the input make the even part, and the odd rows make the odd part. The even
 /// part stays in the first half of `out` until this step overwrites it.
-fn dct_pass<const N: usize>(src: &[[i32; N]; N], out: &mut [[i32; N]; N]) {
-    let mut live = [false; N];
-    for (flag, row) in live.iter_mut().zip(src) {
-        *flag = row.iter().any(|&value| value != 0);
-    }
-    for (target, &value) in out[0].iter_mut().zip(&src[0]) {
+#[inline(always)]
+fn dct_pass<V: Simd, const N: usize, const BLOCK: usize>(
+    simd: V,
+    src: &[[i32; N]; N],
+    out: &mut [[i32; N]; N],
+    odd: &mut [[i32; N]; N],
+    live: usize,
+    blocks: usize,
+) {
+    let lanes = (blocks * BLOCK).min(N);
+    for (target, &value) in out[0].iter_mut().zip(&src[0]).take(lanes) {
         *target = 64 * value;
     }
-    let mut odd = [[0i32; N]; N];
     let mut size = 2;
     while size <= N {
         let half = size / 2;
         let input_step = N / size;
         let matrix_step = 32 / size;
         for (position, sums) in odd.iter_mut().take(half).enumerate() {
-            *sums = [0; N];
+            sums[..lanes].fill(0);
             for frequency in (1..size).step_by(2) {
                 let row = frequency * input_step;
-                if !live[row] {
-                    continue;
+                if row >= live {
+                    break;
                 }
                 let coefficient = i32::from(DCT_COL0TO15[frequency * matrix_step][position]);
-                for (sum, &value) in sums.iter_mut().zip(&src[row]) {
-                    *sum += coefficient * value;
-                }
+                add_scaled::<V, N, BLOCK>(simd, sums, &src[row], blocks, coefficient);
             }
         }
         let (low, high) = out.split_at_mut(half);
-        for position in 0..half {
-            let mirror = &mut high[half - 1 - position];
-            let even = &mut low[position];
-            let sums = &odd[position];
-            for lane in 0..N {
-                mirror[lane] = even[lane] - sums[lane];
-                even[lane] += sums[lane];
-            }
+        for (position, sums) in odd.iter().take(half).enumerate() {
+            butterfly::<V, N, BLOCK>(
+                simd,
+                &mut low[position],
+                &mut high[half - 1 - position],
+                sums,
+                blocks,
+            );
         }
         size *= 2;
     }
@@ -120,7 +249,7 @@ fn dst_pass(src: &[[i32; 4]; 4], out: &mut [[i32; 4]; 4]) {
     }
 }
 
-/// The two passes of 8.6.4.1, with the clip of (8-314) between them.
+/// The two passes of 8.6.4.1, with the clip of (8-314) between them, for the DST.
 fn transform_2d<const N: usize>(
     block: &mut [[i32; N]; N],
     pass: impl Fn(&[[i32; N]; N], &mut [[i32; N]; N]),
@@ -143,21 +272,75 @@ fn transform_2d<const N: usize>(
     }
 }
 
-/// The DCT case of 8.6.4 on a block of `Log2( nTbS )` `log2_size`, 2 to 5. Other
-/// sizes leave the block unchanged. Coefficients stay within 16 bits.
-pub(crate) fn inverse_dct(log2_size: u32, block: &mut TbBlock) {
-    match log2_size {
-        2 => dct_square::<4>(block),
-        3 => dct_square::<8>(block),
-        4 => dct_square::<16>(block),
-        5 => dct_square::<32>(block),
-        _ => {}
-    }
+/// The DCT case of 8.6.4 on a block of `Log2( nTbS )` `log2_size`, 2 to 5, every level
+/// inside `extent`. Other sizes leave the block unchanged. Scaling (8.6.3) clips each
+/// level to `COEFF_MIN` to `COEFF_MAX`, so the input fits 16 bits.
+pub(crate) fn inverse_dct(log2_size: u32, block: &mut TbBlock, extent: CoeffExtent) {
+    inverse_dct_on(Cpu::detected(), log2_size, block, extent);
 }
 
-fn dct_square<const N: usize>(block: &mut TbBlock) {
-    if let Some(square) = block.square::<N>() {
-        transform_2d(square, dct_pass::<N>);
+/// [`inverse_dct`] compiled for `cpu`.
+fn inverse_dct_on(cpu: Cpu, log2_size: u32, block: &mut TbBlock, extent: CoeffExtent) {
+    with_simd!(cpu, simd => match log2_size {
+        2 => dct_square::<_, 4, 4>(simd, block, extent),
+        3 => dct_square::<_, 8, 8>(simd, block, extent),
+        4 => dct_square::<_, 16, 8>(simd, block, extent),
+        5 => dct_square::<_, 32, 8>(simd, block, extent),
+        _ => {}
+    });
+}
+
+/// The two passes of 8.6.4.1 inside `extent`. Lanes run in blocks of `BLOCK`, so a column
+/// count rounds up to a whole block.
+#[inline(always)]
+fn dct_square<V: Simd, const N: usize, const BLOCK: usize>(
+    simd: V,
+    block: &mut TbBlock,
+    extent: CoeffExtent,
+) {
+    let TbBlock {
+        samples,
+        columns,
+        lanes,
+        rows,
+        odd,
+    } = block;
+    let squares = (
+        square_of::<N>(samples),
+        square_of::<N>(columns),
+        square_of::<N>(lanes),
+        square_of::<N>(rows),
+        square_of::<N>(odd),
+    );
+    let (Some(samples), Some(columns), Some(lanes), Some(rows), Some(odd)) = squares else {
+        return;
+    };
+    let max_x = extent.max_x.min(N - 1);
+    let max_y = extent.max_y.min(N - 1);
+    if max_x == 0 && max_y == 0 {
+        // A lone DC level: 64 at every position of each pass.
+        let clipped = ((64 * samples[0][0] + 64) >> 7).clamp(COEFF_MIN, COEFF_MAX);
+        for row in samples.iter_mut() {
+            row.fill(64 * clipped);
+        }
+        return;
+    }
+    let column_blocks = max_x / BLOCK + 1;
+    let column_count = column_blocks * BLOCK;
+    dct_pass::<V, N, BLOCK>(simd, samples, columns, odd, max_y + 1, column_blocks);
+    for row in columns.iter_mut() {
+        clip_row::<V, N, BLOCK>(simd, row, column_blocks);
+    }
+    for (y, row) in columns.iter().enumerate() {
+        for (x, &value) in row.iter().enumerate().take(column_count) {
+            lanes[x][y] = value;
+        }
+    }
+    dct_pass::<V, N, BLOCK>(simd, lanes, rows, odd, max_x + 1, N / BLOCK);
+    for (x, row) in rows.iter().enumerate() {
+        for (y, &value) in row.iter().enumerate() {
+            samples[y][x] = value;
+        }
     }
 }
 
@@ -179,354 +362,28 @@ pub(crate) fn transform_skip(log2_size: u32, block: &mut TbBlock) {
 
 /// The rounding of (8-299), with `bdShift` from (8-295).
 pub(crate) fn round_residual(log2_size: u32, bit_depth: u32, block: &mut TbBlock) {
+    round_residual_on(Cpu::detected(), log2_size, bit_depth, block);
+}
+
+/// [`round_residual`] compiled for `cpu`.
+fn round_residual_on(cpu: Cpu, log2_size: u32, bit_depth: u32, block: &mut TbBlock) {
     let bd_shift = 20 - bit_depth;
-    let round = 1 << (bd_shift - 1);
-    for sample in block.samples.iter_mut().take(1 << (2 * log2_size.min(5))) {
-        *sample = (*sample + round) >> bd_shift;
-    }
+    let round = 1i32 << (bd_shift - 1);
+    let count = 1usize << (2 * log2_size.min(5));
+    let samples = block.samples.get_mut(..count).unwrap_or_default();
+    with_simd!(cpu, simd => {
+        let offset = simd.splat_i32x8(round);
+        let (blocks, rest) = samples.as_chunks_mut::<8>();
+        for lanes in blocks {
+            let sum = simd.add_i32x8(i32x8::simd_from(simd, *lanes), offset);
+            *lanes = simd.shr_i32x8(sum, bd_shift).into();
+        }
+        for sample in rest {
+            *sample = (*sample + round) >> bd_shift;
+        }
+    });
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `transMatrixCol16to31` (8-321), as printed.
-    const DCT_COL16TO31: [[i8; 16]; 32] = [
-        [
-            64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-        ],
-        [
-            -4, -13, -22, -31, -38, -46, -54, -61, -67, -73, -78, -82, -85, -88, -90, -90,
-        ],
-        [
-            -90, -87, -80, -70, -57, -43, -25, -9, 9, 25, 43, 57, 70, 80, 87, 90,
-        ],
-        [
-            13, 38, 61, 78, 88, 90, 85, 73, 54, 31, 4, -22, -46, -67, -82, -90,
-        ],
-        [
-            89, 75, 50, 18, -18, -50, -75, -89, -89, -75, -50, -18, 18, 50, 75, 89,
-        ],
-        [
-            -22, -61, -85, -90, -73, -38, 4, 46, 78, 90, 82, 54, 13, -31, -67, -88,
-        ],
-        [
-            -87, -57, -9, 43, 80, 90, 70, 25, -25, -70, -90, -80, -43, 9, 57, 87,
-        ],
-        [
-            31, 78, 90, 61, 4, -54, -88, -82, -38, 22, 73, 90, 67, 13, -46, -85,
-        ],
-        [
-            83, 36, -36, -83, -83, -36, 36, 83, 83, 36, -36, -83, -83, -36, 36, 83,
-        ],
-        [
-            -38, -88, -73, -4, 67, 90, 46, -31, -85, -78, -13, 61, 90, 54, -22, -82,
-        ],
-        [
-            -80, -9, 70, 87, 25, -57, -90, -43, 43, 90, 57, -25, -87, -70, 9, 80,
-        ],
-        [
-            46, 90, 38, -54, -90, -31, 61, 88, 22, -67, -85, -13, 73, 82, 4, -78,
-        ],
-        [
-            75, -18, -89, -50, 50, 89, 18, -75, -75, 18, 89, 50, -50, -89, -18, 75,
-        ],
-        [
-            -54, -85, 4, 88, 46, -61, -82, 13, 90, 38, -67, -78, 22, 90, 31, -73,
-        ],
-        [
-            -70, 43, 87, -9, -90, -25, 80, 57, -57, -80, 25, 90, 9, -87, -43, 70,
-        ],
-        [
-            61, 73, -46, -82, 31, 88, -13, -90, -4, 90, 22, -85, -38, 78, 54, -67,
-        ],
-        [
-            64, -64, -64, 64, 64, -64, -64, 64, 64, -64, -64, 64, 64, -64, -64, 64,
-        ],
-        [
-            -67, -54, 78, 38, -85, -22, 90, 4, -90, 13, 88, -31, -82, 46, 73, -61,
-        ],
-        [
-            -57, 80, 25, -90, 9, 87, -43, -70, 70, 43, -87, -9, 90, -25, -80, 57,
-        ],
-        [
-            73, 31, -90, 22, 78, -67, -38, 90, -13, -82, 61, 46, -88, 4, 85, -54,
-        ],
-        [
-            50, -89, 18, 75, -75, -18, 89, -50, -50, 89, -18, -75, 75, 18, -89, 50,
-        ],
-        [
-            -78, -4, 82, -73, -13, 85, -67, -22, 88, -61, -31, 90, -54, -38, 90, -46,
-        ],
-        [
-            -43, 90, -57, -25, 87, -70, -9, 80, -80, 9, 70, -87, 25, 57, -90, 43,
-        ],
-        [
-            82, -22, -54, 90, -61, -13, 78, -85, 31, 46, -90, 67, 4, -73, 88, -38,
-        ],
-        [
-            36, -83, 83, -36, -36, 83, -83, 36, 36, -83, 83, -36, -36, 83, -83, 36,
-        ],
-        [
-            -85, 46, 13, -67, 90, -73, 22, 38, -82, 88, -54, -4, 61, -90, 78, -31,
-        ],
-        [
-            -25, 70, -90, 80, -43, -9, 57, -87, 87, -57, 9, 43, -80, 90, -70, 25,
-        ],
-        [
-            88, -67, 31, 13, -54, 82, -90, 78, -46, 4, 38, -73, 90, -85, 61, -22,
-        ],
-        [
-            18, -50, 75, -89, 89, -75, 50, -18, -18, 50, -75, 89, -89, 75, -50, 18,
-        ],
-        [
-            -90, 82, -67, 46, -22, -4, 31, -54, 73, -85, 90, -88, 78, -61, 38, -13,
-        ],
-        [
-            -9, 25, -43, 57, -70, 80, -87, 90, -90, 87, -80, 70, -57, 43, -25, 9,
-        ],
-        [
-            90, -90, 88, -85, 82, -78, 73, -67, 61, -54, 46, -38, 31, -22, 13, -4,
-        ],
-    ];
-
-    /// `transMatrix[ position ][ frequency ]` of (8-318) and (8-320).
-    fn matrix(position: usize, frequency: usize) -> i32 {
-        if position < 16 {
-            i32::from(DCT_COL0TO15[frequency][position])
-        } else {
-            i32::from(DCT_COL16TO31[frequency][position - 16])
-        }
-    }
-
-    /// The matrix product of (8-317), written as the specification prints it.
-    fn direct_dct(size: usize, input: &[i32]) -> Vec<i32> {
-        let step = 32 / size;
-        (0..size)
-            .map(|position| {
-                input
-                    .iter()
-                    .enumerate()
-                    .map(|(frequency, &value)| matrix(position, frequency * step) * value)
-                    .sum::<i32>()
-            })
-            .collect()
-    }
-
-    /// The matrix product of (8-315).
-    fn direct_dst(input: &[i32]) -> Vec<i32> {
-        (0..4)
-            .map(|position| {
-                input
-                    .iter()
-                    .enumerate()
-                    .map(|(frequency, &value)| DST[frequency][position] * value)
-                    .sum::<i32>()
-            })
-            .collect()
-    }
-
-    /// The two passes of 8.6.4.1 in direct form. Input and output are row by row.
-    fn direct_2d(
-        size: usize,
-        coefficients: &[i32],
-        one_dimension: impl Fn(&[i32]) -> Vec<i32>,
-    ) -> Vec<i32> {
-        let mut intermediate = vec![0; size * size];
-        for x in 0..size {
-            let column: Vec<i32> = (0..size).map(|y| coefficients[y * size + x]).collect();
-            for (y, value) in one_dimension(&column).into_iter().enumerate() {
-                intermediate[y * size + x] = ((value + 64) >> 7).clamp(COEFF_MIN, COEFF_MAX);
-            }
-        }
-        let mut output = Vec::with_capacity(size * size);
-        for row in intermediate.chunks(size) {
-            output.extend(one_dimension(row));
-        }
-        output
-    }
-
-    struct Xorshift(u64);
-
-    impl Xorshift {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-
-        /// A coefficient: often zero, sometimes small, sometimes at full range.
-        fn coefficient(&mut self) -> i32 {
-            let value = self.next();
-            match value % 4 {
-                0 | 1 => 0,
-                2 => ((value >> 8) % 201) as i32 - 100,
-                _ => ((value >> 8) % 65_536) as i32 - 32_768,
-            }
-        }
-    }
-
-    fn block_from(log2_size: u32, values: &[i32]) -> TbBlock {
-        let mut block = TbBlock::new();
-        let size = 1usize << log2_size;
-        for (index, &value) in values.iter().enumerate() {
-            block.set(log2_size, index % size, index / size, value);
-        }
-        block
-    }
-
-    fn block_rows(log2_size: u32, block: &TbBlock) -> Vec<i32> {
-        let size = 1usize << log2_size;
-        (0..size * size)
-            .map(|index| block.get(log2_size, index % size, index / size))
-            .collect()
-    }
-
-    /// Every printed value of (8-319) and (8-321) satisfies the symmetry the
-    /// passes rely on.
-    #[test]
-    fn matrix_rows_are_even_or_odd_about_their_centre() {
-        for frequency in 0..32 {
-            let sign = if frequency & 1 == 0 { 1 } else { -1 };
-            for position in 0..16 {
-                assert_eq!(
-                    matrix(31 - position, frequency),
-                    sign * matrix(position, frequency),
-                    "frequency {frequency}, position {position}"
-                );
-            }
-        }
-    }
-
-    /// A row of a smaller transform is a row of the 32-point matrix.
-    #[test]
-    fn matrix_holds_the_known_values() {
-        assert_eq!(matrix(0, 0), 64);
-        assert_eq!(matrix(31, 0), 64);
-        assert_eq!(matrix(0, 1), 90);
-        assert_eq!(matrix(31, 1), -90);
-        assert_eq!(matrix(0, 8), 83);
-        assert_eq!(matrix(1, 8), 36);
-        assert_eq!(matrix(15, 31), -90);
-        assert_eq!(matrix(16, 31), 90);
-    }
-
-    #[test]
-    fn dct_equals_the_direct_form_on_random_blocks() {
-        let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
-        for log2_size in 2..=5u32 {
-            let size = 1usize << log2_size;
-            for _ in 0..40 {
-                let values: Vec<i32> = (0..size * size).map(|_| rng.coefficient()).collect();
-                let expected = direct_2d(size, &values, |input| direct_dct(size, input));
-                let mut block = block_from(log2_size, &values);
-                inverse_dct(log2_size, &mut block);
-                assert_eq!(block_rows(log2_size, &block), expected, "size {size}");
-            }
-        }
-    }
-
-    #[test]
-    fn dct_equals_the_direct_form_on_every_single_coefficient() {
-        for log2_size in 2..=5u32 {
-            let size = 1usize << log2_size;
-            for index in 0..size * size {
-                let mut values = vec![0; size * size];
-                values[index] = -32_768;
-                let expected = direct_2d(size, &values, |input| direct_dct(size, input));
-                let mut block = block_from(log2_size, &values);
-                inverse_dct(log2_size, &mut block);
-                assert_eq!(block_rows(log2_size, &block), expected);
-            }
-        }
-    }
-
-    #[test]
-    fn dct_at_full_range_stays_in_32_bits() {
-        for log2_size in 2..=5u32 {
-            let size = 1usize << log2_size;
-            let values: Vec<i32> = (0..size * size)
-                .map(|index| if index & 1 == 0 { 32_767 } else { -32_768 })
-                .collect();
-            let expected = direct_2d(size, &values, |input| direct_dct(size, input));
-            let mut block = block_from(log2_size, &values);
-            inverse_dct(log2_size, &mut block);
-            assert_eq!(block_rows(log2_size, &block), expected);
-        }
-    }
-
-    #[test]
-    fn dst_equals_the_direct_form_on_random_blocks() {
-        let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
-        for _ in 0..200 {
-            let values: Vec<i32> = (0..16).map(|_| rng.coefficient()).collect();
-            let expected = direct_2d(4, &values, direct_dst);
-            let mut block = block_from(2, &values);
-            inverse_dst(&mut block);
-            assert_eq!(block_rows(2, &block), expected);
-        }
-    }
-
-    /// Worked by hand. Column pass: 64 * 64 = 4096 in column 0, and
-    /// ( 4096 + 64 ) >> 7 = 32. Row pass: 32 * 64 = 2048 everywhere.
-    #[test]
-    fn a_dc_coefficient_gives_a_flat_block() {
-        for log2_size in 2..=5u32 {
-            let size = 1usize << log2_size;
-            let mut block = TbBlock::new();
-            block.set(log2_size, 0, 0, 64);
-            inverse_dct(log2_size, &mut block);
-            assert_eq!(block_rows(log2_size, &block), vec![2048; size * size]);
-            round_residual(log2_size, 8, &mut block);
-            assert_eq!(block_rows(log2_size, &block), vec![1; size * size]);
-        }
-    }
-
-    /// Worked by hand. A lone first coefficient `c` follows the first DST basis
-    /// in both directions: 29, 55, 74, 84. Take `c` = 128. The column pass gives
-    /// 29 * 128 = 3712, and ( 3712 + 64 ) >> 7 = 29. The others give 55, 74, 84.
-    /// The row pass multiplies by the basis again.
-    #[test]
-    fn the_first_dst_coefficient_follows_the_first_basis() {
-        let mut block = TbBlock::new();
-        block.set(2, 0, 0, 128);
-        inverse_dst(&mut block);
-        let basis = [29, 55, 74, 84];
-        for (y, &vertical) in basis.iter().enumerate() {
-            for (x, &horizontal) in basis.iter().enumerate() {
-                assert_eq!(block.get(2, x, y), vertical * horizontal, "({x}, {y})");
-            }
-        }
-    }
-
-    #[test]
-    fn transform_skip_shifts_by_ts_shift() {
-        let mut block = TbBlock::new();
-        block.set(2, 1, 2, -3);
-        block.set(2, 3, 3, 5);
-        transform_skip(2, &mut block);
-        assert_eq!(block.get(2, 1, 2), -3 << 7);
-        assert_eq!(block.get(2, 3, 3), 5 << 7);
-        // At 8 bits: ( 640 + 2048 ) >> 12 = 0. At 10 bits, bdShift 10:
-        // ( 640 + 512 ) >> 10 = 1, and ( -384 + 512 ) >> 10 = 0.
-        let mut ten_bit = block.clone();
-        round_residual(2, 10, &mut ten_bit);
-        assert_eq!(ten_bit.get(2, 3, 3), 1);
-        assert_eq!(ten_bit.get(2, 1, 2), 0);
-        round_residual(2, 8, &mut block);
-        assert_eq!(block.get(2, 3, 3), 0);
-    }
-
-    #[test]
-    fn clear_covers_only_the_block() {
-        let mut block = TbBlock::new();
-        block.set(5, 31, 31, 7);
-        block.set(2, 3, 3, 9);
-        block.clear(2);
-        assert_eq!(block.get(2, 3, 3), 0);
-        assert_eq!(block.get(5, 31, 31), 7);
-        block.clear(5);
-        assert_eq!(block.get(5, 31, 31), 0);
-    }
-}
+#[path = "transform_tests.rs"]
+mod tests;

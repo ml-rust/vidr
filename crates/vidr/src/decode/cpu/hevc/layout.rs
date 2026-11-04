@@ -145,12 +145,18 @@ impl PicLayout {
     /// `MinTbAddrZs` of the minimum block covering a luma location (6-10).
     pub(crate) fn min_tb_addr_zs(&self, x: u32, y: u32) -> u64 {
         let ctb_bits = self.ctb_log2 - self.min_tb_log2;
-        let mask = (1u32 << ctb_bits) - 1;
         let ts = self.rs_to_ts(self.ctb_rs_at(x, y)).unwrap_or(0);
+        (u64::from(ts) << (2 * ctb_bits)) + self.min_tb_addr_in_ctb(x, y)
+    }
+
+    /// The part of `MinTbAddrZs` from the location inside its CTB. Two locations in one
+    /// CTB compare the same through this part alone.
+    pub(crate) fn min_tb_addr_in_ctb(&self, x: u32, y: u32) -> u64 {
+        let ctb_bits = self.ctb_log2 - self.min_tb_log2;
+        let mask = (1u32 << ctb_bits) - 1;
         let x_in_ctb = ((x >> self.min_tb_log2) & mask) as usize;
         let y_in_ctb = ((y >> self.min_tb_log2) & mask) as usize;
-        let inner = u64::from(SPREAD[x_in_ctb & 15]) + 2 * u64::from(SPREAD[y_in_ctb & 15]);
-        (u64::from(ts) << (2 * ctb_bits)) + inner
+        u64::from(SPREAD[x_in_ctb & 15]) + 2 * u64::from(SPREAD[y_in_ctb & 15])
     }
 }
 

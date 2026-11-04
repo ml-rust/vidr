@@ -165,11 +165,15 @@ impl ParseMaps {
         if x >= layout.width() || y >= layout.height() {
             return false;
         }
+        let ctb_nb = layout.ctb_rs_at(x, y);
+        let ctb_current = layout.ctb_rs_at(current.0, current.1);
+        if ctb_nb == ctb_current {
+            return layout.min_tb_addr_in_ctb(x, y)
+                <= layout.min_tb_addr_in_ctb(current.0, current.1);
+        }
         if layout.min_tb_addr_zs(x, y) > layout.min_tb_addr_zs(current.0, current.1) {
             return false;
         }
-        let ctb_nb = layout.ctb_rs_at(x, y);
-        let ctb_current = layout.ctb_rs_at(current.0, current.1);
         self.ctb_slice.get(ctb_nb) == self.ctb_slice.get(ctb_current)
             && layout.tile_id(ctb_nb) == layout.tile_id(ctb_current)
     }
@@ -222,6 +226,11 @@ impl ParseMaps {
             .get(self.cb_index(x, y))
             .copied()
             .unwrap_or(false)
+    }
+
+    /// True when any block holds the flag of [`Self::no_filter`].
+    pub(crate) fn any_no_filter(&self) -> bool {
+        self.no_filter.iter().any(|&flag| flag)
     }
 
     /// Records the prediction mode and in-loop filter flag of a coding unit.

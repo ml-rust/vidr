@@ -3,6 +3,7 @@
 use crate::decode::cpu::hevc::error::HevcError;
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::motion::field::MotionField;
+use crate::decode::cpu::hevc::motion::types::PbMotion;
 use crate::decode::cpu::hevc::params::CodingParams;
 use crate::decode::cpu::hevc::syntax::maps::{ParseMaps, filled};
 use crate::decode::cpu::hevc::syntax::records::{
@@ -48,6 +49,15 @@ struct InterEdge {
     length: u32,
     /// True when the edge is a transform block edge.
     transform: bool,
+}
+
+/// The last motion comparison along one edge. Long edges repeat the same two blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MotionPair {
+    p: PbMotion,
+    q: PbMotion,
+    /// The reference table of each side.
+    tables: (Option<u32>, Option<u32>),
 }
 
 /// What 8.7.2.4 reads besides the coded map.
@@ -155,6 +165,17 @@ impl EdgeMap {
                 self.any = true;
             }
         }
+    }
+
+    /// The rows of vertical sections, one entry per column of the 8x8 grid.
+    pub(crate) fn vertical_rows(&self) -> impl Iterator<Item = &[u8]> {
+        self.vertical.chunks_exact(self.vertical_stride().max(1))
+    }
+
+    /// The rows of horizontal sections, one entry per 4 luma samples.
+    pub(crate) fn horizontal_rows(&self) -> impl Iterator<Item = &[u8]> {
+        self.horizontal
+            .chunks_exact(self.horizontal_stride().max(1))
     }
 
     /// `bS` of the vertical section at `( x, y )`, each in luma samples.
@@ -309,26 +330,29 @@ impl EdgeMap {
         if across & ((1 << GRID_LOG2) - 1) != 0 || across == 0 {
             return;
         }
+        let mut last_pair = None;
         for offset in (0..edge.length).step_by(1 << SECTION_LOG2) {
             let (q, p) = if edge.vertical {
                 ((edge.x, edge.y + offset), (edge.x - 1, edge.y + offset))
             } else {
                 ((edge.x + offset, edge.y), (edge.x + offset, edge.y - 1))
             };
-            let strength = self.section_strength(input, p, q, edge.transform);
+            let strength = self.section_strength(input, p, q, edge.transform, &mut last_pair);
             if strength > 0 {
                 self.raise_section(edge.vertical, q, strength);
             }
         }
     }
 
-    /// The conditions of 8.7.2.4 for one section with sides `p` and `q`.
+    /// The conditions of 8.7.2.4 for one section with sides `p` and `q`. `last_pair`
+    /// holds the last motion comparison of this edge, with its result.
     fn section_strength(
         &self,
         input: &StrengthInput<'_>,
         p: (u32, u32),
         q: (u32, u32),
         transform: bool,
+        last_pair: &mut Option<(MotionPair, u8)>,
     ) -> u8 {
         if input.maps.cu_intra(p.0, p.1) || input.maps.cu_intra(q.0, q.1) {
             return BS_INTRA;
@@ -336,14 +360,35 @@ impl EdgeMap {
         if transform && (self.is_coded(p.0, p.1) || self.is_coded(q.0, q.1)) {
             return BS_CODED;
         }
-        let side = |at: (u32, u32)| {
-            let motion = input.field.at(at.0, at.1);
-            EdgeSide {
-                motion,
-                ref_poc: input.field.ref_pocs(at.0, at.1, &motion),
-            }
+        let pair = MotionPair {
+            p: input.field.at(p.0, p.1),
+            q: input.field.at(q.0, q.1),
+            tables: (
+                input.field.table_at(p.0, p.1),
+                input.field.table_at(q.0, q.1),
+            ),
         };
-        motion_strength(&side(p), &side(q))
+        // One motion on one table names the same pictures and vectors on both sides.
+        if pair.p == pair.q && pair.tables.0 == pair.tables.1 {
+            return 0;
+        }
+        if let Some((last, strength)) = *last_pair
+            && last == pair
+        {
+            return strength;
+        }
+        let strength = motion_strength(
+            &EdgeSide {
+                motion: pair.p,
+                ref_poc: input.field.ref_pocs(p.0, p.1, &pair.p),
+            },
+            &EdgeSide {
+                motion: pair.q,
+                ref_poc: input.field.ref_pocs(q.0, q.1, &pair.q),
+            },
+        );
+        *last_pair = Some((pair, strength));
+        strength
     }
 
     /// Raises `bS` of the section with `q0` at `q`.

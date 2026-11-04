@@ -1,7 +1,10 @@
 //! The sample adaptive offset process on a whole picture (8.7.3).
 
+use fearless_simd::Simd;
+
 use crate::decode::cpu::dsp::sample::Sample;
-use crate::decode::cpu::dsp::sao::{apply_band, apply_edge, band_table};
+use crate::decode::cpu::dsp::sao::{band_run, edge_run};
+use crate::decode::cpu::dsp::simd::{Cpu, with_simd};
 use crate::decode::cpu::hevc::layout::PicLayout;
 use crate::decode::cpu::hevc::params::CodingParams;
 use crate::decode::cpu::hevc::picture::{Picture, Plane};
@@ -100,17 +103,26 @@ fn sao_ctb<S: Sample>(
     match values.kind {
         SaoKind::Off => {}
         SaoKind::Band(position) => {
-            let table = band_table(position, &values.offsets);
-            for y in area.y0..area.y1 {
-                if let (Some(from), Some(to)) = (
-                    source.row(y).and_then(|row| row.get(area.x0..area.x1)),
-                    target
-                        .row_mut(y)
-                        .and_then(|row| row.get_mut(area.x0..area.x1)),
-                ) {
-                    apply_band(from, to, &table, bit_depth - 5, max_value);
+            with_simd!(Cpu::detected(), simd => {
+                for y in area.y0..area.y1 {
+                    if let (Some(from), Some(to)) = (
+                        source.row(y).and_then(|row| row.get(area.x0..area.x1)),
+                        target
+                            .row_mut(y)
+                            .and_then(|row| row.get_mut(area.x0..area.x1)),
+                    ) {
+                        band_run(
+                            simd,
+                            from,
+                            to,
+                            position,
+                            &values.offsets,
+                            bit_depth - 5,
+                            max_value,
+                        );
+                    }
                 }
-            }
+            });
         }
         SaoKind::Edge(class) => {
             let allowed = allowed_neighbours(context, rs);
@@ -121,9 +133,11 @@ fn sao_ctb<S: Sample>(
                 offsets: &values.offsets,
                 max_value,
             };
-            for y in area.y0..area.y1 {
-                edge_row(source, target, y, &edge);
-            }
+            with_simd!(Cpu::detected(), simd => {
+                for y in area.y0..area.y1 {
+                    edge_row(simd, source, target, y, &edge);
+                }
+            });
         }
     }
     restore_unfiltered(source, target, context, &area);
@@ -183,49 +197,103 @@ struct EdgeRow<'a> {
     max_value: i32,
 }
 
-/// One row of edge offsets. A sample's neighbours leave the CTB's columns only in
-/// the first and last column, so three runs cover the row.
-fn edge_row<S: Sample>(source: &Plane<S>, target: &mut Plane<S>, y: usize, edge: &EdgeRow<'_>) {
+/// One row of edge offsets. A sample's neighbours leave the CTB's columns only in the
+/// first and last column, and the flags hold for a whole row, so the row splits only where
+/// a flag differs. A sample with a neighbour that is not allowed keeps its deblocked
+/// value: `target` holds that value already.
+#[inline(always)]
+fn edge_row<V: Simd, S: Sample>(
+    simd: V,
+    source: &Plane<S>,
+    target: &mut Plane<S>,
+    y: usize,
+    edge: &EdgeRow<'_>,
+) {
     let area = edge.area;
+    if area.x1 <= area.x0 {
+        return;
+    }
     let [(h0, v0), (h1, v1)] = edge.neighbours;
-    let row_a = y as isize + v0;
-    let row_b = y as isize + v1;
-    let cell_y_a = side_of(row_a, area.y0, area.y1);
-    let cell_y_b = side_of(row_b, area.y0, area.y1);
-    let cell = |x: isize, cell_y: isize| {
-        let cell_x = side_of(x, area.x0, area.x1);
-        edge.allowed[((cell_y + 1) * 3 + cell_x + 1) as usize]
-    };
-    let mut run = |start: usize, end: usize| {
-        if start >= end
-            || !cell(start as isize + h0, cell_y_a)
-            || !cell(end as isize - 1 + h0, cell_y_a)
-            || !cell(start as isize + h1, cell_y_b)
-            || !cell(end as isize - 1 + h1, cell_y_b)
-        {
-            return;
-        }
-        let slices = (
-            source.row(y).and_then(|row| row.get(start..end)),
-            neighbour_run(source, row_a, start, end, h0),
-            neighbour_run(source, row_b, start, end, h1),
-            target.row_mut(y).and_then(|row| row.get_mut(start..end)),
-        );
-        if let (Some(from), Some(first), Some(second), Some(to)) = slices {
-            apply_edge(from, first, second, to, edge.offsets, edge.max_value);
-        }
-    };
+    let rows = (y as isize + v0, y as isize + v1);
+    let cell_a = (side_of(rows.0, area.y0, area.y1) + 1) * 3;
+    let cell_b = (side_of(rows.1, area.y0, area.y1) + 1) * 3;
+    let span = EdgeSpan { y, rows, h0, h1 };
+    let inner_ok = edge.allowed[(cell_a + 1) as usize] && edge.allowed[(cell_b + 1) as usize];
     if h0 == 0 {
-        run(area.x0, area.x1);
-    } else {
-        run(area.x0, area.x0 + 1);
-        run(area.x0 + 1, area.x1 - 1);
-        run(area.x1 - 1, area.x1);
+        if inner_ok {
+            edge_span(simd, source, target, &span, (area.x0, area.x1), edge);
+        }
+        return;
+    }
+    let cell = |x: isize, row_cell: isize| {
+        edge.allowed[(row_cell + side_of(x, area.x0, area.x1) + 1) as usize]
+    };
+    let column_ok = |x: usize| cell(x as isize + h0, cell_a) && cell(x as isize + h1, cell_b);
+    let (first, last) = (area.x0, area.x1 - 1);
+    let (first_ok, last_ok) = (column_ok(first), column_ok(last));
+    // Columns between the first and last read neighbours inside the CTB's columns.
+    let has_inner = last > first + 1;
+    if first_ok && last_ok && (inner_ok || !has_inner) {
+        edge_span(simd, source, target, &span, (first, area.x1), edge);
+        return;
+    }
+    if first_ok {
+        edge_span(simd, source, target, &span, (first, first + 1), edge);
+    }
+    if inner_ok && has_inner {
+        edge_span(simd, source, target, &span, (first + 1, last), edge);
+    }
+    if last_ok && last > first {
+        edge_span(simd, source, target, &span, (last, last + 1), edge);
+    }
+}
+
+/// The row and neighbours of one row of edge offsets.
+#[derive(Clone, Copy, Debug)]
+struct EdgeSpan {
+    y: usize,
+    /// The rows of the two neighbours.
+    rows: (isize, isize),
+    /// `hPos` of the first neighbour.
+    h0: isize,
+    /// `hPos` of the second neighbour.
+    h1: isize,
+}
+
+/// Edge offsets on the columns `columns.0` to `columns.1 - 1` of one row.
+#[inline(always)]
+fn edge_span<V: Simd, S: Sample>(
+    simd: V,
+    source: &Plane<S>,
+    target: &mut Plane<S>,
+    span: &EdgeSpan,
+    columns: (usize, usize),
+    edge: &EdgeRow<'_>,
+) {
+    let (start, end) = columns;
+    let slices = (
+        source.row(span.y).and_then(|row| row.get(start..end)),
+        neighbour_run(source, span.rows.0, start, end, span.h0),
+        neighbour_run(source, span.rows.1, start, end, span.h1),
+        target
+            .row_mut(span.y)
+            .and_then(|row| row.get_mut(start..end)),
+    );
+    if let (Some(from), Some(first), Some(second), Some(to)) = slices {
+        edge_run(
+            simd,
+            from,
+            (first, second),
+            to,
+            edge.offsets,
+            edge.max_value,
+        );
     }
 }
 
 /// The samples of row `y` at columns `start + h` to `end + h`, or `None` outside the
 /// plane.
+#[inline(always)]
 fn neighbour_run<S: Sample>(
     plane: &Plane<S>,
     y: isize,

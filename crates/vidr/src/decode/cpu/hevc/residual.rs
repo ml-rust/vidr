@@ -4,7 +4,7 @@ use super::scaling::{FLAT_FACTOR, ScalingFactors, matrix_id};
 use super::syntax::records::Coeff;
 use crate::decode::cpu::dsp::scale::ScaleStep;
 use crate::decode::cpu::dsp::transform::{
-    TbBlock, inverse_dct, inverse_dst, round_residual, transform_skip,
+    CoeffExtent, TbBlock, inverse_dct, inverse_dst, round_residual, transform_skip,
 };
 
 /// What 8.6.2 reads for one transform block.
@@ -41,19 +41,19 @@ pub(crate) fn residual_samples(input: &ResidualInput<'_>, block: &mut TbBlock) {
         }
         return;
     }
-    scale_levels(input, block);
+    let extent = scale_levels(input, block);
     if input.transform_skip {
         transform_skip(log2_size, block);
     } else if input.intra && log2_size == 2 && input.c_idx == 0 {
         inverse_dst(block);
     } else {
-        inverse_dct(log2_size, block);
+        inverse_dct(log2_size, block, extent);
     }
     round_residual(log2_size, input.bit_depth, block);
 }
 
-/// The scaling process (8.6.3).
-fn scale_levels(input: &ResidualInput<'_>, block: &mut TbBlock) {
+/// The scaling process (8.6.3). Returns the extent of the levels it wrote.
+fn scale_levels(input: &ResidualInput<'_>, block: &mut TbBlock) -> CoeffExtent {
     let log2_size = input.log2_size;
     let step = ScaleStep::new(input.qp, input.bit_depth, log2_size);
     // A transform skip block above 4x4 takes the flat factor. Main has no such
@@ -63,13 +63,17 @@ fn scale_levels(input: &ResidualInput<'_>, block: &mut TbBlock) {
         .factors
         .filter(|_| !flat)
         .map(|factors| factors.matrix(log2_size, matrix_id(input.intra, input.c_idx)));
+    let mut extent = CoeffExtent { max_x: 0, max_y: 0 };
     for coeff in input.coeffs {
         let (x, y) = (usize::from(coeff.x), usize::from(coeff.y));
+        extent.max_x = extent.max_x.max(x);
+        extent.max_y = extent.max_y.max(y);
         let m = matrix
             .and_then(|matrix| matrix.get((y << log2_size) + x))
             .map_or(FLAT_FACTOR, |&factor| i32::from(factor));
         block.set(log2_size, x, y, step.scale(i32::from(coeff.level), m));
     }
+    extent
 }
 
 #[cfg(test)]

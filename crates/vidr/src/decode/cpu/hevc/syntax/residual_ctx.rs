@@ -2,10 +2,10 @@
 
 /// `ctxIdxMap` (Table 9-50). The table stops at entry 14, because position 15 of
 /// a 4x4 block is never parsed. Entry 15 only keeps the array a power of two.
-const CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+static CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
 
 /// `sigCtx` of (9-45) to (9-48), by `prevCsbf` and `( yP << 2 ) + xP`.
-const SIG_CTX_PATTERN: [[u8; 16]; 4] = [
+static SIG_CTX_PATTERN: [[u8; 16]; 4] = [
     sig_pattern(0),
     sig_pattern(1),
     sig_pattern(2),
@@ -77,19 +77,19 @@ pub(super) const fn coded_sub_block_ctx_inc(right: bool, below: bool, c_idx: usi
 /// `transform_skip_context_enabled_flag` case, which is refused.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SigCtx {
-    log2_size: u32,
-    prev_csbf: usize,
-    /// True for the sub-block at `( 0, 0 )`.
-    first_sub_block: bool,
+    /// `sigCtx` before its additions, by `( yP << 2 ) + xP`.
+    pattern: &'static [u8; 16],
+    /// The additions of (9-49) to (9-53), and 27 for chroma (9-55).
+    offset: usize,
+    /// True when location `( 0, 0 )` takes (9-42): 0, and the chroma addition only.
+    dc_alone: bool,
     /// 27 for chroma (9-55).
     component_offset: usize,
-    /// The additions of (9-49) to (9-53).
-    pattern_offset: usize,
 }
 
 impl SigCtx {
     /// The context of sub-block `( x_s, y_s )`, with `prevCsbf` from (9-43, 9-44).
-    pub(super) const fn new(
+    pub(super) fn new(
         log2_size: u32,
         c_idx: usize,
         scan_idx: usize,
@@ -97,6 +97,16 @@ impl SigCtx {
         prev_csbf: usize,
     ) -> Self {
         let first_sub_block = sub_block.0 + sub_block.1 == 0;
+        let component_offset = if c_idx == 0 { 0 } else { 27 };
+        if log2_size == 2 {
+            // In a 4x4 block, xC and yC equal xP and yP (9-41).
+            return Self {
+                pattern: &CTX_IDX_MAP,
+                offset: component_offset,
+                dc_alone: false,
+                component_offset,
+            };
+        }
         let pattern_offset = if c_idx == 0 {
             let position = if first_sub_block { 0 } else { 3 };
             let size = if log2_size == 3 {
@@ -111,28 +121,22 @@ impl SigCtx {
             12
         };
         Self {
-            log2_size,
-            prev_csbf,
-            first_sub_block,
-            component_offset: if c_idx == 0 { 0 } else { 27 },
-            pattern_offset,
+            pattern: &SIG_CTX_PATTERN[prev_csbf & 3],
+            offset: pattern_offset + component_offset,
+            dc_alone: first_sub_block,
+            component_offset,
         }
     }
 
     /// `ctxInc` at inner location `( x_p, y_p )`, each 0 to 3.
     #[inline]
-    pub(super) const fn inc(&self, x_p: usize, y_p: usize) -> usize {
+    pub(super) fn inc(&self, x_p: usize, y_p: usize) -> usize {
         let at = ((y_p & 3) << 2) + (x_p & 3);
-        let sig_ctx = if self.log2_size == 2 {
-            // In a 4x4 block, xC and yC equal xP and yP (9-41).
-            CTX_IDX_MAP[at] as usize
-        } else if self.first_sub_block && at == 0 {
+        if self.dc_alone && at == 0 {
             // (9-42).
-            0
-        } else {
-            SIG_CTX_PATTERN[self.prev_csbf & 3][at] as usize + self.pattern_offset
-        };
-        sig_ctx + self.component_offset
+            return self.component_offset;
+        }
+        self.pattern[at] as usize + self.offset
     }
 }
 
