@@ -35,6 +35,10 @@ Every `key=value` line of the meta file comes from ffprobe or from the recipe:
   separated, with the edit list applied.
 - `extradata_adler32`: the Adler-32 of the codec config, in hexadecimal.
 
+Fixtures whose names start with `remux_` carry audio, subtitles, chapters,
+metadata and a video start offset for the output tests. `refuse_` fixtures hold
+a stream one output cannot hold.
+
 The tests read `VIDR_MEDIA_FIXTURES` first, then the default directory.
 """
 
@@ -290,6 +294,98 @@ def codec_fixtures(writer, available):
         print("skipping av1 fixtures: ffmpeg has no AV1 encoder")
 
 
+def remux_inputs(scratch):
+    """The audio, subtitle and chapter inputs of the remux fixtures."""
+    srt = scratch / "cues.srt"
+    srt.write_text(
+        "1\n00:00:00,200 --> 00:00:00,700\nfirst cue\n\n"
+        "2\n00:00:01,000 --> 00:00:01,400\nsecond cue\n"
+    )
+    ass = scratch / "cues.ass"
+    ffmpeg("-i", srt, ass)
+    meta = scratch / "chapters.ffmeta"
+    meta.write_text(
+        ";FFMETADATA1\ntitle=Remux title\ncomment=Remux comment\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=Opening\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=2000\ntitle=Closing\n"
+    )
+    aac = scratch / "tone.m4a"
+    ffmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+           "-c:a", "aac", "-b:a", "48k", aac)
+    return srt, ass, meta, aac
+
+
+def remux_fixture(writer, inputs, name, container, encoder, tag=()):
+    """Video at 25 fps with B-frames, a 0.5 s start offset and a rotation, one
+    AAC track, one text subtitle track, chapters, and global and track
+    metadata."""
+    srt, _, meta, aac = inputs
+    video = writer.scratch / f"video_{name}"
+    filters = "setsar=8/9,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+    ffmpeg("-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=2", *encoder,
+           "-vf", filters, "-color_primaries", "bt709", "-color_trc", "bt709",
+           "-colorspace", "bt709", "-color_range", "tv", *tag, video)
+    subtitle = "mov_text" if container == "mp4" else "srt"
+    writer.make(name, container,
+                "-itsoffset", "0.5", "-display_rotation", "90", "-i", video,
+                "-i", aac, "-i", srt, "-f", "ffmetadata", "-i", meta,
+                "-map", "0:v", "-map", "1:a", "-map", "2:s",
+                "-map_metadata", "3", "-map_chapters", "3",
+                "-c:v", "copy", "-c:a", "copy", "-c:s", subtitle,
+                "-metadata:s:a:0", "language=eng", "-metadata:s:a:0", "title=Tone",
+                "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=Cues")
+
+
+def remux_fixtures(writer, available, inputs):
+    for ext, container in (("mp4", "mp4"), ("mkv", "mkv")):
+        remux_fixture(writer, inputs, f"remux_h264.{ext}", container, X264)
+    if "libx265" in available:
+        x265 = ["-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-x265-params", "log-level=none:bframes=2"]
+        remux_fixture(writer, inputs, "remux_hevc.mp4", "mp4", x265, ("-tag:v", "hvc1"))
+        remux_fixture(writer, inputs, "remux_hevc.mkv", "mkv", x265)
+    else:
+        print("skipping hevc remux fixtures: ffmpeg has no libx265")
+    # A clock with no whole milliseconds, so Matroska video pts round.
+    writer.make("remux_ntsc.mp4", "mp4",
+                "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30000/1001:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+                *X264, "-c:a", "aac", "-b:a", "48k", "-video_track_timescale", "30000")
+
+
+def refusal_fixtures(writer, available, inputs):
+    ass = inputs[1]
+    sine = ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=0.48"]
+    writer.make("refuse_ass.mkv", "mkv", *SOURCE, "-i", ass, *X264, "-c:s", "copy")
+    writer.make("refuse_flac.mkv", "mkv", *SOURCE, *sine, *X264, "-c:a", "flac")
+    writer.make("refuse_ac3.mp4", "mp4", *SOURCE, *sine, *X264, "-c:a", "ac3", "-b:a", "96k")
+    if {"libvpx-vp9", "libopus"} <= available:
+        writer.make("remux_opus.webm", "mkv", *SOURCE, *sine, "-c:v", "libvpx-vp9", "-cpu-used", "8",
+                    "-deadline", "realtime", "-b:v", "100k", "-pix_fmt", "yuv420p",
+                    "-c:a", "libopus", "-b:a", "48k")
+    else:
+        print("skipping remux_opus.webm: ffmpeg has no libvpx-vp9 or libopus")
+    writer.make("remux_tmcd.mov", "mp4", *SOURCE, *sine, *X264, "-c:a", "aac", "-b:a", "48k",
+                "-timecode", "00:00:00:00")
+    # A chapter track with no `chpl` and a clock with no whole nanoseconds.
+    writer.make("refuse_chapter.mp4", "mp4",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
+                "-f", "lavfi", "-i", "testsrc=size=64x48:rate=25:duration=2",
+                "-f", "ffmetadata", "-i", chapter_meta(writer.scratch),
+                "-map", "0:a", "-map", "1:v", "-map_chapters", "2",
+                *X264, "-c:a", "aac", "-b:a", "48k", "-movflags", "disable_chpl")
+
+
+def chapter_meta(scratch):
+    path = scratch / "inexact.ffmeta"
+    path.write_text(
+        ";FFMETADATA1\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1234\ntitle=One\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=1234\nEND=2000\ntitle=Two\n"
+    )
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     default = Path(__file__).resolve().parent / "media"
@@ -316,6 +412,9 @@ def main():
     track_choice_fixtures(writer, small)
     colour_fixtures(writer)
     codec_fixtures(writer, available)
+    inputs = remux_inputs(scratch)
+    remux_fixtures(writer, available, inputs)
+    refusal_fixtures(writer, available, inputs)
     shutil.rmtree(scratch)
     print(f"wrote fixtures to {out}")
 

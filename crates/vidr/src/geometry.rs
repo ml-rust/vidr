@@ -137,6 +137,18 @@ impl Rotation {
         }
     }
 
+    /// The 3x3 display matrix in `tkhd` order `a b u c d v x y w`, with no
+    /// translation. [`Rotation::from_display_matrix`] reads it back.
+    pub const fn display_matrix(self) -> [i32; 9] {
+        let (a, b, c, d) = match self {
+            Self::Upright => (FIXED_ONE, 0, 0, FIXED_ONE),
+            Self::Clockwise90 => (0, FIXED_ONE, NEGATIVE_ONE, 0),
+            Self::Clockwise180 => (NEGATIVE_ONE, 0, 0, NEGATIVE_ONE),
+            Self::Clockwise270 => (0, NEGATIVE_ONE, FIXED_ONE, 0),
+        };
+        [a, b, 0, c, d, 0, 0, 0, PROJECTIVE_ONE]
+    }
+
     /// Clockwise degrees: 0, 90, 180, or 270.
     pub const fn degrees(self) -> u16 {
         match self {
@@ -292,6 +304,21 @@ mod tests {
 
     fn r(num: i64, den: u64) -> Rational {
         Rational::new(num, den).unwrap()
+    }
+
+    #[test]
+    fn display_matrix_reads_back_as_the_same_rotation() {
+        for rotation in [
+            Rotation::Upright,
+            Rotation::Clockwise90,
+            Rotation::Clockwise180,
+            Rotation::Clockwise270,
+        ] {
+            assert_eq!(
+                Rotation::from_display_matrix(rotation.display_matrix()),
+                Ok(rotation)
+            );
+        }
     }
 
     #[test]

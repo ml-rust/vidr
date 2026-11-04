@@ -25,7 +25,26 @@ impl fmt::Display for Side {
     }
 }
 
-/// One mismatch found by [`check_output`](super::check_output).
+/// The kind of a copied track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrackClass {
+    /// Audio.
+    Audio,
+    /// Subtitles.
+    Subtitle,
+}
+
+impl fmt::Display for TrackClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Audio => "audio",
+            Self::Subtitle => "subtitle",
+        })
+    }
+}
+
+/// One mismatch found by [`check_output`](super::check_output) or
+/// [`check_tracks`](super::check_tracks).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deviation {
     /// The streams hold different frame counts.
@@ -107,6 +126,35 @@ pub enum Deviation {
         /// The error.
         error: TimingError,
     },
+    /// The output holds a different number of copied tracks of one kind.
+    TrackCount {
+        /// The kind.
+        class: TrackClass,
+        /// Tracks the output must hold.
+        source: usize,
+        /// Tracks the output holds.
+        output: usize,
+    },
+    /// A copied track holds a different number of packets.
+    PacketCount {
+        /// The kind.
+        class: TrackClass,
+        /// The source track id.
+        source_track: u32,
+        /// The output track id.
+        output_track: u32,
+        /// Packets the output must hold.
+        source: u64,
+        /// Packets the output holds.
+        output: u64,
+    },
+    /// The output holds a different number of chapters.
+    ChapterCount {
+        /// Chapters the output must hold.
+        source: usize,
+        /// Chapters the output holds.
+        output: usize,
+    },
 }
 
 impl fmt::Display for Deviation {
@@ -180,11 +228,36 @@ impl fmt::Display for Deviation {
                  than {tolerance} s. Check the last-frame duration the output container stores."
             ),
             Self::Timing { side, error } => write!(f, "{side} timing: {error}"),
+            Self::TrackCount {
+                class,
+                source,
+                output,
+            } => write!(
+                f,
+                "output holds {output} {class} track(s) and must hold {source}. Check the copy \
+                 plan and the mux."
+            ),
+            Self::PacketCount {
+                class,
+                source_track,
+                output_track,
+                source,
+                output,
+            } => write!(
+                f,
+                "output {class} track {output_track} holds {output} packet(s), and source track \
+                 {source_track} holds {source}. Check that the mux finished every copied track."
+            ),
+            Self::ChapterCount { source, output } => write!(
+                f,
+                "output holds {output} chapter(s) and must hold {source}. Check the copy plan \
+                 and the mux."
+            ),
         }
     }
 }
 
-/// Every mismatch [`check_output`](super::check_output) found. Never empty.
+/// Every mismatch a check found. Never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckError {
     deviations: Vec<Deviation>,

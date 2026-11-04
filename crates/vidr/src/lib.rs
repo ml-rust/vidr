@@ -7,8 +7,9 @@
 //! AV1 samples on NVENC. Behind `frame`, `frame::to_rgb` and `frame::from_rgb`
 //! convert between NV12 or P010 planes and float RGB. Behind `decode`, `color`
 //! holds the colour policy. Behind `mp4` and `mkv`, `media::Input` opens a file
-//! through containr and reads its track facts. Software codecs, other hardware
-//! codecs, and the filter graph are roadmap items.
+//! through containr and reads its track facts, and `media::OutputMux` writes an
+//! encoded video with every other stream copied. Software codecs, other
+//! hardware codecs, and the filter graph are roadmap items.
 
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 pub mod bitstream;
@@ -27,7 +28,10 @@ pub mod geometry;
 pub mod media;
 pub mod time;
 
-pub use check::{CheckError, DURATION_TOLERANCE, Deviation, Side, StreamFacts, check_output};
+pub use check::{
+    CheckError, DURATION_TOLERANCE, Deviation, Side, StreamFacts, TrackClass, TrackFacts,
+    TrackPacketCount, check_output, check_tracks,
+};
 #[cfg(any(feature = "h264", feature = "hevc", feature = "av1", feature = "vp9"))]
 pub use error::BitstreamError;
 #[cfg(feature = "encode")]

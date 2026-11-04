@@ -53,12 +53,12 @@ nvenc = [
 # Conversion between NV12 or P010 planes and float RGB, on any numr backend with
 # colour kernels. `numr/f16` gives the CPU backend F16 RGB.
 frame = ["decode", "encode", "numr/f16"]
-# MP4 and QuickTime MOV input through containr, the decoder's codec names
-# included. Needs no GPU.
-mp4 = ["decode", "dep:containr", "containr/mp4"]
-# Matroska and WebM input through containr, the decoder's codec names included.
-# Needs no GPU.
-mkv = ["decode", "dep:containr", "containr/mkv"]
+# MP4 and QuickTime MOV input and MP4 output through containr, the decoder's
+# codec names included. Needs no GPU.
+mp4 = ["decode", "encode", "dep:containr", "containr/mp4"]
+# Matroska and WebM input and Matroska output through containr, the decoder's
+# codec names included. Needs no GPU.
+mkv = ["decode", "encode", "dep:containr", "containr/mkv"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 

@@ -1,12 +1,16 @@
 //! The facts vidr reads from a containr track: rotation, sample aspect ratio,
-//! and the decoder's codec and config record.
+//! the decoder's codec and config record, and the facts the output checks
+//! compare.
 
-use containr::Track;
 use containr::matroska::{DisplayUnit, MatroskaTrack, MatroskaVideo, Projection};
+use containr::{Packet, Track, TrackKind};
 
+use super::input::Input;
+use crate::check::{StreamFacts, TrackFacts, TrackPacketCount};
 use crate::decode::DecodeCodec;
 use crate::error::MediaError;
-use crate::geometry::{Rotation, SampleAspectRatio};
+use crate::geometry::{Dimensions, Geometry, Rotation, SampleAspectRatio};
+use crate::time::{DurationHints, FrameTiming, Rational};
 
 /// What a decoder takes for one track, such as
 /// `NvdecDecoder::new(client, config.codec, &config.config)`.
@@ -17,6 +21,154 @@ pub struct DecodeConfig {
     /// The raw `avcC`, `hvcC`, `av1C` or `vpcC` body. Empty only for VP9,
     /// whose config record no decoder needs.
     pub config: Vec<u8>,
+}
+
+/// Reads the facts [`check_output`](crate::check::check_output) compares from
+/// the first video track of `input`.
+///
+/// Frames come from the demuxed packets, in presentation order, with the track's
+/// edit list applied. A track with no edit list keeps its pts as stored, so an
+/// order mismatch reaches `check_output`. With an edit list, a frame's duration
+/// stops at the edit's end, as [`EditTimeline::present`] states.
+///
+/// [`EditTimeline::present`]: crate::time::EditTimeline::present
+///
+/// # Errors
+///
+/// [`MediaError::NoVideoTrack`] for no video, and any error
+/// [`Input::rotation`] or [`Input::edit_timeline`] gives.
+/// [`MediaError::EditList`] when pts under an edit list do not increase.
+pub fn read_stream_facts(input: &Input) -> Result<StreamFacts, MediaError> {
+    let track = input.video_track()?;
+    let (width, height) = coded_size(track);
+    let coded = Dimensions::new(width, height).map_err(|error| MediaError::Geometry {
+        track_id: track.id,
+        error,
+    })?;
+    let geometry = Geometry::new(
+        coded,
+        input.rotation(track)?,
+        input.sample_aspect_ratio(track).unwrap_or_default(),
+    );
+    let time_base = Rational::new(i64::from(track.timebase.num), u64::from(track.timebase.den))
+        .map_err(|error| MediaError::Time {
+            what: "the video track's time base",
+            error,
+        })?;
+    let mut frames = Vec::new();
+    let mut last_duration = None;
+    for packet in input.track_packets(track.id)? {
+        let packet = packet.map_err(|error| input.demux_error(&error))?;
+        let duration = packet
+            .duration
+            .map_or(0, |ticks| i64::try_from(ticks).unwrap_or(i64::MAX));
+        last_duration = Some(duration);
+        frames.push(FrameTiming::new(packet.pts, packet.dts, duration));
+    }
+    frames.sort_by_key(|frame: &FrameTiming| frame.pts);
+    if !track.edit_list.is_empty() && !frames.is_empty() {
+        let timeline = input.edit_timeline(track)?;
+        frames = timeline
+            .present(&frames)
+            .map_err(|error| MediaError::EditList {
+                track_id: track.id,
+                error,
+            })?;
+    }
+    let hints = DurationHints {
+        packet_duration: last_duration,
+        ..DurationHints::default()
+    };
+    Ok(StreamFacts::new(geometry, time_base, frames, hints))
+}
+
+/// Reads the audio and subtitle tracks and the chapters of `input`, for
+/// [`check_tracks`](crate::check::check_tracks). A chapter track counts as
+/// chapters, and MP4's two lists of one set of chapters count once.
+///
+/// A text subtitle's count leaves out empty samples. MP4 fills the gaps between
+/// cues with them, and Matroska has no such blocks.
+///
+/// # Errors
+///
+/// [`MediaError::Demux`] for a failed read of the packet tables.
+pub fn read_track_facts(input: &Input) -> Result<TrackFacts, MediaError> {
+    let mut facts = TrackFacts {
+        chapters: chapter_count(input),
+        ..TrackFacts::default()
+    };
+    for track in input.tracks() {
+        if track.chapter_track {
+            continue;
+        }
+        let list = match track.kind {
+            TrackKind::Audio => &mut facts.audio,
+            TrackKind::Subtitle => &mut facts.subtitles,
+            TrackKind::Video | TrackKind::Data | TrackKind::Other => continue,
+        };
+        let mut packets = 0;
+        for packet in input.track_packets(track.id)? {
+            let packet = packet.map_err(|error| input.demux_error(&error))?;
+            if holds_content(track, &packet) {
+                packets += 1;
+            }
+        }
+        list.push(TrackPacketCount {
+            track_id: track.id,
+            packets,
+        });
+    }
+    Ok(facts)
+}
+
+fn chapter_count(input: &Input) -> usize {
+    match input {
+        #[cfg(feature = "mp4")]
+        Input::Mp4 { .. } => containr::mp4::StreamCopy::chapters(input.chapters()).len(),
+        #[cfg(feature = "mkv")]
+        Input::Mkv { .. } => input.chapters().len(),
+    }
+}
+
+/// True when `packet` carries content a copy must keep. An empty `tx3g` sample
+/// and an empty Matroska text block hold none, and each container writes its
+/// gaps its own way.
+pub(super) fn holds_content(track: &Track, packet: &Packet) -> bool {
+    if track.kind != TrackKind::Subtitle {
+        return true;
+    }
+    if track.matroska.is_some() {
+        return packet.size > 0;
+    }
+    let tx3g = track.codec().is_some_and(|fourcc| &fourcc.0 == b"tx3g");
+    !tx3g || packet.size > TX3G_EMPTY_SAMPLE
+}
+
+/// The size of an empty `tx3g` sample: its 16-bit text length alone.
+const TX3G_EMPTY_SAMPLE: u32 = 2;
+
+/// A track's picture size, after a Matroska crop. A track that states none
+/// gives 0, which [`Dimensions::new`] refuses.
+fn coded_size(track: &Track) -> (u32, u32) {
+    let (width, height) = match &track.matroska {
+        Some(mkv) => mkv.video.as_ref().map_or((0, 0), |video| {
+            let [top, bottom, left, right] = video.crop;
+            (
+                video.pixel_width.saturating_sub(left).saturating_sub(right),
+                video
+                    .pixel_height
+                    .saturating_sub(top)
+                    .saturating_sub(bottom),
+            )
+        }),
+        None => track.video().map_or((0, 0), |video| {
+            (u64::from(video.width), u64::from(video.height))
+        }),
+    };
+    (
+        u32::try_from(width).unwrap_or(0),
+        u32::try_from(height).unwrap_or(0),
+    )
 }
 
 pub(super) fn rotation(track: &Track) -> Result<Rotation, MediaError> {

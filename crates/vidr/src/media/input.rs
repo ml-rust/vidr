@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use containr::mkv;
 #[cfg(feature = "mp4")]
 use containr::mp4;
-use containr::{ContainerColour, Track, TrackKind};
+use containr::{Chapter, ContainerColour, MetadataItem, Packet, Track, TrackKind};
 
 use super::edit;
 use super::facts::{self, DecodeConfig};
@@ -26,6 +26,11 @@ const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 const MP4_FIRST_BOXES: [&[u8; 4]; 10] = [
     b"ftyp", b"styp", b"moov", b"moof", b"mdat", b"free", b"skip", b"wide", b"pnot", b"sidx",
 ];
+
+/// The movie clock of an MP4 output from a Matroska source. It matches the
+/// Matroska default `TimestampScale`.
+#[cfg(all(feature = "mp4", feature = "mkv"))]
+const MATROSKA_MOVIE_TIMESCALE: u32 = 1000;
 
 /// The container the first bytes of a file match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +198,148 @@ impl Input {
     ///   sample description.
     pub fn decode_config(&self, track: &Track) -> Result<DecodeConfig, MediaError> {
         facts::decode_config(track)
+    }
+
+    /// The packets of track `track_id`, in decode order, read on demand.
+    pub(super) fn track_packets(&self, track_id: u32) -> Result<TrackPacketIter, MediaError> {
+        let packets = match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { demuxer, .. } => demuxer.track_packets(track_id).map(TrackPacketIter::Mp4),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer.track_packets(track_id).map(TrackPacketIter::Mkv),
+        };
+        packets.map_err(|error| demux_error(self.path(), &error))
+    }
+
+    /// Reads the bytes of `packet` into `buffer`, which it replaces.
+    pub(super) fn read_packet_into(
+        &mut self,
+        packet: &Packet,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), MediaError> {
+        let result = match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { demuxer, .. } => demuxer.read_packet_into(packet, buffer),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer.read_packet_into(packet, buffer),
+        };
+        result.map_err(|error| demux_error(self.path(), &error))
+    }
+
+    /// A containr error as a [`MediaError`] that names this file.
+    pub(super) fn demux_error(&self, error: &containr::Error) -> MediaError {
+        demux_error(self.path(), error)
+    }
+
+    /// The global metadata.
+    pub(super) fn metadata(&self) -> &[MetadataItem] {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { demuxer, .. } => demuxer.metadata(),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer.metadata(),
+        }
+    }
+
+    /// Every chapter the file lists. An MP4 file can list one set twice.
+    pub(super) fn chapters(&self) -> &[Chapter] {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { demuxer, .. } => demuxer.chapters(),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer.chapters(),
+        }
+    }
+
+    /// The Matroska `Title`. MP4 holds its title in the metadata.
+    pub(super) fn title(&self) -> Option<&str> {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { .. } => None,
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer.info().title.as_deref(),
+        }
+    }
+
+    /// The attachments' file names. MP4 has no attachments.
+    pub(super) fn attachment_names(&self) -> Vec<&str> {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { .. } => Vec::new(),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { demuxer, .. } => demuxer
+                .attachments()
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect(),
+        }
+    }
+
+    /// Ticks per second of the MP4 movie clock. A Matroska source has none, so
+    /// it gives the millisecond clock of `MuxOptions`.
+    #[cfg(feature = "mp4")]
+    pub(super) fn movie_timescale(&self) -> u32 {
+        match self {
+            Self::Mp4 { demuxer, .. } => demuxer.movie_timescale(),
+            #[cfg(feature = "mkv")]
+            Self::Mkv { .. } => MATROSKA_MOVIE_TIMESCALE,
+        }
+    }
+
+    /// The attachments a Matroska source holds.
+    #[cfg(feature = "mkv")]
+    pub(super) fn attachments(&self) -> &[mkv::Attachment] {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { .. } => &[],
+            Self::Mkv { demuxer, .. } => demuxer.attachments(),
+        }
+    }
+
+    /// Reads the bytes of an attachment [`Input::attachments`] listed.
+    #[cfg(feature = "mkv")]
+    pub(super) fn read_attachment(
+        &mut self,
+        attachment: &mkv::Attachment,
+    ) -> Result<Vec<u8>, MediaError> {
+        let result = match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4 { path, .. } => {
+                return Err(MediaError::Demux {
+                    path: path.clone(),
+                    message: format!(
+                        "attachment `{}` is not in an MP4 file. Pass the attachments of this \
+                         input",
+                        attachment.name
+                    ),
+                });
+            }
+            Self::Mkv { demuxer, .. } => demuxer.read_attachment(attachment),
+        };
+        result.map_err(|error| demux_error(self.path(), &error))
+    }
+}
+
+/// The packets of one track in decode order. It holds its own table handle, so
+/// the input stays free for reads while it runs.
+#[derive(Debug)]
+pub(super) enum TrackPacketIter {
+    #[cfg(feature = "mp4")]
+    Mp4(mp4::TrackPackets),
+    #[cfg(feature = "mkv")]
+    Mkv(mkv::TrackPackets),
+}
+
+impl Iterator for TrackPacketIter {
+    type Item = containr::Result<Packet>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            #[cfg(feature = "mp4")]
+            Self::Mp4(packets) => packets.next(),
+            #[cfg(feature = "mkv")]
+            Self::Mkv(packets) => packets.next(),
+        }
     }
 }
 

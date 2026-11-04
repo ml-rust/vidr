@@ -40,6 +40,8 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Frame conversion (`frame`): NV12 and P010 to F32 or F16 RGB at any display size, even-size RGB back to planes, without leaving the device | Implemented |
 | Colour policy (`decode`, `merge_container` behind `mp4` or `mkv`): container fill of bitstream colour, SDR check, conversion plan with output tags | Implemented |
 | Media input (`mp4`, `mkv`): open by file bytes through containr, first video track, edit timeline, rotation, container sample aspect ratio, colour tags, decoder config | Implemented |
+| Media output (`mp4`, `mkv`): one-pass `.mp4` faststart or `.mkv`, encoded H.264, HEVC, or AV1 with audio, text subtitles, chapters, and metadata copied, MKV attachments, named refusals before GPU work, bounded mux buffer | Implemented |
+| Copied-track checks: `read_stream_facts`, `read_track_facts`, `check_tracks` | Implemented |
 | Everything else | Roadmap |
 
 Update this table in the same change that implements a capability.
