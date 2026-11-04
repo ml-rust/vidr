@@ -1,7 +1,8 @@
-//! One whole run: validation, the report, the GPU path, and the named outcome.
+//! One whole run: validation, the report, the frame path, and the named outcome.
 //!
-//! The GPU path lives in `run_gpu`, behind `cuda` and a container feature. A
-//! build without them still validates, reports, and names what is missing.
+//! The frame path lives in `run_frames`, behind `transform` and a container feature.
+//! A build without a decoder, an encoder, and a container still validates, reports,
+//! and names what is missing.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,13 @@ pub enum Progress {
         name: &'static str,
         /// The device's name.
         device: String,
+        /// The runtime and dtype of the model.
+        precision: &'static str,
+    },
+    /// The encode pass copies frames through host memory.
+    FramePath {
+        /// One line that names the runtime, each codec, and each route.
+        line: String,
     },
     /// The sizes and frame count of the encode pass.
     Sizes {
@@ -95,7 +103,12 @@ impl fmt::Display for Progress {
             Self::Scanned { frames } => write!(f, "Scanned {frames} frames"),
             Self::Skipped(skipped) => fmt::Display::fmt(skipped, f),
             Self::Reusing { path } => write!(f, "Reusing AI-enhanced video: {}", path.display()),
-            Self::ModelLoaded { name, device } => write!(f, "{name} | {device} | CUDA FP16"),
+            Self::ModelLoaded {
+                name,
+                device,
+                precision,
+            } => write!(f, "{name} | {device} | {precision}"),
+            Self::FramePath { line } => f.write_str(line),
             Self::Sizes {
                 input,
                 output,
@@ -197,11 +210,26 @@ pub enum RunOutcome {
     },
 }
 
+/// What [`missing_features`] names for a build with no decoder.
+const DECODER_FEATURES: &str = "cuda, dav1d, cpu-vp9, cpu-hevc, openh264, or openh264-cisco";
+/// What [`missing_features`] names for a build with no encoder.
+const ENCODER_FEATURES: &str = "cuda, cpu-av1, openh264, or openh264-cisco";
+
 /// The features a build leaves out for a whole run: empty in a complete build.
 pub fn missing_features() -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if !cfg!(feature = "cuda") {
-        missing.push("cuda");
+    let openh264 = cfg!(any(feature = "openh264", feature = "openh264-cisco"));
+    if !(cfg!(any(
+        feature = "cuda",
+        feature = "dav1d",
+        feature = "cpu-vp9",
+        feature = "cpu-hevc"
+    )) || openh264)
+    {
+        missing.push(DECODER_FEATURES);
+    }
+    if !(cfg!(any(feature = "cuda", feature = "cpu-av1")) || openh264) {
+        missing.push(ENCODER_FEATURES);
     }
     if !cfg!(any(feature = "mp4", feature = "mkv")) {
         missing.push("mp4 or mkv");
@@ -212,8 +240,8 @@ pub fn missing_features() -> Vec<&'static str> {
 /// Remasters one video, with the report under `$XDG_STATE_HOME`, else
 /// `~/.local/state`.
 ///
-/// The steps run in this order: validation, the copy plan, a full NVDEC pre-scan,
-/// the output sizes, reuse of an earlier upscale, the encode pass into a temporary
+/// The steps run in this order: validation, the copy plan, the choice of runtime and
+/// codecs, a full pre-scan on the chosen decoder, the output sizes, reuse of an earlier upscale, the encode pass into a temporary
 /// directory beside the output, the output check, the provenance sidecar in that
 /// directory, the publish, the sidecar's rename, and the report.
 ///
@@ -311,7 +339,7 @@ fn finish_run<P: FnMut(Progress)>(
     }
 }
 
-#[cfg(all(feature = "cuda", any(feature = "mp4", feature = "mkv")))]
+#[cfg(all(feature = "transform", any(feature = "mp4", feature = "mkv")))]
 fn drive<P: FnMut(Progress) + Send>(
     request: &Request,
     validated: &Validated,
@@ -319,10 +347,14 @@ fn drive<P: FnMut(Progress) + Send>(
     control: &PumpControl,
     report: &mut RunReport,
 ) -> Result<Published, RemasterError> {
-    crate::run_gpu::execute(request, validated, progress, control, report)
+    let missing = missing_features();
+    if !missing.is_empty() {
+        return Err(RemasterError::MissingFeatures { missing });
+    }
+    crate::run_frames::execute(request, validated, progress, control, report)
 }
 
-#[cfg(not(all(feature = "cuda", any(feature = "mp4", feature = "mkv"))))]
+#[cfg(not(all(feature = "transform", any(feature = "mp4", feature = "mkv"))))]
 fn drive<P: FnMut(Progress) + Send>(
     _request: &Request,
     _validated: &Validated,
@@ -543,7 +575,20 @@ mod tests {
     #[test]
     fn missing_features_follow_the_build() {
         let missing = missing_features();
-        assert_eq!(missing.contains(&"cuda"), !cfg!(feature = "cuda"));
+        let openh264 = cfg!(any(feature = "openh264", feature = "openh264-cisco"));
+        assert_eq!(
+            missing.contains(&ENCODER_FEATURES),
+            !(cfg!(any(feature = "cuda", feature = "cpu-av1")) || openh264)
+        );
+        assert_eq!(
+            missing.contains(&DECODER_FEATURES),
+            !(cfg!(any(
+                feature = "cuda",
+                feature = "dav1d",
+                feature = "cpu-vp9",
+                feature = "cpu-hevc"
+            )) || openh264)
+        );
         assert_eq!(
             missing.contains(&"mp4 or mkv"),
             !cfg!(any(feature = "mp4", feature = "mkv"))

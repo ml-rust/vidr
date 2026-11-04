@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use vidr::pipeline::PumpControl;
-use vidr_remaster::{Progress, RemasterError, Request, RequestError, RunOutcome, remaster_in};
+use vidr_remaster::{
+    Progress, RemasterError, Request, RequestError, RunOutcome, missing_features, remaster_in,
+};
 
 fn only_report(state: &Path) -> Value {
     let runs: Vec<PathBuf> = fs::read_dir(state.join("vidr-remaster"))
@@ -65,6 +67,9 @@ fn a_stop_before_the_run_gives_a_named_outcome_and_a_report() {
     assert_eq!(report["codec"], "hevc");
     assert_eq!(report["quality"], 24);
     assert_eq!(report["resolution"], "auto");
+    assert_eq!(report["decoder_request"], "auto");
+    assert_eq!(report["encoder_request"], "auto");
+    assert_eq!(report["runtime_request"], "auto");
     assert!(report["licence_notice"].as_str().is_some());
     assert_eq!(entries(work.path()), ["clip.mp4"]);
 }
@@ -100,10 +105,12 @@ fn a_report_directory_that_cannot_exist_is_refused_before_any_work() {
     assert!(matches!(error, RemasterError::Report(_)), "{error}");
 }
 
-/// The named error of a build with no GPU path, and the report that records it.
-#[cfg(not(all(feature = "cuda", any(feature = "mp4", feature = "mkv"))))]
+/// The named error of a build with no whole path, and the report that records it.
 #[test]
-fn a_build_with_no_gpu_path_names_the_features_and_reports_the_failure() {
+fn a_build_with_no_whole_path_names_the_features_and_reports_the_failure() {
+    if missing_features().is_empty() {
+        return;
+    }
     let work = tempfile::tempdir().expect("tempdir");
     let state = tempfile::tempdir().expect("tempdir");
     let source = source_in(work.path());

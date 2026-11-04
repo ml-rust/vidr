@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::execution::{DecoderChoice, EncoderChoice, RuntimeChoice};
 use crate::paths::{expand_user, resolve};
 use crate::resolution::ResolutionMode;
 
@@ -87,6 +88,8 @@ pub enum Codec {
     Hevc,
     /// H.264.
     H264,
+    /// AV1.
+    Av1,
 }
 
 impl Codec {
@@ -95,6 +98,7 @@ impl Codec {
         match self {
             Self::Hevc => "hevc",
             Self::H264 => "h264",
+            Self::Av1 => "av1",
         }
     }
 }
@@ -105,7 +109,7 @@ impl fmt::Display for Codec {
     }
 }
 
-/// A codec name that is not `hevc` or `h264`.
+/// A codec name that is not `hevc`, `h264`, or `av1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseCodecError {
     name: String,
@@ -113,7 +117,11 @@ pub struct ParseCodecError {
 
 impl fmt::Display for ParseCodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Unsupported codec '{}'. Use hevc or h264.", self.name)
+        write!(
+            f,
+            "Unsupported codec '{}'. Use hevc, h264, or av1.",
+            self.name
+        )
     }
 }
 
@@ -126,6 +134,7 @@ impl FromStr for Codec {
         match text {
             "hevc" => Ok(Self::Hevc),
             "h264" => Ok(Self::H264),
+            "av1" => Ok(Self::Av1),
             _ => Err(ParseCodecError {
                 name: text.to_owned(),
             }),
@@ -272,6 +281,14 @@ pub struct Request {
     pub quality: u32,
     /// Output codec.
     pub codec: Codec,
+    /// The numr backend that holds the frames.
+    pub runtime: RuntimeChoice,
+    /// The decoder.
+    pub decoder: DecoderChoice,
+    /// The encoder.
+    pub encoder: EncoderChoice,
+    /// Cisco's OpenH264 binary, for a build with `openh264-cisco`.
+    pub openh264_library: Option<PathBuf>,
     /// Replace an existing output.
     pub overwrite: bool,
     /// Output size mode.
@@ -294,6 +311,10 @@ impl Request {
             output: None,
             quality: DEFAULT_QUALITY,
             codec: Codec::default(),
+            runtime: RuntimeChoice::default(),
+            decoder: DecoderChoice::default(),
+            encoder: EncoderChoice::default(),
+            openh264_library: None,
             overwrite: false,
             resolution: ResolutionMode::default(),
             from_upscaled: None,
@@ -431,6 +452,10 @@ mod tests {
         assert_eq!(request.output, None);
         assert_eq!(request.from_upscaled, None);
         assert_eq!(request.models_dir, None);
+        assert_eq!(request.runtime, RuntimeChoice::Auto);
+        assert_eq!(request.decoder, DecoderChoice::Auto);
+        assert_eq!(request.encoder, EncoderChoice::Auto);
+        assert_eq!(request.openh264_library, None);
     }
 
     #[test]
@@ -576,6 +601,10 @@ mod tests {
         }
         assert!("tensorrt".parse::<ModelId>().is_err());
         assert_eq!("h264".parse::<Codec>(), Ok(Codec::H264));
-        assert!("av1".parse::<Codec>().is_err());
+        assert_eq!("av1".parse::<Codec>(), Ok(Codec::Av1));
+        assert_eq!(
+            "vp9".parse::<Codec>().expect_err("refused").to_string(),
+            "Unsupported codec 'vp9'. Use hevc, h264, or av1."
+        );
     }
 }

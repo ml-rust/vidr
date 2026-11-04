@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use vidr::{DURATION_TOLERANCE, Dimensions, Rational, SampleAspectRatio, TimeError};
 
 use crate::paths::{expand_user, resolve};
-use crate::provenance::{ProvenanceError, check_record, record_path};
+use crate::provenance::{ProvenanceError, RecordedCodecs, check_record_for, record_path};
 use crate::request::ModelId;
 
 /// The facts of a video that decide whether an upscale matches its source.
@@ -352,6 +352,31 @@ fn candidate_paths(source: &Path, model: ModelId) -> Result<Vec<PathBuf>, ReuseE
     Ok(paths)
 }
 
+/// [`find_upscaled_for`] for a run that encodes with NVENC.
+///
+/// # Errors
+///
+/// As [`find_upscaled_for`].
+pub fn find_upscaled<P: VideoProbe>(
+    probe: &mut P,
+    source: &Path,
+    model: ModelId,
+    source_facts: &VideoFacts,
+    destination: &Path,
+    explicit: Option<&Path>,
+) -> Result<Reuse, ReuseError> {
+    let hardware = RecordedCodecs::HARDWARE.encoder;
+    find_upscaled_for(
+        probe,
+        source,
+        model,
+        source_facts,
+        destination,
+        explicit,
+        hardware,
+    )
+}
+
 /// Selects a matching full-length upscale, or checks an explicit enhanced input.
 ///
 /// With `explicit`, the input must differ from the source and the output and
@@ -361,20 +386,22 @@ fn candidate_paths(source: &Path, model: ModelId) -> Result<Vec<PathBuf>, ReuseE
 /// Without `explicit`, the candidates beside the source are
 /// `<stem>.<model>.<2x|restored>.<mp4|mkv>`, tried newest first. A candidate
 /// that does not match is skipped. A matching candidate must pass
-/// [`check_record`]. One older than the source is skipped. The result
-/// lists every candidate passed over, so the caller can report them.
+/// [`check_record_for`] with `encoder`, this run's encoder. One older than the
+/// source is skipped. The result lists every candidate passed over, so the
+/// caller can report them.
 ///
 /// # Errors
 ///
 /// A [`ReuseError`] when the explicit input is refused, when a matching
 /// candidate has no record or fails its record, or on a file system error.
-pub fn find_upscaled<P: VideoProbe>(
+pub fn find_upscaled_for<P: VideoProbe>(
     probe: &mut P,
     source: &Path,
     model: ModelId,
     source_facts: &VideoFacts,
     destination: &Path,
     explicit: Option<&Path>,
+    encoder: &str,
 ) -> Result<Reuse, ReuseError> {
     let source = resolve(source).map_err(io_error(source))?;
     let destination = resolve(destination).map_err(io_error(destination))?;
@@ -438,7 +465,14 @@ pub fn find_upscaled<P: VideoProbe>(
                 action,
             });
         }
-        match check_record(&source, &candidate, model, source_digest.as_deref()) {
+        let checked = check_record_for(
+            &source,
+            &candidate,
+            model,
+            Some(encoder),
+            source_digest.as_deref(),
+        );
+        match checked {
             Ok(digest) => source_digest = Some(digest),
             Err(error) => {
                 return Err(ReuseError::Unverified {
@@ -471,7 +505,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::provenance::record_upscaled;
+    use crate::provenance::{record_codecs, record_upscaled};
 
     use super::*;
 
@@ -668,6 +702,37 @@ mod tests {
             error.to_string().contains("Source content differs"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_change_of_encoder_invalidates_a_reuse_and_names_both_flags() {
+        let mut f = fixture();
+        let existing = f.enhanced("source.fast.2x.mp4", facts(8, 128, 72));
+        let codecs = RecordedCodecs {
+            decoder: "dav1d",
+            encoder: "rav1r",
+        };
+        record_codecs(&f.source, &existing, ModelId::Fast, codecs).expect("record");
+        let destination = f.root.join("final.mp4");
+        let source = f.source.clone();
+        let mut find = |encoder: &str| {
+            find_upscaled_for(
+                &mut f.probe,
+                &source,
+                ModelId::Fast,
+                &source_facts(),
+                &destination,
+                None,
+                encoder,
+            )
+        };
+        let reuse = find("rav1r").expect("same encoder");
+        assert_eq!(reuse.selected, Some(existing));
+        let error = find("nvenc").expect_err("refused");
+        let text = error.to_string();
+        assert!(text.contains("Recorded encoder differs"), "{text}");
+        assert!(text.contains("--from-upscaled"), "{text}");
+        assert!(text.contains("--force-ai"), "{text}");
     }
 
     #[test]

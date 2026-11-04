@@ -1,0 +1,76 @@
+rav1r
+
+rav1r derives from rav1e (https://github.com/xiph/rav1e). The base is the
+master branch at commit 31435de9d76fddd38f6dcc31d4014574cebb2092.
+
+rav1e is copyright the rav1e contributors, including Thomas Daede and the
+other authors in the upstream git history at
+https://github.com/xiph/rav1e/graphs/contributors. Copyright notices in the
+files and in LICENSE keep their original wording.
+
+LICENSE holds the BSD 2-Clause License. PATENTS holds the Alliance for Open
+Media Patent License 1.0. Both apply to rav1r and stay unchanged.
+
+Files with their own headers keep them in place:
+
+- The assembly under src/x86 and src/arm names VideoLAN and the dav1d
+  authors, Two Orioles, LLC, Martin Storsjo, Janne Grunau, VideoLabs,
+  Matthias Dressel, B Krishnan Iyer, and Nathan Egge.
+- src/ext/x86/x86inc.asm names the x264 project and its authors.
+
+Source and binary distributions of rav1r reproduce LICENSE, PATENTS, and this
+notice, as those files require.
+
+Code inlined from other crates keeps its notice at the head of each file.
+
+src/frame_buffer/ derives from v_frame 0.3.9
+(https://github.com/rust-av/v_frame), and src/api/config/grain.rs derives from
+av1-grain 0.2.5 (https://github.com/rust-av/av1-grain). The first states
+"Copyright (c) 2017-2022, the rav1e contributors", and the second states
+"Copyright (c) 2022-2022, the rav1e contributors". Both use this license:
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  - Redistributions of source code must retain the above copyright notice, this
+    list of conditions and the following disclaimer.
+
+  - Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+src/scenechange/ derives from av-scenechange 0.14.1
+(https://github.com/rust-av/av-scenechange), under this license:
+
+  MIT License
+
+  Copyright (c) 2019 Multimedia and Rust
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.

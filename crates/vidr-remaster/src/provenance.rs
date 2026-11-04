@@ -1,6 +1,10 @@
 //! Provenance records tie an enhanced video to the exact source content.
 //!
 //! The record is a JSON sidecar named `<enhanced file name>.upscale.json`, schema 1.
+//!
+//! A record of a run on NVDEC and NVENC holds the PoC's five keys, byte for byte. A
+//! record of any other run adds `decoder` and `encoder` after them. A record with no
+//! `encoder` means NVENC, the only encoder the PoC had.
 
 use std::ffi::OsString;
 use std::fmt::{self, Write as _};
@@ -20,6 +24,27 @@ const MAX_RECORD_BYTES: u64 = 65536;
 const SCHEMA: i64 = 1;
 /// The name start of the temporary file a record write uses.
 const RECORD_TEMP_PREFIX: &str = ".upscale-record-";
+/// The decoder a record with no `decoder` key means.
+const HARDWARE_DECODER: &str = "nvdec";
+/// The encoder a record with no `encoder` key means.
+const HARDWARE_ENCODER: &str = "nvenc";
+
+/// The codecs of the run that wrote an enhanced video, by their report names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecordedCodecs<'a> {
+    /// The decoder of the encode pass.
+    pub decoder: &'a str,
+    /// The encoder.
+    pub encoder: &'a str,
+}
+
+impl RecordedCodecs<'_> {
+    /// NVDEC and NVENC, whose record has the PoC's form.
+    pub const HARDWARE: Self = Self {
+        decoder: HARDWARE_DECODER,
+        encoder: HARDWARE_ENCODER,
+    };
+}
 
 /// An error recording or checking provenance.
 #[derive(Debug)]
@@ -72,6 +97,15 @@ pub enum ProvenanceError {
         /// The record path.
         path: PathBuf,
     },
+    /// The recorded encoder differs from this run's encoder.
+    EncoderDiffers {
+        /// The record path.
+        path: PathBuf,
+        /// The encoder the record names.
+        recorded: String,
+        /// This run's encoder.
+        found: String,
+    },
     /// The source content differs from the record.
     SourceContentDiffers {
         /// The record path.
@@ -120,6 +154,16 @@ impl fmt::Display for ProvenanceError {
             Self::ModelDiffers { path } => {
                 write!(f, "Recorded model differs at {}.", path.display())
             }
+            Self::EncoderDiffers {
+                path,
+                recorded,
+                found,
+            } => write!(
+                f,
+                "Recorded encoder differs at {}: the record names {recorded}, and this run \
+                 encodes with {found}.",
+                path.display()
+            ),
             Self::SourceContentDiffers { path } => write!(
                 f,
                 "Source content differs from the record at {}.",
@@ -215,6 +259,7 @@ fn render_record(
     model: ModelId,
     source_sha256: &str,
     enhanced_sha256: &str,
+    codecs: RecordedCodecs<'_>,
 ) -> String {
     let mut out = String::from("{\n  \"schema\": 1,\n  \"source\": ");
     push_json_string(&mut out, source);
@@ -224,8 +269,27 @@ fn render_record(
     push_json_string(&mut out, source_sha256);
     out.push_str(",\n  \"enhanced_sha256\": ");
     push_json_string(&mut out, enhanced_sha256);
+    if codecs != RecordedCodecs::HARDWARE {
+        out.push_str(",\n  \"decoder\": ");
+        push_json_string(&mut out, codecs.decoder);
+        out.push_str(",\n  \"encoder\": ");
+        push_json_string(&mut out, codecs.encoder);
+    }
     out.push_str("\n}\n");
     out
+}
+
+/// [`record_codecs`] for a run on NVDEC and NVENC.
+///
+/// # Errors
+///
+/// As [`record_codecs`].
+pub fn record_upscaled(
+    source: &Path,
+    enhanced: &Path,
+    model: ModelId,
+) -> Result<PathBuf, ProvenanceError> {
+    record_codecs(source, enhanced, model, RecordedCodecs::HARDWARE)
 }
 
 /// Writes the sidecar for `enhanced` and returns its path.
@@ -239,10 +303,11 @@ fn render_record(
 ///
 /// [`ProvenanceError::SameFile`] when the paths resolve to one file, and a
 /// file or write error otherwise.
-pub fn record_upscaled(
+pub fn record_codecs(
     source: &Path,
     enhanced: &Path,
     model: ModelId,
+    codecs: RecordedCodecs<'_>,
 ) -> Result<PathBuf, ProvenanceError> {
     let source = resolve_file(source)?;
     let enhanced = resolve_file(enhanced)?;
@@ -259,6 +324,7 @@ pub fn record_upscaled(
         model,
         &sha256_hex(&source)?,
         &sha256_hex(&enhanced)?,
+        codecs,
     );
     let destination = record_path(&enhanced);
     write_atomic(&destination, RECORD_TEMP_PREFIX, &text).map_err(|error| {
@@ -287,19 +353,35 @@ fn read_record(path: &Path) -> Result<Value, ProvenanceError> {
     serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))
 }
 
-/// Checks the recorded association and returns the source digest for reuse.
-///
-/// Pass the digest from an earlier call as `source_digest` to skip hashing the
-/// source again.
+/// [`check_record_for`], whatever encoder the record names.
 ///
 /// # Errors
 ///
-/// A [`ProvenanceError`] for the first check that fails: record size and
-/// syntax, schema, source path, model, source content, enhanced content.
+/// As [`check_record_for`], with no encoder check.
 pub fn check_record(
     source: &Path,
     enhanced: &Path,
     model: ModelId,
+    source_digest: Option<&str>,
+) -> Result<String, ProvenanceError> {
+    check_record_for(source, enhanced, model, None, source_digest)
+}
+
+/// Checks the recorded association and returns the source digest for reuse.
+///
+/// With `encoder`, the record must name that encoder. A record with no `encoder`
+/// key names NVENC. Pass the digest from an earlier call as `source_digest` to skip
+/// hashing the source again.
+///
+/// # Errors
+///
+/// A [`ProvenanceError`] for the first check that fails: record size and
+/// syntax, schema, source path, model, encoder, source content, enhanced content.
+pub fn check_record_for(
+    source: &Path,
+    enhanced: &Path,
+    model: ModelId,
+    encoder: Option<&str>,
     source_digest: Option<&str>,
 ) -> Result<String, ProvenanceError> {
     let source = resolve_file(source)?;
@@ -320,6 +402,16 @@ pub fn check_record(
     }
     if field("model") != Some(model.as_str()) {
         return Err(ProvenanceError::ModelDiffers { path });
+    }
+    if let Some(found) = encoder {
+        let recorded = field("encoder").unwrap_or(HARDWARE_ENCODER);
+        if recorded != found {
+            return Err(ProvenanceError::EncoderDiffers {
+                recorded: recorded.to_owned(),
+                found: found.to_owned(),
+                path,
+            });
+        }
     }
     let source_digest = match source_digest {
         Some(digest) if !digest.is_empty() => digest.to_owned(),
@@ -424,6 +516,58 @@ mod tests {
         let mut out = String::new();
         push_json_string(&mut out, "a\"b\\c\n\r\t\u{8}\u{c}\u{1}\u{7f}");
         assert_eq!(out, "\"a\\\"b\\\\c\\n\\r\\t\\b\\f\\u0001\\u007f\"");
+    }
+
+    #[test]
+    fn a_cpu_run_records_its_codecs_after_the_poc_keys() {
+        let f = fixture();
+        let codecs = RecordedCodecs {
+            decoder: "dav1d",
+            encoder: "rav1r",
+        };
+        let path = record_codecs(&f.source, &f.enhanced, ModelId::Fast, codecs).expect("record");
+        let text = fs::read_to_string(&path).expect("read record");
+        let poc = poc_sidecar(&f.source, "fast");
+        let head = poc.trim_end().trim_end_matches('}').trim_end();
+        assert!(text.starts_with(head), "{text}");
+        assert!(
+            text.ends_with(",\n  \"decoder\": \"dav1d\",\n  \"encoder\": \"rav1r\"\n}\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_change_of_encoder_invalidates_the_record() {
+        let f = fixture();
+        let codecs = RecordedCodecs {
+            decoder: "dav1d",
+            encoder: "rav1r",
+        };
+        record_codecs(&f.source, &f.enhanced, ModelId::Fast, codecs).expect("record");
+        let check =
+            |encoder| check_record_for(&f.source, &f.enhanced, ModelId::Fast, encoder, None);
+        assert_eq!(check(Some("rav1r")).expect("same encoder"), SHA256_ABC);
+        let error = check(Some("nvenc")).expect_err("refused");
+        assert!(
+            matches!(error, ProvenanceError::EncoderDiffers { .. }),
+            "{error}"
+        );
+        let text = error.to_string();
+        assert!(text.contains("rav1r") && text.contains("nvenc"), "{text}");
+        assert_eq!(check(None).expect("no encoder check"), SHA256_ABC);
+    }
+
+    #[test]
+    fn a_record_with_no_encoder_key_names_nvenc() {
+        let f = fixture();
+        fs::write(record_path(&f.enhanced), poc_sidecar(&f.source, "fast")).expect("write");
+        let check =
+            |encoder| check_record_for(&f.source, &f.enhanced, ModelId::Fast, encoder, None);
+        assert_eq!(check(Some("nvenc")).expect("nvenc"), SHA256_ABC);
+        assert!(matches!(
+            check(Some("rav1r")),
+            Err(ProvenanceError::EncoderDiffers { .. })
+        ));
     }
 
     #[test]

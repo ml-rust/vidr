@@ -1,8 +1,8 @@
 //! The decisions of a pre-scan, on the plain facts of each decoded frame.
 //!
 //! `NvdecDecoder` replaces its hardware decoder when a new sequence starts, and
-//! says nothing. So a scan compares every frame with the first. The GPU loop
-//! lives in `run_gpu`, and every decision lives here.
+//! says nothing. So a scan compares every frame with the first. The decode loop
+//! lives in `run_frames`, and every decision lives here.
 
 use std::fmt;
 use std::path::PathBuf;

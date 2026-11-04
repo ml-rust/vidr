@@ -28,9 +28,6 @@ const FLAT: (u16, u16, u16) = (100, 110, 150);
 /// A side whose RGB cannot allocate on any machine.
 const TOO_LARGE: usize = 1 << 28;
 
-/// A source `(width, height)` and a target `(width, height)`.
-type SizeCase = ((usize, usize), (usize, usize));
-
 fn cpu() -> (CpuClient, CpuDevice) {
     let device = CpuDevice::new();
     (CpuRuntime::default_client(&device), device)
@@ -354,6 +351,9 @@ mod networks {
         )
         .expect("from_rgb")
     }
+
+    /// A source `(width, height)` and a target `(width, height)`.
+    type SizeCase = ((usize, usize), (usize, usize));
 
     /// `apply` equals the hand chain, on F16 NHWC and on F32 NCHW.
     fn check_chain(

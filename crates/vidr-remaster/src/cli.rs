@@ -13,6 +13,8 @@ use clap::Parser;
 use vidr::pipeline::PumpControl;
 
 use crate::error::RemasterError;
+use crate::execution::{DecoderChoice, EncoderChoice, RuntimeChoice};
+use crate::notices::notices;
 use crate::publish::remove_temp_directories;
 use crate::request::{Codec, ModelId, Request};
 use crate::resolution::ResolutionMode;
@@ -28,13 +30,19 @@ pub const EXIT_INTERRUPTED: u8 = 130;
 /// What the command prints after a stopped run.
 const INTERRUPTED_TEXT: &str = "Interrupted. The source video remains unchanged.";
 
-/// Remaster a complete video on an NVIDIA GPU, and size it for practical storage.
+/// What the help text states under the flags.
+const AFTER_HELP: &str = "\
+--codec av1 --encoder cpu runs rav1r, with the cpu-av1 feature. rav1r is a fork of rav1e under \
+the BSD-2-Clause licence and the Alliance for Open Media Patent License 1.0.
+--notices prints the licence notices of every codec in this build.";
+
+/// Remaster a complete video, and size it for practical storage.
 #[derive(Debug, Parser)]
-#[command(name = "vidr-remaster", version)]
+#[command(name = "vidr-remaster", version, after_help = AFTER_HELP)]
 struct Cli {
     /// Read the source video.
-    #[arg(value_name = "INPUT")]
-    input: PathBuf,
+    #[arg(value_name = "INPUT", required_unless_present = "notices")]
+    input: Option<PathBuf>,
     /// Select the model (default: purevision).
     #[arg(
         long,
@@ -49,7 +57,7 @@ struct Cli {
     /// Set the model root (default: $VIDR_MODELS_DIR).
     #[arg(long, value_name = "DIR")]
     models_dir: Option<PathBuf>,
-    /// Set NVENC quality, 1 to 51, lower is better (default: 24).
+    /// Set encoder quality, 1 to 51, lower is better (default: 24).
     #[arg(
         long,
         value_name = "1-51",
@@ -60,11 +68,38 @@ struct Cli {
     /// Select the output codec (default: hevc).
     #[arg(
         long,
-        value_name = "hevc|h264",
+        value_name = "hevc|h264|av1",
         default_value_t = Codec::default(),
         hide_default_value = true
     )]
     codec: Codec,
+    /// Select the tensor runtime (default: auto).
+    #[arg(
+        long,
+        value_name = "auto|cuda|wgpu|cpu",
+        default_value_t = RuntimeChoice::default(),
+        hide_default_value = true
+    )]
+    runtime: RuntimeChoice,
+    /// Select the decoder (default: auto, hardware then CPU).
+    #[arg(
+        long,
+        value_name = "auto|nvdec|cpu",
+        default_value_t = DecoderChoice::default(),
+        hide_default_value = true
+    )]
+    decoder: DecoderChoice,
+    /// Select the encoder (default: auto, hardware then CPU).
+    #[arg(
+        long,
+        value_name = "auto|nvenc|cpu",
+        default_value_t = EncoderChoice::default(),
+        hide_default_value = true
+    )]
+    encoder: EncoderChoice,
+    /// Set the path of Cisco's OpenH264 binary (default: none).
+    #[arg(long, value_name = "PATH")]
+    openh264_library: Option<PathBuf>,
     /// Replace an existing output file (default: off).
     #[arg(long)]
     overwrite: bool,
@@ -82,32 +117,69 @@ struct Cli {
     /// Run AI even when a matching 2x output exists (default: off).
     #[arg(long)]
     force_ai: bool,
+    /// Print the licence notices of this build (default: off).
+    #[arg(long, conflicts_with = "input")]
+    notices: bool,
 }
 
-impl From<Cli> for Request {
+/// What a command line asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// Remaster one video.
+    Run(Request),
+    /// Print the licence notices of this build.
+    Notices,
+}
+
+impl From<Cli> for Command {
     fn from(cli: Cli) -> Self {
-        Self {
-            source: cli.input,
+        let Some(source) = cli.input else {
+            return Self::Notices;
+        };
+        Self::Run(Request {
+            source,
             model: cli.model,
             output: cli.output,
             quality: cli.quality,
             codec: cli.codec,
+            runtime: cli.runtime,
+            decoder: cli.decoder,
+            encoder: cli.encoder,
+            openh264_library: cli.openh264_library,
             overwrite: cli.overwrite,
             resolution: cli.resolution,
             from_upscaled: cli.from_upscaled,
             force_ai: cli.force_ai,
             models_dir: cli.models_dir,
-        }
+        })
     }
+}
+
+/// Parses a command line, program name first.
+///
+/// # Errors
+///
+/// [`clap::Error`] for a bad flag, and for `--help` and `--version`.
+pub fn parse_command(args: impl IntoIterator<Item = OsString>) -> Result<Command, clap::Error> {
+    Cli::try_parse_from(args).map(Command::from)
 }
 
 /// Parses a command line, program name first, into a request.
 ///
 /// # Errors
 ///
-/// [`clap::Error`] for a bad flag, and for `--help` and `--version`.
+/// [`clap::Error`] for a bad flag, for `--help` and `--version`, and for
+/// `--notices`, which asks for no run.
 pub fn parse_request(args: impl IntoIterator<Item = OsString>) -> Result<Request, clap::Error> {
-    Cli::try_parse_from(args).map(Request::from)
+    use clap::CommandFactory as _;
+
+    match parse_command(args)? {
+        Command::Run(request) => Ok(request),
+        Command::Notices => Err(Cli::command().error(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "--notices asks for no run. Pass INPUT without --notices.",
+        )),
+    }
 }
 
 /// The help text of each flag: flag name, then its line.
@@ -240,8 +312,12 @@ fn printer() -> impl FnMut(Progress) + Send {
 
 /// Runs the command on `args`, program name first, and returns its exit code.
 pub fn run_command(args: impl IntoIterator<Item = OsString>) -> u8 {
-    let request = match parse_request(args) {
-        Ok(request) => request,
+    let request = match parse_command(args) {
+        Ok(Command::Run(request)) => request,
+        Ok(Command::Notices) => {
+            print_line(&notices());
+            return EXIT_SUCCESS;
+        }
         Err(error) => {
             let _ = error.print();
             return if error.use_stderr() {

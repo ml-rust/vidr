@@ -124,8 +124,18 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 - `vidr`: `hevc_mutations_stay_safe`, a harness behind `cpu-hevc` and `VIDR_HEVC_CONFORMANCE`. It runs ten kinds of seeded damage on each HEVC_v1 zip through `HevcDecoder`: bit flips at two rates, runs of zeros or 0xFF, truncation, dropped, repeated, and swapped NAL units, and corrupt parameter sets and slice headers. A panic, a stream over the deadline, or a frame pile fails the case, and the failure line states zip, seed, and kind. `VIDR_HEVC_ROBUST_SEEDS`, `VIDR_HEVC_ROBUST_DEADLINE_SECS`, `VIDR_HEVC_ROBUST_KEEP`, and `VIDR_HEVC_ROBUST_TRACE` control it.
 - `vidr`: the HEVC_v1 conformance test now decodes with `cpu-hevc`. It checks each picture's hash SEI message and the zip's MD5 of the whole stream, hashes as it goes, and keeps no frame. `VIDR_HEVC_ONLY` picks zips, and `VIDR_HEVC_REPORT` writes one line per vector.
 
+- `vidr-remaster`: the run is generic over the numr runtime, in `run_frames`, and `execution_for` chooses the runtime, decoder, and encoder.
+  - `--runtime auto|cuda|wgpu|cpu`, `--decoder auto|nvdec|cpu`, `--encoder auto|nvenc|cpu`, and `--openh264-library PATH` are new, and `--codec` takes `av1`. `auto` prefers the hardware path, then the CPU.
+  - The features `wgpu`, `dav1d`, `cpu-vp9`, `cpu-hevc`, `openh264`, `openh264-cisco`, `cpu-av1`, and `cpu-av1-asm` enable the matching runtime or codec. A codec not compiled in is refused with its feature's name. HEVC CPU encode is refused, and the refusal names `--codec av1`.
+  - `report.json` gains `frame_path`: the runtime, each codec and route, the output check's decoder, host copies, and why each part was chosen. A run with a host copy states it on one line of stdout.
+  - A model on the CPU or WebGPU runtime runs at F32 in NCHW. `RemasterTransform::load_at` takes the execution.
+  - The provenance sidecar adds `decoder` and `encoder` for a run off NVDEC and NVENC. A hardware run writes the same bytes as before. A candidate recorded with another encoder stops the automatic reuse, and `--from-upscaled` and `--force-ai` still apply.
+  - `--notices` prints the licence and patent notices of each codec in the build, from `crates/vidr-remaster/notices/`. `--help` states that rav1r is a fork of rav1e, under BSD-2-Clause and the AOM Patent License 1.0.
+- `vidr`: a test and fixture for a VP9 superframe with two shown frames. `RustyVp9Decoder` returns the last, so the pump keeps one frame per packet. A decoder that returns two frames at one pts ends the run in `PipelineError::Timing`.
+
 ### Changed
 
+- `vidr-remaster`: `report.json` holds `backend` as null until the run knows its runtime, and adds `runtime_request`, `decoder_request`, and `encoder_request`.
 - `vidr`: `Decoder::route` and `Encoder::route` are required methods with no default, so every implementor adds them.
 - `vidr`: `OutputPlanes` has a private field. Build one with `OutputPlanes::new` in place of a struct literal. `y` and `uv` stay public.
 - `vidr`: `DtsClock` moves from `encode::nvenc` to `encode`, behind `encode`, so another encoder can reuse it.

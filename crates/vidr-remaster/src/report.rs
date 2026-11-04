@@ -201,10 +201,14 @@ impl RunReport {
         report.set("output", validated.destination.display().to_string());
         report.set("model", request.model.as_str());
         report.set("licence_notice", licence_notice(request.model));
-        report.set("backend", "boostr on numr CUDA, F16");
+        // The run sets this once it knows its runtime. It keeps this place.
+        report.set("backend", Value::Null);
         report.set("resolution", request.resolution.to_string());
         report.set("quality", request.quality);
         report.set("codec", request.codec.as_str());
+        report.set("runtime_request", request.runtime.as_str());
+        report.set("decoder_request", request.decoder.as_str());
+        report.set("encoder_request", request.encoder.as_str());
         Ok(report)
     }
 
@@ -359,6 +363,10 @@ mod tests {
         assert_eq!(value["resolution"], "2x");
         assert_eq!(value["quality"], 26);
         assert_eq!(value["codec"], "h264");
+        assert_eq!(value["runtime_request"], "auto");
+        assert_eq!(value["decoder_request"], "auto");
+        assert_eq!(value["encoder_request"], "auto");
+        assert!(value["backend"].is_null());
         assert_eq!(value["max_rounding_error_ns"], 500_000);
         assert!(
             value["licence_notice"]

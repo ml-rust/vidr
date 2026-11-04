@@ -77,7 +77,8 @@ where
 {
 }
 
-/// How the transform runs a model: F16 in NHWC, with half accumulation allowed.
+/// How the transform runs a model on CUDA: F16 in NHWC, with half accumulation
+/// allowed. The CPU and WebGPU runs take F32 in NCHW, as boostr documents.
 ///
 /// A backend can ignore the accumulation permission. Only the native CUDA path
 /// honours it.
@@ -347,8 +348,7 @@ impl<R: Runtime<DType = DType>> RemasterTransform<R> {
     ///
     /// # Errors
     ///
-    /// [`TransformError::Load`] when the checkpoint does not load, and the
-    /// errors of [`RemasterTransform::from_model`].
+    /// As [`RemasterTransform::load_at`].
     pub fn load(
         model: ModelId,
         dir: &Path,
@@ -359,15 +359,35 @@ impl<R: Runtime<DType = DType>> RemasterTransform<R> {
     where
         R::Client: TransformClient<R>,
     {
+        Self::load_at(model, dir, device, target, colors, remaster_execution())
+    }
+
+    /// Loads `model` from `dir` onto `device`, at `execution`. The frames follow its
+    /// dtype and layout.
+    ///
+    /// # Errors
+    ///
+    /// [`TransformError::Load`] when the checkpoint does not load, and the
+    /// errors of [`RemasterTransform::from_model`].
+    pub fn load_at(
+        model: ModelId,
+        dir: &Path,
+        device: &R::Device,
+        target: Dimensions,
+        colors: ColorPlan,
+        execution: SrExecution,
+    ) -> Result<Self, TransformError>
+    where
+        R::Client: TransformClient<R>,
+    {
         check_target(target)?;
         require_model(model)?;
-        let network = load_sr_dir::<R>(dir, device, remaster_execution()).map_err(|error| {
-            TransformError::Load {
+        let network =
+            load_sr_dir::<R>(dir, device, execution).map_err(|error| TransformError::Load {
                 model,
                 dir: dir.to_path_buf(),
                 reason: error.to_string(),
-            }
-        })?;
+            })?;
         Self::from_model(model, network, target, colors)
     }
 }

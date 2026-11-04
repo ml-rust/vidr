@@ -9,6 +9,7 @@ use vidr::{
 };
 
 use crate::error::RemasterError;
+use crate::execution::EncoderBackend;
 use crate::rate::frame_rate_hint;
 use crate::request::{Codec, RequestError};
 use crate::resolution::{ResolutionError, ResolutionMode, choose_resolution, coded_output_size};
@@ -44,6 +45,7 @@ pub const fn encode_codec(codec: Codec) -> EncodeCodec {
     match codec {
         Codec::Hevc => EncodeCodec::Hevc,
         Codec::H264 => EncodeCodec::H264,
+        Codec::Av1 => EncodeCodec::Av1,
     }
 }
 
@@ -52,6 +54,8 @@ pub const fn encode_codec(codec: Codec) -> EncodeCodec {
 pub struct EncodePlan {
     /// The codec.
     pub codec: Codec,
+    /// The encoder, which sets the effort.
+    pub encoder: EncoderBackend,
     /// Encoder quality, 1 to 51.
     pub quality: u32,
     /// The size the encoder takes.
@@ -68,7 +72,16 @@ pub struct EncodePlan {
     pub tags: ColorFacts,
 }
 
-/// The encoder config of a run: preset `P5`, `VbrQuality` at the request's
+/// The effort of `encoder`. NVENC and OpenH264 take `P5`. `P3` gives rav1r speed 7,
+/// because its slower speeds take far longer per frame than a whole video allows.
+pub const fn encoder_preset(encoder: EncoderBackend) -> Preset {
+    match encoder {
+        EncoderBackend::Rav1r => Preset::P3,
+        EncoderBackend::Nvenc | EncoderBackend::Openh264(_) => Preset::P5,
+    }
+}
+
+/// The encoder config of a run: [`encoder_preset`], `VbrQuality` at the request's
 /// quality, and no B-frames.
 ///
 /// # Errors
@@ -87,7 +100,7 @@ pub fn encode_config(plan: &EncodePlan) -> Result<EncodeConfig, RemasterError> {
         plan.frame_rate,
         plan.time_base,
     );
-    config.preset = Preset::P5;
+    config.preset = encoder_preset(plan.encoder);
     config.rate_control = RateControl::VbrQuality { cq };
     config.b_frames = 0;
     config.color = plan.tags;
@@ -97,13 +110,17 @@ pub fn encode_config(plan: &EncodePlan) -> Result<EncodeConfig, RemasterError> {
 }
 
 /// Names the fix when the encoder refuses to open: NVENC's own message asks for
-/// "a codec the GPU encodes at this depth", and the command line has one.
+/// "a codec the GPU encodes at this depth", and the command line has one. OpenH264
+/// is the only encoder that refuses the `format` field.
 pub fn encoder_open_error(error: EncodeError) -> RemasterError {
     match error {
         EncodeError::BitDepthUnsupported {
             codec: EncodeCodec::H264,
             format: PixelFormat::P010,
         } => RemasterError::H264TenBit,
+        EncodeError::InvalidConfig {
+            field: "format", ..
+        } => RemasterError::Openh264TenBit,
         other => RemasterError::Encode(other),
     }
 }
@@ -168,6 +185,7 @@ mod tests {
     fn plan() -> EncodePlan {
         EncodePlan {
             codec: Codec::Hevc,
+            encoder: EncoderBackend::Nvenc,
             quality: 24,
             coded: dims(1280, 720),
             format: PixelFormat::P010,
@@ -217,6 +235,16 @@ mod tests {
     }
 
     #[test]
+    fn rav1r_takes_a_faster_preset_and_av1_takes_its_own_codec() {
+        let mut av1 = plan();
+        av1.codec = Codec::Av1;
+        av1.encoder = EncoderBackend::Rav1r;
+        let config = encode_config(&av1).expect("config");
+        assert_eq!(config.codec, EncodeCodec::Av1);
+        assert_eq!(config.preset, Preset::P3);
+    }
+
+    #[test]
     fn a_frame_rate_outside_32_bits_is_refused_by_the_config_check() {
         let mut wide = plan();
         wide.frame_rate = Rational::new(1 << 40, 7).expect("rate");
@@ -234,6 +262,17 @@ mod tests {
         });
         assert!(matches!(error, RemasterError::H264TenBit));
         assert!(error.to_string().contains("--codec hevc"), "{error}");
+    }
+
+    #[test]
+    fn openh264_ten_bit_names_av1() {
+        let error = encoder_open_error(EncodeError::InvalidConfig {
+            field: "format",
+            value: "P010".to_owned(),
+            reason: "8 bits only",
+        });
+        assert!(matches!(error, RemasterError::Openh264TenBit));
+        assert!(error.to_string().contains("--codec av1"), "{error}");
     }
 
     #[test]

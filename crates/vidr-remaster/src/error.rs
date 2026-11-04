@@ -11,6 +11,7 @@ use vidr::{CheckError, GeometryError, TimeError, TimingError};
 use vidr::{ColorError, DecodeError, EncodeError, MediaError};
 
 use crate::catalog::CatalogError;
+use crate::execution::ExecutionError;
 use crate::provenance::ProvenanceError;
 use crate::publish::PublishError;
 use crate::report::ReportError;
@@ -38,6 +39,8 @@ pub enum RemasterError {
     Reuse(ReuseError),
     /// The provenance sidecar does not write before the publish.
     Provenance(ProvenanceError),
+    /// No runtime, decoder, and encoder fit the request.
+    Execution(ExecutionError),
     /// This build leaves out what a run needs.
     MissingFeatures {
         /// The Cargo features to enable.
@@ -93,6 +96,9 @@ pub enum RemasterError {
     /// NVENC has no 10-bit H.264, and the source is 10-bit.
     #[cfg(any(feature = "mp4", feature = "mkv"))]
     H264TenBit,
+    /// OpenH264 encodes 8 bits only, and the source is 10-bit.
+    #[cfg(any(feature = "mp4", feature = "mkv"))]
+    Openh264TenBit,
     /// The pump fails.
     #[cfg(feature = "transform")]
     Pipeline(PipelineError),
@@ -121,10 +127,12 @@ impl fmt::Display for RemasterError {
             Self::Catalog(error) => fmt::Display::fmt(error, f),
             Self::Reuse(error) => fmt::Display::fmt(error, f),
             Self::Provenance(error) => fmt::Display::fmt(error, f),
+            Self::Execution(error) => fmt::Display::fmt(error, f),
             Self::MissingFeatures { missing } => write!(
                 f,
                 "This build of vidr-remaster cannot run a video, because these features are \
-                 off: {}. Rebuild with --features cuda,mp4,mkv,model-srvgg,model-rrdb.",
+                 off: {}. Rebuild with --features cuda,mp4,mkv,model-srvgg,model-rrdb, or with \
+                 CPU codecs such as --features mp4,dav1d,cpu-av1.",
                 missing.join(", ")
             ),
             Self::Stopped => f.write_str("The run stops on request."),
@@ -165,6 +173,11 @@ impl fmt::Display for RemasterError {
                 "NVENC does not encode H.264 at 10 bits, and this video is 10-bit. Pass \
                  --codec hevc.",
             ),
+            #[cfg(any(feature = "mp4", feature = "mkv"))]
+            Self::Openh264TenBit => f.write_str(
+                "OpenH264 encodes 8 bits only, and this video is 10-bit. Pass --codec av1 with \
+                 the cpu-av1 feature.",
+            ),
             #[cfg(feature = "transform")]
             Self::Pipeline(error) => fmt::Display::fmt(error, f),
             #[cfg(feature = "transform")]
@@ -182,6 +195,7 @@ impl std::error::Error for RemasterError {
             Self::Catalog(error) => Some(error),
             Self::Reuse(error) => Some(error),
             Self::Provenance(error) => Some(error),
+            Self::Execution(error) => Some(error),
             Self::Resolution(error) => Some(error),
             Self::Time(error) => Some(error),
             Self::Timing(error) => Some(error),
@@ -227,6 +241,7 @@ from_error! {
     Catalog(CatalogError),
     Reuse(ReuseError),
     Provenance(ProvenanceError),
+    Execution(ExecutionError),
     Resolution(ResolutionError),
     Time(TimeError),
     Timing(TimingError),

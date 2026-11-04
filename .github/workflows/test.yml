@@ -31,7 +31,8 @@
 # runner's C++ compiler. Its assembly needs nasm and falls back to C without it.
 # `openh264-cisco` loads a binary at run time, and its tests skip with no binary.
 # `cpu-vp9` and `cpu-hevc` are pure Rust. `cpu-av1` is pure Rust, and
-# `cpu-av1-asm` needs nasm.
+# `cpu-av1-asm` needs nasm. The `vidr-remaster` rows with CPU codecs run whole
+# videos with no GPU, in `tests/e2e_cpu`, so that test job installs ffmpeg.
 #
 # rav1r is not on crates.io yet, and cargo resolves optional dependencies for
 # every feature set. So every job here fails to resolve `rav1r` until it is
@@ -121,6 +122,7 @@ jobs:
           - { crate: vidr, features: "cpu-av1-asm" }
           - { crate: vidr, features: "cpu-vp9" }
           - { crate: vidr, features: "cpu-hevc" }
+          - { crate: vidr, features: "cpu-vp9,pipeline" }
           - { crate: vidr, features: "cpu-hevc,cpu-vp9,mkv" }
           - { crate: vidr, features: "cpu-av1,cpu-vp9,dav1d,mkv" }
           - { crate: vidr-remaster, features: "" }
@@ -133,6 +135,18 @@ jobs:
           - { crate: vidr-remaster, features: "model-srvgg" }
           - { crate: vidr-remaster, features: "model-rrdb" }
           - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
+          - { crate: vidr-remaster, features: "wgpu" }
+          - { crate: vidr-remaster, features: "dav1d" }
+          - { crate: vidr-remaster, features: "cpu-vp9" }
+          - { crate: vidr-remaster, features: "cpu-hevc" }
+          - { crate: vidr-remaster, features: "openh264" }
+          - { crate: vidr-remaster, features: "openh264-cisco" }
+          - { crate: vidr-remaster, features: "cpu-av1" }
+          - { crate: vidr-remaster, features: "cpu-av1-asm" }
+          - { crate: vidr-remaster, features: "mp4,dav1d,cpu-av1" }
+          - { crate: vidr-remaster, features: "mp4,openh264" }
+          - { crate: vidr-remaster, features: "mp4,mkv,wgpu,dav1d,cpu-av1,model-srvgg,model-rrdb" }
+          - { crate: vidr-remaster, features: "mp4,mkv,dav1d,cpu-vp9,cpu-hevc,openh264,openh264-cisco,cpu-av1,model-srvgg,model-rrdb,f16" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -172,8 +186,10 @@ jobs:
           - { crate: vidr, features: "h264,hevc,av1,vp9,frame,mp4,mkv,pipeline,cpu-hevc" }
           - { crate: vidr, features: "dav1d,openh264,openh264-cisco" }
           - { crate: vidr, features: "cpu-av1,cpu-vp9,dav1d,mkv" }
+          - { crate: vidr, features: "cpu-vp9,pipeline" }
           - { crate: vidr-remaster, features: "" }
           - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
+          - { crate: vidr-remaster, features: "mp4,mkv,dav1d,cpu-vp9,cpu-hevc,openh264,cpu-av1,model-srvgg,model-rrdb,f16" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -187,6 +203,10 @@ jobs:
       - name: Install libdav1d
         if: contains(matrix.features, 'dav1d')
         run: sudo apt-get update && sudo apt-get install -y libdav1d-dev
+
+      - name: Install ffmpeg
+        if: matrix.crate == 'vidr-remaster' && contains(matrix.features, 'cpu-')
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Run tests
         env:

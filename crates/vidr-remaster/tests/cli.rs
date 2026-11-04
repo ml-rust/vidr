@@ -5,8 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
 
-use vidr_remaster::cli::{EXIT_FAILURE, flag_help, parse_request, run_command};
-use vidr_remaster::{Codec, ModelId, Request, ResolutionMode, StandardResolution, main_with_args};
+use vidr_remaster::cli::{
+    Command as Parsed, EXIT_FAILURE, flag_help, parse_command, parse_request, run_command,
+};
+use vidr_remaster::{
+    Codec, DecoderChoice, EncoderChoice, ModelId, Request, ResolutionMode, RuntimeChoice,
+    StandardResolution, main_with_args, missing_features,
+};
 
 fn args(list: &[&str]) -> Vec<OsString> {
     std::iter::once("vidr-remaster")
@@ -80,6 +85,64 @@ fn each_flag_reaches_the_request() {
 }
 
 #[test]
+fn the_execution_flags_reach_the_request() {
+    let request = parse(&[
+        "clip.mp4",
+        "--codec",
+        "av1",
+        "--runtime",
+        "wgpu",
+        "--decoder",
+        "cpu",
+        "--encoder",
+        "cpu",
+        "--openh264-library",
+        "/opt/libopenh264.so",
+    ])
+    .expect("parse");
+    assert_eq!(request.codec, Codec::Av1);
+    assert_eq!(request.runtime, RuntimeChoice::Wgpu);
+    assert_eq!(request.decoder, DecoderChoice::Cpu);
+    assert_eq!(request.encoder, EncoderChoice::Cpu);
+    assert_eq!(
+        request.openh264_library.as_deref(),
+        Some(Path::new("/opt/libopenh264.so"))
+    );
+    let hardware = parse(&["clip.mp4", "--decoder", "nvdec", "--encoder", "nvenc"]).expect("parse");
+    assert_eq!(hardware.decoder, DecoderChoice::Nvdec);
+    assert_eq!(hardware.encoder, EncoderChoice::Nvenc);
+}
+
+#[test]
+fn notices_asks_for_no_run_and_takes_no_source() {
+    assert_eq!(
+        parse_command(args(&["--notices"])).expect("parse"),
+        Parsed::Notices
+    );
+    assert!(parse_command(args(&["clip.mp4", "--notices"])).is_err());
+    assert!(parse(&["--notices"]).is_err());
+    assert_eq!(run_command(args(&["--notices"])), 0);
+}
+
+#[test]
+fn the_binary_prints_the_notices_and_the_help_names_rav1r_and_its_licences() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let notices = binary(dir.path(), &["--notices"]);
+    assert_eq!(notices.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&notices.stdout).into_owned();
+    assert!(text.contains("Apache-2.0"), "{text}");
+    let help = binary(dir.path(), &["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(text.contains("fork of rav1e"), "{text}");
+    assert!(text.contains("BSD-2-Clause"), "{text}");
+    assert!(
+        text.contains("Alliance for Open Media Patent License 1.0"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_long_output_flag_and_from_upscaled_parse() {
     let request = parse(&[
         "clip.mp4",
@@ -107,7 +170,10 @@ fn every_resolution_mode_parses() {
 fn unknown_values_are_refused_and_name_the_choices() {
     let cases = [
         (["--model", "tensorrt"], "fast, realesrgan, or purevision"),
-        (["--codec", "av1"], "hevc or h264"),
+        (["--codec", "vp9"], "hevc, h264, or av1"),
+        (["--runtime", "metal"], "auto, cuda, wgpu, or cpu"),
+        (["--decoder", "vulkan"], "auto, nvdec, or cpu"),
+        (["--encoder", "vulkan"], "auto, nvenc, or cpu"),
         (["--resolution", "999"], "auto, original, 2x"),
     ];
     for (flag, choices) in cases {
@@ -147,9 +213,9 @@ fn from_upscaled_and_force_ai_are_exclusive() {
 #[test]
 fn each_help_line_starts_with_a_verb_and_shows_the_default() {
     let flags = flag_help();
-    assert_eq!(flags.len(), 10, "{flags:?}");
+    assert_eq!(flags.len(), 15, "{flags:?}");
     let verbs = [
-        "Read", "Select", "Choose", "Set", "Replace", "Resize", "Run",
+        "Read", "Select", "Choose", "Set", "Replace", "Resize", "Run", "Print",
     ];
     for (flag, line) in flags {
         assert!(line.len() < 70, "{flag}: {line}");
@@ -236,10 +302,12 @@ fn quality_zero_and_an_unsupported_container_exit_one() {
     );
 }
 
-/// A build with no GPU path reports the features, in the text and in the report.
-#[cfg(not(all(feature = "cuda", any(feature = "mp4", feature = "mkv"))))]
+/// A build with no whole path reports the features, in the text and in the report.
 #[test]
 fn the_binary_names_the_missing_features_and_writes_a_report() {
+    if missing_features().is_empty() {
+        return;
+    }
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("clip.mp4");
     fs::write(&source, b"video").expect("write");

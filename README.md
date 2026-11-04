@@ -62,9 +62,9 @@ In development. No release exists yet. [AGENTS.md](AGENTS.md) holds the implemen
 - MP4, MOV, Matroska, and WebM input facts through containr
 - One-pass MP4 and MKV output, with every other stream copied, and the copied-track checks
 - Threaded decode, transform, and encode pump
-- The `vidr-remaster` command, on NVIDIA GPUs only
+- The `vidr-remaster` command, on NVDEC and NVENC or on the CPU codecs
 
-`vidr-remaster` runs on NVDEC and NVENC only. No vendor-neutral hardware path exists yet. The rest of [Scope](#scope) does not work yet.
+No hardware path exists off NVIDIA yet. No test has run `vidr-remaster` on WebGPU on a real GPU. The rest of [Scope](#scope) does not work yet.
 
 ## Crates
 
@@ -85,8 +85,8 @@ The output is `clip.fast.restored.mp4` beside the source. It keeps the source's 
 
 ### Requirements
 
-- An NVIDIA GPU with NVDEC and NVENC. A run has no other decode or encode path. NVENC needs driver support for API 13.1.
-- The `cuda` build. numr's CUDA backend needs `nvcc` at build time.
+- A decoder and an encoder: the `cuda` build on an NVIDIA GPU, a CPU codec for each side, or one of each. NVENC needs driver support for API 13.1. numr's CUDA backend needs `nvcc` at build time.
+- A CPU build holds only the codecs its features name. See [CPU codecs](#cpu-codecs).
 - A model directory that holds the catalog's directory names. Pass it with `--models-dir`, or set `VIDR_MODELS_DIR`.
 
 To build against sibling checkouts, copy `.cargo/config.toml.example` to `.cargo/config.toml` first.
@@ -95,7 +95,14 @@ To build against sibling checkouts, copy `.cargo/config.toml.example` to `.cargo
 cargo build --release -p vidr-remaster --features cuda,mp4,mkv,model-srvgg,model-rrdb
 ```
 
-A build without those features reports which ones it lacks.
+A CPU build needs no GPU:
+
+```
+cargo build --release -p vidr-remaster --features mp4,dav1d,cpu-av1,model-srvgg
+vidr-remaster clip.mp4 --model fast --models-dir ~/models --codec av1
+```
+
+A build without a container, a decoder, and an encoder reports which features it lacks.
 
 ### Flags
 
@@ -105,16 +112,37 @@ A build without those features reports which ones it lacks.
 | `--model`                     | `fast`, `realesrgan`, `purevision`                        | `purevision`                    |
 | `-o`, `--output`              | The output path, `.mp4` or `.mkv`                         | `<stem>.<model>.restored.mp4`   |
 | `--models-dir`                | The model root                                            | `$VIDR_MODELS_DIR`              |
-| `--quality`                   | NVENC quality, 1 to 51, lower is better                   | `24`                            |
-| `--codec`                     | `hevc`, `h264`                                            | `hevc`                          |
+| `--quality`                   | Encoder quality, 1 to 51, lower is better                 | `24`                            |
+| `--codec`                     | `hevc`, `h264`, `av1`                                     | `hevc`                          |
+| `--runtime`                   | `auto`, `cuda`, `wgpu`, `cpu`                             | `auto`                          |
+| `--decoder`                   | `auto`, `nvdec`, `cpu`                                    | `auto`                          |
+| `--encoder`                   | `auto`, `nvenc`, `cpu`                                    | `auto`                          |
+| `--openh264-library`          | Cisco's OpenH264 binary, with `openh264-cisco`            | None                            |
 | `--resolution`                | `auto`, `original`, `2x`, `480`, `720`, `1080`, `1440`, `2160`, `4320` | `auto`             |
 | `--overwrite`                 | Replaces an existing output                               | Off                             |
 | `--from-upscaled`             | Resizes this enhanced video, with no model pass           | None                            |
 | `--force-ai`                  | Runs the model even when a matching 2x output exists      | Off                             |
+| `--notices`                   | Prints the licence notices of this build                  | Off                             |
 
 `--resolution` sets the shorter edge. `auto` takes the largest standard edge at or below the source's. The shorter edge never falls below 480.
 
-Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<stem>.<model>.2x` and `<stem>.<model>.restored`, `.mp4` or `.mkv`. A candidate exactly twice the source's size, with a matching `.upscale.json` sidecar, replaces the model. A candidate with a missing or mismatched sidecar stops the run, and the error names both flags.
+Without `--force-ai` or `--from-upscaled`, a run looks beside the source for `<stem>.<model>.2x` and `<stem>.<model>.restored`, `.mp4` or `.mkv`. A candidate exactly twice the source's size, with a matching `.upscale.json` sidecar, replaces the model. A candidate with a missing or mismatched sidecar stops the run, and the error names both flags. A sidecar names the encoder that wrote its video, so a candidate from another encoder stops the run the same way.
+
+### Execution
+
+| Runtime | Decoders | Encoders |
+| ------- | -------- | -------- |
+| `cuda` | NVDEC, CPU | NVENC, CPU |
+| `wgpu` | CPU | CPU |
+| `cpu` | CPU | CPU |
+
+`auto` prefers CUDA, then WebGPU, then the CPU, and NVDEC and NVENC over CPU codecs. When a library or device is missing, or the GPU refuses the codec, `auto` falls through. An explicit `--decoder nvdec` or `--encoder nvenc` then ends in an error naming what is missing. A pair outside the table is refused, and the error names both sides and the pair that works.
+
+The output check decodes the output. The run's decoder does this when it reads the output codec, and otherwise NVDEC or the CPU decoder of that codec does. With no such decoder the run stops before any work.
+
+A CPU codec copies each frame through host memory. The run states this on one line of stdout. `report.json` holds `frame_path`: the runtime, each codec and route, the output check's decoder, the host copies of the encode pass and of the scans, and why each part was chosen.
+
+A model on the CPU or WebGPU runtime runs at F32. A model on CUDA runs at F16.
 
 ### Models
 
@@ -139,7 +167,11 @@ Each refusal ends the run with exit code 1 and leaves no output.
 | Fragmented MP4                                          | containr does not read it                                   | `ffmpeg -i <input> -c copy <output.mp4>`  |
 | A size, pixel format, or colour change inside the video | A run holds one conversion and one encoder session          | Split the source at the change            |
 | Nonincreasing pts, or a frame count unlike the packets  | The output check needs one frame per packet, in order       | Repair or remux the source                |
-| A 10-bit source with `--codec h264`                     | NVENC does not encode H.264 at 10 bits                      | Pass `--codec hevc`                       |
+| A 10-bit source with `--codec h264`                     | NVENC and OpenH264 do not encode H.264 at 10 bits           | Pass `--codec hevc`, or `--codec av1` on the CPU |
+| HEVC with a CPU encoder                                 | No CPU HEVC encoder exists here, by decision                | Pass `--codec av1`                        |
+| An H.264 source that is not Baseline, on OpenH264       | OpenH264's B-slice output differs from the reference        | Use NVDEC, or re-encode as Baseline       |
+| A codec, a runtime, or `--openh264-library` not in the build | The feature is off                                     | Rebuild with the feature the error names  |
+| A candidate from another encoder                        | The sidecar names another encoder                           | Pass `--from-upscaled` or `--force-ai`    |
 | Attachments or ASS subtitles into `.mp4`                | MP4 has no form for them                                    | Write `.mkv`                              |
 | A Matroska crop or `ContentEncoding`                    | NVDEC applies neither                                       | Remux or re-encode the source             |
 | More than one MP4 sample description                    | A decoder takes one config record                           | Split or transcode the source             |
@@ -159,7 +191,7 @@ The first Ctrl-C, SIGTERM, or SIGHUP asks the run to stop at the next frame. A s
 
 ## CPU codecs
 
-A CPU codec works in host memory, so each frame takes one copy through it. The codec declares the copy through `FrameRoute`. Every feature here is off by default. `vidr-remaster` uses none of them yet.
+A CPU codec works in host memory, so each frame takes one copy through it. The codec declares the copy through `FrameRoute`. Every feature here is off by default. `vidr-remaster` has a feature of the same name for each codec, and selects the codec with `--decoder cpu` or `--encoder cpu`, or through `auto`.
 
 | Codec | Feature | Direction | Bit depth, chroma | Crate | Licence | Patent note |
 | ----- | ------- | --------- | ----------------- | ----- | ------- | ----------- |
@@ -171,11 +203,13 @@ A CPU codec works in host memory, so each frame takes one copy through it. The c
 
 These notes state what a binary distribution needs. They are not legal advice.
 
+- **rav1r.** rav1r is a fork of rav1e, under the BSD-2-Clause licence and the Alliance for Open Media Patent License 1.0.
+- **Notices.** `vidr-remaster --notices` prints the text of each codec in the build. `crates/vidr-remaster/notices/` holds each text unchanged, and the crate package includes that directory.
 - **AV1.** A binary built with `cpu-av1` must reproduce the Alliance for Open Media Patent License 1.0 in its documentation, legal notices, or other written materials, with the BSD licence text. rav1r's `PATENTS` file holds the patent licence. Section 1.3 of that licence ends it for a licensee that sues over an Implementation, with two stated exceptions.
 - **VP9.** VP9 has a patent pool. Shipping a binary with `cpu-vp9` on needs legal review.
 - **HEVC.** HEVC has patent pools. Shipping a binary with `cpu-hevc` on needs legal review.
 
-`rav1r` is not on crates.io yet. Until it is, `cpu-av1` builds only through the `[patch.crates-io]` path in `.cargo/config.toml`.
+`rav1r` is not on crates.io yet. Until it is, `cpu-av1` builds only through the `[patch.crates-io]` path in `.cargo/config.toml`, and a CI run on a clean checkout does not resolve it.
 
 `rusty_vp9` stays pinned to one release, and its adoption depends on the conformance run below.
 

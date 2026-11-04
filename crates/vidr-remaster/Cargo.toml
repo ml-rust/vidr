@@ -25,8 +25,29 @@ model-srvgg = ["transform", "dep:boostr", "boostr/super-resolution"]
 model-rrdb = ["transform", "dep:boostr", "boostr/super-resolution"]
 # Half-precision paths of numr and boostr.
 f16 = ["numr?/f16", "boostr?/f16"]
-# Every CUDA path. numr's CUDA backend needs nvcc at build time.
+# Every CUDA path: the runtime, NVDEC, and NVENC. numr's CUDA backend needs nvcc at
+# build time.
 cuda = ["transform", "vidr/cuda", "boostr/cuda", "numr/cuda"]
+# numr's WebGPU runtime, with CPU codecs. No hardware codec exists on it yet.
+wgpu = ["transform", "vidr/wgpu", "numr/wgpu", "boostr?/wgpu"]
+# AV1 decode on libdav1d, through pkg-config. One host copy per frame.
+dav1d = ["transform", "vidr/dav1d"]
+# VP9 decode on rusty_vp9, pure Rust. One host copy per frame. See the README on
+# VP9's patent pool.
+cpu-vp9 = ["transform", "vidr/cpu-vp9"]
+# HEVC decode in vidr, pure Rust. One host copy per frame. See the README on HEVC's
+# patent pools.
+cpu-hevc = ["transform", "vidr/cpu-hevc"]
+# H.264 Baseline decode and encode on OpenH264 compiled from source, with no Cisco
+# patent cover. One host copy per frame.
+openh264 = ["transform", "vidr/openh264"]
+# The same on Cisco's binary, from `--openh264-library`. One host copy per frame.
+openh264-cisco = ["transform", "vidr/openh264-cisco"]
+# AV1 encode on rav1r, a fork of rav1e, pure Rust, 8 or 10 bits. One host copy per
+# frame. BSD-2-Clause and the AOM Patent License 1.0: see `notices/`.
+cpu-av1 = ["transform", "vidr/cpu-av1"]
+# rav1r's assembly. NASM 2.15 or newer on x86_64, a C compiler on aarch64.
+cpu-av1-asm = ["cpu-av1", "vidr/cpu-av1-asm"]
 
 [[bin]]
 name = "vidr-remaster"

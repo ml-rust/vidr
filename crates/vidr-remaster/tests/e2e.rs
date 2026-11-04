@@ -22,6 +22,8 @@ mod codecs;
 mod colour;
 #[path = "e2e/containers.rs"]
 mod containers;
+#[path = "e2e/frame_path.rs"]
+mod frame_path;
 #[path = "e2e/geometry.rs"]
 mod geometry;
 #[path = "e2e/harness.rs"]
