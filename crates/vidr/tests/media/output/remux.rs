@@ -73,8 +73,8 @@ fn assert_audio(name: &str, source: &Probe, output: &Probe) {
         }
         assert_eq!(output.stream_tag(to, "language"), Some("eng"), "{name}");
         assert_eq!(title(output, to).as_deref(), Some("Tone"), "{name}");
-        // Relative to the first packet: Matroska to MP4 keeps the block times
-        // and does not write `CodecDelay` as an edit.
+        // Relative to the first packet: Matroska to MP4 writes `CodecDelay` as an
+        // edit, so ffprobe's absolute times differ by the priming samples.
         let relative = |pts: Vec<i128>| -> Vec<i128> {
             let first = pts[0];
             pts.iter().map(|value| value - first).collect()
