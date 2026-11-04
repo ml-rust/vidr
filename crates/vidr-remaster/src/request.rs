@@ -280,6 +280,9 @@ pub struct Request {
     pub from_upscaled: Option<PathBuf>,
     /// Run the model even when a matching upscale exists.
     pub force_ai: bool,
+    /// The directory that holds the model directories. `None` reads
+    /// `VIDR_MODELS_DIR`.
+    pub models_dir: Option<PathBuf>,
 }
 
 impl Request {
@@ -295,6 +298,7 @@ impl Request {
             resolution: ResolutionMode::default(),
             from_upscaled: None,
             force_ai: false,
+            models_dir: None,
         }
     }
 
@@ -426,6 +430,7 @@ mod tests {
         assert!(!request.overwrite && !request.force_ai);
         assert_eq!(request.output, None);
         assert_eq!(request.from_upscaled, None);
+        assert_eq!(request.models_dir, None);
     }
 
     #[test]

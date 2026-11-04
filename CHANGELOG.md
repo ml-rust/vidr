@@ -23,7 +23,7 @@ Each release must have a non-empty section here before it can be tagged — `.gi
   - `NvencEncoder` encodes H.264, HEVC, and AV1 as far as the GPU lists them, from NV12 or P010 planes on numr's CUDA context and stream. `libnvidia-encode.so.1` loads at run time, and the driver must support NVENC API 13.1.
   - Packets come out in decode order as MP4 samples, with exact pts, dts, and duration. `config_record` returns `avcC`, `hvcC`, or `av1C` after the first packet.
   - A codec, bit depth, B-frame count, or size the GPU refuses returns a named `EncodeError`. So does an odd H.264 or HEVC size, and a plane that does not match the config.
-- `vidr-remaster`: the pure logic of the Python proof of concept, as a library. The crate has no command-line interface yet.
+- `vidr-remaster`: the pure logic of the Python proof of concept, as a library.
   - `choose_resolution` picks even output dimensions for the modes `auto`, `original`, `2x`, and the standard shorter edges 480 to 4320, with a 480-pixel minimum.
   - `Request::validate` and `output_path` check the source, the output name and container, an existing output, the output directory, the encoder quality, and the `--from-upscaled` and `--force-ai` pair. Quality runs from 1 to 51, because NVENC refuses 0.
   - `record_upscaled` and `check_record` write and check the `.upscale.json` sidecar, schema 1. The text equals the PoC's byte for byte. The write is atomic and the read stops at 64 KiB.
@@ -64,6 +64,16 @@ Each release must have a non-empty section here before it can be tagged — `.gi
 - `vidr`: `SampleAspectRatio::from_fraction`, which reduces wide parts. `Error::Color` and `Error::Media` hold the new `ColorError` and `MediaError`.
 - `vidr`: `check_output`, which compares an output stream with its source and reports every mismatch in frame count, display size, rotation, display aspect ratio, pts order, pts values, and total duration.
 - `vidr`: the `vp9` feature, which `nvdec` enables. `vp9_color` reads `color_space` and `color_range` from one VP9 frame header, and `vp9_packet_color` reads every frame of a chunk, superframes included. `Vp9Color` holds the values and the bit depth.
+- `vidr-remaster`: `remaster`, one whole run, and the `vidr-remaster` command through `main_with_args`. A run needs `cuda` and `mp4` or `mkv`, so it needs an NVIDIA GPU until a vendor-neutral path lands. A build without them validates the request, writes a report, and names the missing features.
+  - A run plans the stream copy, then pre-scans the source with one full NVDEC decode. The scan refuses interlaced or MBAFF-coded frames, a mid-stream change of size, pixel format, or colour, pts that do not increase, HDR, and a decoded frame count that differs from the packet count.
+  - `find_upscaled` selects an earlier upscale with a probe over `read_stream_facts` and the same scan. It also refuses a candidate whose rotation differs from the source's.
+  - The encode pass writes inside a temporary directory beside the output, with `Preset::P5`, `VbrQuality`, and no B-frames. The frame rate is a hint reduced to 32-bit parts by continued fraction. NVENC's refusal of 10-bit H.264 becomes an error that names `--codec hevc`.
+  - The output check re-decodes the output, then runs `check_output` and `check_tracks`. A mismatch is an error, and the temporary output never publishes.
+  - `TempOutput` publishes with a hard link, or with a rename under `--overwrite`. On a file system with no hard links, an exclusive create keeps the no-overwrite rule.
+  - `report.json` goes under `$XDG_STATE_HOME/vidr-remaster/upscale-<run id>/`, else `~/.local/state`, on success, failure, and stop. It adds the model's licence notice, dropped tracks, and the rounding error of copied tracks.
+  - The command takes the proof of concept's flags without `--backend`, and `--models-dir`. It exits 0, 1, or 130. Ctrl-C, SIGTERM, and SIGHUP ask the run to stop, which removes the temporary output. A second signal ends the process at once.
+- `vidr`: `Input::bitstream_sample_aspect_ratio` reads the VUI of the first SPS in an H.264 or HEVC config record. `read_stream_facts` falls back to it when the container states no ratio.
+- `vidr`: `pipeline::PumpControl`, `PumpProgress`, and `PumpReport` are in every build, so a caller holds a stop request with no `pipeline` feature.
 
 ### Fixed
 

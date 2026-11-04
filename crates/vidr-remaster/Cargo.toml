@@ -28,15 +28,25 @@ f16 = ["numr?/f16", "boostr?/f16"]
 # Every CUDA path. numr's CUDA backend needs nvcc at build time.
 cuda = ["transform", "vidr/cuda", "boostr/cuda", "numr/cuda"]
 
+[[bin]]
+name = "vidr-remaster"
+path = "src/bin/vidr-remaster.rs"
+
 [dependencies]
 vidr = { path = "../vidr", version = "0.1.0" }
 # Tensors and kernels of the frame transform.
 numr = { version = "0.15", optional = true }
 # The restoration networks.
 boostr = { version = "0.11", optional = true }
-# Reads and writes the provenance sidecar (JSON schema 1).
-serde_json = "1"
+# Reads and writes the provenance sidecar (JSON schema 1) and writes the run
+# report. `preserve_order` keeps the report's keys in the order a run sets them.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Parses the command line.
+clap = { version = "4", features = ["derive"] }
+# Turns Ctrl-C, SIGTERM, and SIGHUP into a stop request.
+ctrlc = { version = "3", features = ["termination"] }
 # Hashes source and enhanced files for the provenance record.
 sha2 = "0.11"
-# Writes the sidecar atomically: temporary file in the same directory, then rename.
+# Writes the sidecar atomically: temporary file in the same directory, then
+# rename. Holds a run's temporary output directory beside the output.
 tempfile = "3"
