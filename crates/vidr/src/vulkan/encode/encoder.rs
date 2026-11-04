@@ -110,7 +110,9 @@ fn check_config(config: &EncodeConfig) -> Result<(), EncodeError> {
 /// Packets are MP4 and Matroska samples, as [`EncodedPacket`] states. The session parameters give
 /// the driver's own SPS, PPS, and VPS, or its AV1 sequence header. The config record comes from
 /// those bytes once the first packet exists. The driver's overrides of a parameter set reach the
-/// record, so a decoder reads what the driver coded.
+/// record, so a decoder reads what the driver coded. The stated level holds the frame size, the
+/// frame rate, and the peak of a target bitrate. A stream past each level, or past the level the
+/// driver lists, is refused by name.
 ///
 /// # Threads
 ///
@@ -136,7 +138,8 @@ pub struct VulkanEncoder {
     last_pts: Option<i64>,
     flushed: bool,
     error: Option<EncodeError>,
-    /// Dropped before `stream`, which holds what the session parameters point to.
+    /// The session parameters own what they point to, so a stalled engine keeps each pointee when
+    /// `stream` drops.
     engine: EncodeEngine,
     stream: CodecStream,
 }
@@ -187,6 +190,7 @@ impl VulkanEncoder {
                 profile: &profile,
                 caps: &caps,
                 coded,
+                session: coded,
                 layout,
                 rate,
                 family: placement.family,
@@ -303,11 +307,8 @@ fn open_stream(
     plan: RatePlan,
 ) -> Result<CodecStream, EncodeError> {
     Ok(match config.codec {
-        EncodeCodec::H264 => CodecStream::H264(H264Stream::new(config, coded, caps)?),
-        EncodeCodec::Hevc => {
-            let constant = matches!(plan, RatePlan::Constant { .. });
-            CodecStream::Hevc(HevcStream::new(config, coded, caps, constant)?)
-        }
+        EncodeCodec::H264 => CodecStream::H264(H264Stream::new(config, coded, caps, plan)?),
+        EncodeCodec::Hevc => CodecStream::Hevc(HevcStream::new(config, coded, caps, plan)?),
         EncodeCodec::Av1 => CodecStream::Av1(Box::new(Av1Stream::new(config, caps)?)),
     })
 }

@@ -22,7 +22,7 @@ use crate::bitstream::av1::{Av1Config, Av1SequenceFacts};
 use crate::decode::av1_frame::{check_facts, check_layout, color_facts};
 use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, PixelFormat};
 use crate::error::DecodeError;
-use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
+use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode, session_size};
 use crate::vulkan::copy::whole_frame;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{CopySource, DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
@@ -41,10 +41,6 @@ struct Active {
     format: PixelFormat,
     color: ColorFacts,
     engine: DecodeEngine,
-    /// The sequence header and what its pointers name. NVIDIA's driver reads the colour config
-    /// after `vkCreateVideoSessionParameters` returns, and it turns off chroma filters on a stale
-    /// value. This drops after `engine`, so it outlives the session parameters.
-    _std_sequence: StdSequence,
 }
 
 /// AV1 on Vulkan Video. See [`crate::vulkan::VulkanDecoder`].
@@ -97,8 +93,8 @@ fn check_sequence(sequence: &SequenceHeader) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// The session size: what the sequence header states as its largest frame.
-fn session_size(sequence: &SequenceHeader) -> (u32, u32) {
+/// What the sequence header states as its largest frame. The session opens at this size or more.
+fn sequence_size(sequence: &SequenceHeader) -> (u32, u32) {
     (
         u32::from(sequence.max_frame_width_minus_1) + 1,
         u32::from(sequence.max_frame_height_minus_1) + 1,
@@ -249,7 +245,7 @@ impl Av1Decoder {
         let grain = sequence.film_grain_params_present;
         let profile = VideoProfile::av1(grain, format);
         let caps = query_av1_caps(&self.device, &profile)?;
-        let size = session_size(sequence);
+        let size = sequence_size(sequence);
         check_stream(&caps, CODEC, size, SLOTS, ACTIVE_REFERENCES)?;
         let mode = dpb_mode(CODEC, caps.decode_flags, self.preference)?;
         let mut engine = DecodeEngine::new(
@@ -258,7 +254,7 @@ impl Av1Decoder {
             &EngineSpec {
                 caps: &caps,
                 mode,
-                coded: size,
+                coded: session_size(size, caps.max_coded),
                 slots: SLOTS,
                 active_references: ACTIVE_REFERENCES,
                 readable_slots: true,
@@ -270,14 +266,16 @@ impl Av1Decoder {
             p_std_sequence_header: std_sequence.as_ptr(),
             ..Default::default()
         };
-        // SAFETY: `create` is the AV1 structure of this AV1 session. It and all it points to live
-        // through the call. `std_sequence` then moves into `Active`, which keeps each heap address
-        // and outlives the parameters.
+        // SAFETY: `create` is the AV1 structure of this AV1 session. It lives through the call, and
+        // it points into the heap storage of `std_sequence`. NVIDIA's driver reads the colour
+        // config after the call returns, so the parameters own that storage. A move keeps each
+        // heap address.
         let parameters = unsafe {
             SessionParameters::new(
                 &self.device,
                 engine.session(),
                 ptr::from_ref(&create).cast(),
+                Box::new(std_sequence),
             )
         }?;
         engine.set_parameters(parameters);
@@ -287,7 +285,6 @@ impl Av1Decoder {
             format,
             color: color_facts(&Av1SequenceFacts::from(&**sequence)),
             engine,
-            _std_sequence: std_sequence,
         });
         Ok(())
     }
@@ -330,14 +327,15 @@ impl Av1Decoder {
         };
         let coded = header.upscaled_size();
         check_stream(&active.caps, CODEC, coded, SLOTS, ACTIVE_REFERENCES)?;
-        let session = active.engine.max_coded();
-        if coded.0 > session.0 || coded.1 > session.1 {
+        // The session can open larger than the sequence header, so the header holds this limit.
+        let largest = sequence_size(&active.sequence);
+        if coded.0 > largest.0 || coded.1 > largest.1 {
             return Err(DecodeError::VulkanRefused {
                 codec: CODEC,
                 what: format!("a frame of {}x{}", coded.0, coded.1),
                 reason: format!(
                     "the sequence header states at most {}x{}. The stream is damaged",
-                    session.0, session.1
+                    largest.0, largest.1
                 ),
             });
         }
@@ -549,7 +547,7 @@ mod tests {
             max_frame_height_minus_1: 179,
             ..SequenceHeader::default()
         };
-        assert_eq!(session_size(&sequence), (320, 180));
+        assert_eq!(sequence_size(&sequence), (320, 180));
     }
 
     #[test]

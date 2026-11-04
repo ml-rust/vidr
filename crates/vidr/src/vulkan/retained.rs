@@ -5,6 +5,8 @@
 //! of the parameters. `Arc::as_ptr` gives that address, and a move of the owner leaves it alone.
 //! The values never change after construction, so a list never reallocates. The encoder's profile
 //! and rate control chains use the same storage, so a move of their owner leaves each chain valid.
+//! A clone shares the address. So a session parameters object can own what it points to, and a
+//! stalled engine that leaks that object keeps each pointee.
 
 use std::sync::Arc;
 
@@ -24,6 +26,12 @@ impl<T: Copy> Retained<T> {
     /// A copy of the value. A copy of a Std structure holds the same pointers.
     pub(super) fn get(&self) -> T {
         *self.0
+    }
+}
+
+impl<T> Clone for Retained<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
     }
 }
 
@@ -80,6 +88,17 @@ mod tests {
         assert_eq!(moved[0].get(), 7);
         // SAFETY: `moved` owns the value, and it still lives.
         assert_eq!(unsafe { *before }, 7);
+    }
+
+    #[test]
+    fn a_clone_holds_the_value_after_the_first_owner_goes() {
+        let first = Retained::new(9_u32);
+        let second = first.clone();
+        let address = first.as_ptr();
+        drop(first);
+        assert_eq!(second.as_ptr(), address);
+        // SAFETY: `second` owns the value, and it still lives.
+        assert_eq!(unsafe { *address }, 9);
     }
 
     #[test]

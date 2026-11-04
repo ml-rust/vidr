@@ -24,13 +24,15 @@ use crate::encode::{EncodeCodec, EncodeConfig};
 use crate::error::EncodeError;
 use crate::vulkan::hevc::std_common::{std_dec_pic_buf_mgr, std_profile_tier_level};
 use crate::vulkan::retained::Retained;
+use crate::vulkan::session::ParameterOwner;
 use crate::vulkan::zeroed::{AllZero, zeroed};
 
 use super::caps::{CodecCaps, EncodeCaps};
 use super::engine::{EncodeEngine, EncodeRequest, SlotInfo};
 use super::gop::PicturePlan;
 use super::h264::{VIDEO_FORMAT_UNSPECIFIED, sar_parts};
-use super::level::hevc_level;
+use super::level::{check_driver_level, hevc_level};
+use super::rate::RatePlan;
 
 // SAFETY: integers and bitfield units only.
 unsafe impl AllZero for StdVideoEncodeH265SliceSegmentHeaderFlags {}
@@ -111,6 +113,27 @@ fn not_hevc() -> EncodeError {
     }
 }
 
+/// Refuses a CTB of 16 at level 5 and up. ITU-T H.265 A.4.1 d): for level 5 and higher levels, the
+/// value of `CtbSizeY` shall be equal to 32 or 64.
+fn check_ctb_at_level(level_idc: u8, caps: &EncodeCaps) -> Result<(), EncodeError> {
+    const LEVEL_5: u8 = 150;
+    const CTB_32_LOG2: u8 = 5;
+    let ctb = ctb_log2(caps)?;
+    if level_idc < LEVEL_5 || ctb >= CTB_32_LOG2 {
+        return Ok(());
+    }
+    Err(EncodeError::VulkanRefused {
+        codec: EncodeCodec::Hevc,
+        what: format!(
+            "a coding tree block of {} at general_level_idc {level_idc}",
+            1_u32 << ctb
+        ),
+        reason: "ITU-T H.265 A.4.1 d) needs 32 or 64 at level 5 and up, and the driver lists \
+                 neither"
+            .to_owned(),
+    })
+}
+
 const fn sao_listed(caps: &EncodeCaps) -> bool {
     match caps.codec {
         CodecCaps::Hevc { std_syntax, .. } => std_syntax
@@ -119,20 +142,27 @@ const fn sao_listed(caps: &EncodeCaps) -> bool {
     }
 }
 
-/// The profile tier level at the lowest level that holds the frame, up to the driver's top. Main
-/// tier, progressive frames only.
+/// The profile tier level at the lowest level that holds the frame, the rate, and `top_bitrate`.
+/// Main tier, progressive frames only. The driver must list that level and a CTB it allows.
 pub(super) fn profile_tier_level(
     config: &EncodeConfig,
     coded: (u32, u32),
     caps: &EncodeCaps,
+    top_bitrate: Option<u64>,
 ) -> Result<StdVideoH265ProfileTierLevel, EncodeError> {
     let profile = match config.format {
         PixelFormat::Nv12 => PROFILE_MAIN,
         PixelFormat::P010 => PROFILE_MAIN_10,
     };
-    let level = hevc_level(coded, config.frame_rate_parts()?);
-    let mut ptl = std_profile_tier_level(profile, false, level, PROGRESSIVE_FRAMES);
-    ptl.general_level_idc = ptl.general_level_idc.min(caps.max_level);
+    let level = hevc_level(coded, config.frame_rate_parts()?, top_bitrate)?;
+    check_ctb_at_level(level, caps)?;
+    let ptl = std_profile_tier_level(profile, false, level, PROGRESSIVE_FRAMES);
+    check_driver_level(
+        EncodeCodec::Hevc,
+        level,
+        ptl.general_level_idc,
+        caps.max_level,
+    )?;
     Ok(ptl)
 }
 
@@ -230,9 +260,9 @@ pub(super) fn std_pps(constant_quantiser: bool) -> StdVideoH265PictureParameterS
 
 /// One stream's parameter sets, at stable addresses for the life of the encoder.
 pub(super) struct HevcStream {
-    _ptl: Retained<StdVideoH265ProfileTierLevel>,
-    _buffering: Retained<StdVideoH265DecPicBufMgr>,
-    _vui: Retained<StdVideoH265SequenceParameterSetVui>,
+    ptl: Retained<StdVideoH265ProfileTierLevel>,
+    buffering: Retained<StdVideoH265DecPicBufMgr>,
+    vui: Retained<StdVideoH265SequenceParameterSetVui>,
     vps: Retained<StdVideoH265VideoParameterSet>,
     sps: Retained<StdVideoH265SequenceParameterSet>,
     pps: Retained<StdVideoH265PictureParameterSet>,
@@ -348,9 +378,10 @@ impl HevcStream {
         config: &EncodeConfig,
         coded: (u32, u32),
         caps: &EncodeCaps,
-        constant_quantiser: bool,
+        plan: RatePlan,
     ) -> Result<Self, EncodeError> {
-        let ptl = Retained::new(profile_tier_level(config, coded, caps)?);
+        let constant_quantiser = matches!(plan, RatePlan::Constant { .. });
+        let ptl = Retained::new(profile_tier_level(config, coded, caps, plan.top_bitrate())?);
         let buffering = Retained::new(dec_pic_buf_mgr());
         let vui = Retained::new(std_vui(config)?);
         let mut vps = std_vps();
@@ -361,9 +392,9 @@ impl HevcStream {
         sps.pDecPicBufMgr = buffering.as_ptr();
         sps.pSequenceParameterSetVui = vui.as_ptr();
         Ok(Self {
-            _ptl: ptl,
-            _buffering: buffering,
-            _vui: vui,
+            ptl,
+            buffering,
+            vui,
             vps: Retained::new(vps),
             sps: Retained::new(sps),
             pps: Retained::new(std_pps(constant_quantiser)),
@@ -389,8 +420,16 @@ impl HevcStream {
             p_parameters_add_info: &add,
             ..Default::default()
         };
-        // SAFETY: `create` and `add` live through the call, and `self` holds what they point to.
-        unsafe { engine.create_parameters(ptr::from_ref(&create).cast()) }?;
+        let points_to: ParameterOwner = Box::new((
+            self.ptl.clone(),
+            self.buffering.clone(),
+            self.vui.clone(),
+            self.vps.clone(),
+            self.sps.clone(),
+            self.pps.clone(),
+        ));
+        // SAFETY: `create` and `add` live through the call, and `points_to` owns what they point to.
+        unsafe { engine.create_parameters(ptr::from_ref(&create).cast(), points_to) }?;
         let get = vk::VideoEncodeH265SessionParametersGetInfoKHR {
             write_std_vps: vk::TRUE,
             write_std_sps: vk::TRUE,
@@ -546,24 +585,74 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_follows_the_depth_and_the_level_stops_at_the_driver() {
-        let main = profile_tier_level(&config(640, 360, PixelFormat::Nv12), (640, 384), &hevc())
-            .expect("the PTL");
+    fn the_profile_follows_the_depth_and_a_level_past_the_driver_is_refused() {
+        let main = profile_tier_level(
+            &config(640, 360, PixelFormat::Nv12),
+            (640, 384),
+            &hevc(),
+            None,
+        )
+        .expect("the PTL");
         assert_eq!(main.general_profile_idc, 1);
         assert_eq!(main.general_level_idc, 2, "level 2.1");
         assert_eq!(main.flags.general_tier_flag(), 0);
         assert_eq!(main.flags.general_progressive_source_flag(), 1);
         assert_eq!(main.flags.general_frame_only_constraint_flag(), 1);
-        let main10 = profile_tier_level(&config(640, 360, PixelFormat::P010), (640, 384), &hevc())
-            .expect("the PTL");
+        let main10 = profile_tier_level(
+            &config(640, 360, PixelFormat::P010),
+            (640, 384),
+            &hevc(),
+            None,
+        )
+        .expect("the PTL");
         assert_eq!(main10.general_profile_idc, 2);
         let capped = EncodeCaps {
             max_level: 1,
             ..hevc()
         };
-        let low = profile_tier_level(&config(640, 360, PixelFormat::Nv12), (640, 384), &capped)
-            .expect("the PTL");
-        assert_eq!(low.general_level_idc, 1);
+        let text = profile_tier_level(
+            &config(640, 360, PixelFormat::Nv12),
+            (640, 384),
+            &capped,
+            None,
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(text.contains("level_idc 63"), "{text}");
+    }
+
+    #[test]
+    fn the_level_follows_the_target_bitrate() {
+        let source = config(1920, 1088, PixelFormat::Nv12);
+        let plain = profile_tier_level(&source, (1920, 1088), &hevc(), None).expect("the PTL");
+        assert_eq!(plain.general_level_idc, 5, "level 4");
+        let high =
+            profile_tier_level(&source, (1920, 1088), &hevc(), Some(15_000_000)).expect("the PTL");
+        assert_eq!(high.general_level_idc, 6, "level 4.1");
+    }
+
+    /// A.4.1 d). 3840x2176 at 30 needs level 5, where a CTB of 16 is out. 1920x1088 at 30 needs
+    /// level 4, where it stays in.
+    #[test]
+    fn a_ctb_of_16_alone_is_refused_at_level_5_and_up() {
+        let small_ctb = EncodeCaps {
+            codec: CodecCaps::Hevc {
+                std_syntax: vk::VideoEncodeH265StdFlagsKHR::empty(),
+                ctb_sizes: vk::VideoEncodeH265CtbSizeFlagsKHR::TYPE_16,
+                transform_sizes: vk::VideoEncodeH265TransformBlockSizeFlagsKHR::TYPE_4
+                    | vk::VideoEncodeH265TransformBlockSizeFlagsKHR::TYPE_16,
+            },
+            ..hevc()
+        };
+        let four_k = config(3840, 2176, PixelFormat::Nv12);
+        let text = profile_tier_level(&four_k, (3840, 2176), &small_ctb, None)
+            .expect_err("refused")
+            .to_string();
+        assert!(text.contains("A.4.1 d)"), "{text}");
+        assert!(text.contains("general_level_idc 150"), "{text}");
+        let full_hd = config(1920, 1088, PixelFormat::Nv12);
+        assert!(profile_tier_level(&full_hd, (1920, 1088), &small_ctb, None).is_ok());
+        assert!(profile_tier_level(&four_k, (3840, 2176), &hevc(), None).is_ok());
     }
 
     #[test]

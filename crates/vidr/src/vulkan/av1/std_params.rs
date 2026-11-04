@@ -91,7 +91,9 @@ pub(super) fn std_sequence(header: &SequenceHeader) -> StdVideoAV1SequenceHeader
     }
 }
 
-/// `StdVideoAV1SequenceHeader` with what it points to, in stable heap storage.
+/// `StdVideoAV1SequenceHeader` with what it points to, in stable heap storage. A clone shares each
+/// address.
+#[derive(Clone)]
 pub(in crate::vulkan) struct StdSequence {
     _color: Retained<StdVideoAV1ColorConfig>,
     _timing: Retained<StdVideoAV1TimingInfo>,

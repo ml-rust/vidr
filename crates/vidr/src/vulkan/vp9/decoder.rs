@@ -16,7 +16,7 @@ use crate::bitstream::{
 use crate::decode::vp9_frame::{check_layout, vp9_color_facts};
 use crate::decode::{DecodeCodec, DecodedFrame, PixelFormat};
 use crate::error::DecodeError;
-use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
+use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode, session_size};
 use crate::vulkan::copy::whole_frame as to_frame;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{CopySource, DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
@@ -183,9 +183,12 @@ impl Vp9Decoder {
         self.pool = RefPool::default();
         let profile = VideoProfile::vp9(u32::from(header.profile), format);
         let caps = query_vp9_caps(&self.device, &profile)?;
-        let size = (
-            coded.0.max(self.max_coded.0.min(caps.max_coded.0)),
-            coded.1.max(self.max_coded.1.min(caps.max_coded.1)),
+        let size = session_size(
+            (
+                coded.0.max(self.max_coded.0.min(caps.max_coded.0)),
+                coded.1.max(self.max_coded.1.min(caps.max_coded.1)),
+            ),
+            caps.max_coded,
         );
         check_stream(&caps, DecodeCodec::Vp9, coded, SLOTS, ACTIVE_REFERENCES)?;
         check_stream(&caps, DecodeCodec::Vp9, size, SLOTS, ACTIVE_REFERENCES)?;

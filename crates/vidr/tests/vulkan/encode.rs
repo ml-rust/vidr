@@ -13,7 +13,7 @@ use vidr::decode::{DecodeCodec, Decoder, PixelFormat};
 use vidr::encode::{EncodeCodec, EncodeFrame, Encoder, RateControl};
 use vidr::frame::{HostFrame, download_planes};
 use vidr::vulkan::{VulkanDecoder, VulkanDevice, VulkanEncoder};
-use vidr::{EncodeError, FrameRoute};
+use vidr::{DecodeError, EncodeError, FrameRoute};
 
 use super::encode_support::{
     DURATION, Encoded, HEIGHT, WIDTH, check_packets, config, encode_device, encode_pattern,
@@ -25,6 +25,8 @@ use super::support::assert_no_validation_errors;
 const FLOOR_8BIT_DB: f64 = 50.0;
 /// Luma PSNR floor at quantiser 20 for 10-bit samples, peak 1023.
 const FLOOR_10BIT_DB: f64 = 55.0;
+/// Luma PSNR floor for a small frame, where the test picture's gradient is steep.
+const SMALL_FLOOR_DB: f64 = 35.0;
 const FRAMES: usize = 12;
 const GOP: u32 = 5;
 
@@ -180,14 +182,93 @@ fn round_trip(codec: EncodeCodec, format: PixelFormat, name: &str) {
     let Some(encoded) = encode_once(&device, codec, format, name) else {
         return;
     };
+    let (floor, _) = floor_and_peak(format);
+    check_round_trip(&device, codec, format, &encoded, floor, name);
+}
+
+/// A small frame through the encoder and back: `size`, or the driver's minimum on each side the
+/// driver refuses. Each H.264 and HEVC session opens at the shared floor.
+fn small_round_trip(codec: EncodeCodec, size: (u32, u32), name: &str) {
+    let Some((device, _guard)) = encode_device() else {
+        return;
+    };
+    let mut wanted = config(codec, PixelFormat::Nv12);
+    wanted.gop_length = GOP;
+    (wanted.width, wanted.height) = size;
+    let mut encoder = match VulkanEncoder::new(&device, wanted) {
+        Ok(encoder) => encoder,
+        Err(EncodeError::SizeOutOfRange { minimum, .. }) => {
+            eprintln!(
+                "notice: {name}: the driver's minimum is {minimum:?}, and this test runs there"
+            );
+            wanted.width = size.0.max(minimum.0);
+            wanted.height = size.1.max(minimum.1);
+            VulkanEncoder::new(&device, wanted)
+                .unwrap_or_else(|error| panic!("{name}: open at the minimum: {error}"))
+        }
+        Err(error) => panic!("{name}: open: {error}"),
+    };
+    let encoded = encode_pattern(&device, &mut encoder, &wanted, FRAMES, name);
+    check_packets(&encoded, GOP as usize, name);
+    check_round_trip(
+        &device,
+        codec,
+        PixelFormat::Nv12,
+        &encoded,
+        SMALL_FLOOR_DB,
+        name,
+    );
+}
+
+#[test]
+fn h264_at_64x64_round_trips_where_the_driver_lists_it() {
+    small_round_trip(EncodeCodec::H264, (64, 64), "small_h264_64");
+}
+
+#[test]
+fn h264_at_128x128_round_trips_where_the_driver_lists_it() {
+    small_round_trip(EncodeCodec::H264, (128, 128), "small_h264_128");
+}
+
+#[test]
+fn hevc_at_64x64_round_trips_where_the_driver_lists_it() {
+    small_round_trip(EncodeCodec::Hevc, (64, 64), "small_hevc_64");
+}
+
+#[test]
+fn hevc_at_128x128_round_trips_where_the_driver_lists_it() {
+    small_round_trip(EncodeCodec::Hevc, (128, 128), "small_hevc_128");
+}
+
+/// Decodes `encoded` through `VulkanDecoder`, and holds its lowest luma PSNR to `floor`.
+fn check_round_trip(
+    device: &Arc<VulkanDevice>,
+    codec: EncodeCodec,
+    format: PixelFormat,
+    encoded: &Encoded,
+    floor: f64,
+    name: &str,
+) {
     let decode_codec = match codec {
         EncodeCodec::H264 => DecodeCodec::H264,
         EncodeCodec::Hevc => DecodeCodec::Hevc,
         _ => DecodeCodec::Av1,
     };
-    let mut decoder = VulkanDecoder::new(&device, decode_codec, &encoded.config_record)
-        .unwrap_or_else(|error| panic!("{name}: decoder: {error}"));
-    let (floor, peak) = floor_and_peak(format);
+    let (_, peak) = floor_and_peak(format);
+    let mut decoder = match VulkanDecoder::new(device, decode_codec, &encoded.config_record) {
+        Ok(decoder) => decoder,
+        // A driver's decode range can start above its encode range, so ffmpeg reads this size.
+        Err(DecodeError::VulkanRefused { .. }) => {
+            eprintln!("notice: {name}: the decoder refuses this size, so ffmpeg reads it.");
+            let path = write_annexb(codec, encoded, name);
+            if let Some(decoded) = ffmpeg_luma(&path, format, encoded.size, name) {
+                let lowest = lowest_psnr(&decoded, encoded, peak, name);
+                assert!(lowest >= floor, "{name}: lowest PSNR {lowest:.2} dB");
+            }
+            return;
+        }
+        Err(error) => panic!("{name}: decoder: {error}"),
+    };
     let mut host = HostFrame::new();
     let mut decoded = Vec::new();
     let mut take = |frame: vidr::decode::DecodedFrame<WgpuRuntime>| {
@@ -219,9 +300,9 @@ fn round_trip(codec: EncodeCodec, format: PixelFormat, name: &str) {
     while let Some(frame) = decoder.receive() {
         take(frame);
     }
-    let lowest = lowest_psnr(&decoded, &encoded, peak, name);
+    let lowest = lowest_psnr(&decoded, encoded, peak, name);
     assert!(lowest >= floor, "{name}: lowest PSNR {lowest:.2} dB");
-    assert_no_validation_errors(&device, name);
+    assert_no_validation_errors(device, name);
 }
 
 #[test]

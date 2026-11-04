@@ -24,7 +24,7 @@ use crate::decode::hevc_order::rps::RpsPocs;
 use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, vui_color};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
-use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
+use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode, session_size};
 use crate::vulkan::copy::copy_planes;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
@@ -43,10 +43,6 @@ struct Active {
     sps_bytes: Vec<u8>,
     facts: SequenceFacts,
     engine: DecodeEngine,
-    /// What the session parameters' pointers name. NVIDIA's driver reads through them after
-    /// `vkCreateVideoSessionParametersKHR` returns. This drops after `engine`, so it outlives the
-    /// parameters, and it stays when a new sequence keeps the session.
-    parameter_sets: Option<StdParameterSets>,
     pool: SlotPool,
     display: Dimensions,
     color: ColorFacts,
@@ -287,14 +283,13 @@ impl HevcDecoder {
 
         let profile = VideoProfile::hevc(facts.std_profile_idc, facts.format);
         let caps = self.driver_caps(&facts, &profile)?;
-        let (engine, parameter_sets) = self.session_for(&facts, profile, &caps)?;
+        let engine = self.session_for(&facts, profile, &caps)?;
         self.parameters_stale = true;
         self.active = Some(Active {
             sps_id: id,
             sps_bytes,
             facts,
             engine,
-            parameter_sets,
             pool: SlotPool::new(facts.slots),
             display,
             color,
@@ -327,35 +322,32 @@ impl HevcDecoder {
     }
 
     /// Keeps the session of the active sequence when it fits `facts`, or opens a new one. A kept
-    /// session keeps its parameters, so what they point to stays too.
+    /// session keeps its parameters, which own what they point to.
     fn session_for(
         &mut self,
         facts: &SequenceFacts,
         profile: VideoProfile,
         caps: &DecodeCaps,
-    ) -> Result<(DecodeEngine, Option<StdParameterSets>), DecodeError> {
+    ) -> Result<DecodeEngine, DecodeError> {
         match self.active.take() {
-            Some(active) if same_session(&active.facts, facts) => {
-                Ok((active.engine, active.parameter_sets))
-            }
+            Some(active) if same_session(&active.facts, facts) => Ok(active.engine),
             other => {
                 // The old session goes first, so its memory is free for the new one.
                 drop(other);
                 let mode = dpb_mode(DecodeCodec::Hevc, caps.decode_flags, self.preference)?;
-                let engine = DecodeEngine::new(
+                DecodeEngine::new(
                     &self.device,
                     profile,
                     &EngineSpec {
                         caps,
                         mode,
-                        coded: facts.coded,
+                        coded: session_size(facts.coded, caps.max_coded),
                         slots: facts.slots,
                         active_references: facts.active_references,
                         readable_slots: false,
                         output_image: false,
                     },
-                )?;
-                Ok((engine, None))
+                )
             }
         }
     }
@@ -621,18 +613,17 @@ impl HevcDecoder {
         let Some(active) = &mut self.active else {
             return Ok(());
         };
-        // SAFETY: `create` chains the H.265 structures this session's codec takes. `sets` lives
-        // through the call, then moves into `active`, and a move keeps each heap address.
+        // SAFETY: `create` chains the H.265 structures this session's codec takes. Each one points
+        // into the heap storage of `sets`. A move into the parameters keeps each heap address.
         let parameters = unsafe {
             SessionParameters::new(
                 &self.device,
                 active.engine.session(),
                 ptr::from_ref(&create).cast(),
+                Box::new(sets),
             )
         }?;
         active.engine.set_parameters(parameters);
-        // The old sets go only now: `set_parameters` dropped the object that points to them.
-        active.parameter_sets = Some(sets);
         self.parameters_stale = false;
         Ok(())
     }

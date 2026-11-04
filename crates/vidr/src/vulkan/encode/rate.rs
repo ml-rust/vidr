@@ -69,6 +69,14 @@ impl RatePlan {
         }
     }
 
+    /// The peak bitrate a stream states, or `None` for a constant quantiser.
+    pub(super) const fn top_bitrate(self) -> Option<u64> {
+        match self.average_and_maximum() {
+            Some((_, maximum)) => Some(maximum),
+            None => None,
+        }
+    }
+
     const fn average_and_maximum(self) -> Option<(u64, u64)> {
         match self {
             Self::Constant { .. } => None,
@@ -97,12 +105,23 @@ fn mapped_bitrate(config: &EncodeConfig, target: u8, maximum: u64) -> Result<u64
     Ok(((per_second * bits) as u64).clamp(1, maximum.max(1)))
 }
 
+/// VBR at this pair, after each clamp. An equal pair takes CBR where the driver lists it, because
+/// NVIDIA's driver refuses VBR with an equal maximum. A driver with no CBR keeps VBR, which
+/// `VUID-VkVideoEncodeRateControlInfoKHR-rateControlMode-08278` allows.
+const fn vbr_or_cbr(average: u64, maximum: u64, cbr_listed: bool) -> RatePlan {
+    if maximum == average && cbr_listed {
+        RatePlan::Cbr { bitrate: average }
+    } else {
+        RatePlan::Vbr { average, maximum }
+    }
+}
+
 /// The plan of `config` on `caps`.
 ///
 /// # Errors
 ///
-/// [`EncodeError::VulkanRefused`] when the driver lists no mode for the request, and
-/// [`EncodeError::InvalidConfig`] for a bitrate above what it lists.
+/// [`EncodeError::VulkanRefused`] when the driver lists no mode for the request, or no rate control
+/// layer for a bitrate mode, and [`EncodeError::InvalidConfig`] for a bitrate above what it lists.
 pub(super) fn plan_rate(config: &EncodeConfig, caps: &EncodeCaps) -> Result<RatePlan, EncodeError> {
     let modes = caps.rate_modes;
     let disabled = modes.contains(vk::VideoEncodeRateControlModeFlagsKHR::DISABLED);
@@ -124,10 +143,8 @@ pub(super) fn plan_rate(config: &EncodeConfig, caps: &EncodeCaps) -> Result<Rate
             } else if vbr || cbr {
                 let bitrate = mapped_bitrate(config, cq, caps.max_bitrate)?;
                 if vbr {
-                    RatePlan::Vbr {
-                        average: bitrate,
-                        maximum: bitrate.saturating_mul(2).min(caps.max_bitrate.max(1)),
-                    }
+                    let maximum = bitrate.saturating_mul(2).min(caps.max_bitrate.max(1));
+                    vbr_or_cbr(bitrate, maximum, cbr)
                 } else {
                     RatePlan::Cbr { bitrate }
                 }
@@ -155,15 +172,11 @@ pub(super) fn plan_rate(config: &EncodeConfig, caps: &EncodeCaps) -> Result<Rate
                     reason: "the driver lists a lower maximum bitrate",
                 });
             }
-            // An equal maximum is a constant bitrate, and NVIDIA's driver refuses it as VBR.
-            let constant = maximum.is_some_and(|top| u64::from(top) == average);
-            if vbr && !(constant && cbr) {
-                RatePlan::Vbr {
-                    average,
-                    maximum: maximum
-                        .map_or_else(|| average.saturating_mul(2), u64::from)
-                        .min(caps.max_bitrate),
-                }
+            if vbr {
+                let maximum = maximum
+                    .map_or_else(|| average.saturating_mul(2), u64::from)
+                    .min(caps.max_bitrate);
+                vbr_or_cbr(average, maximum, cbr)
             } else if cbr {
                 RatePlan::Cbr { bitrate: average }
             } else {
@@ -171,7 +184,17 @@ pub(super) fn plan_rate(config: &EncodeConfig, caps: &EncodeCaps) -> Result<Rate
             }
         }
     };
-    if !matches!(plan, RatePlan::Constant { .. }) && caps.requires_gop_remaining {
+    let rated = !matches!(plan, RatePlan::Constant { .. });
+    if rated && caps.max_rate_layers < 1 {
+        return Err(EncodeError::VulkanRefused {
+            codec: config.codec,
+            what: format!("{} rate control", plan.name()),
+            reason: "that mode states one rate control layer, and the driver lists \
+                     maxRateControlLayers 0"
+                .to_owned(),
+        });
+    }
+    if rated && caps.requires_gop_remaining {
         return Err(EncodeError::VulkanRefused {
             codec: config.codec,
             what: format!("{} rate control", plan.name()),
@@ -527,6 +550,112 @@ mod tests {
             plan_rate(&high, &h264()),
             Err(EncodeError::InvalidConfig { .. })
         ));
+    }
+
+    /// `VUID-VkVideoEncodeRateControlInfoKHR-rateControlMode-08356` needs an equal pair under CBR.
+    #[test]
+    fn a_pair_the_clamp_makes_equal_takes_cbr_where_listed_and_else_stays_vbr() {
+        let top = h264().max_bitrate;
+        let vbr_only = with_modes(vk::VideoEncodeRateControlModeFlagsKHR::VBR);
+        let average = |top_u32: u32| {
+            config(
+                EncodeCodec::H264,
+                RateControl::Bitrate {
+                    average: top_u32,
+                    maximum: None,
+                },
+            )
+        };
+        let at_top = average(top as u32);
+        assert_eq!(
+            plan_rate(&at_top, &h264()),
+            Ok(RatePlan::Cbr { bitrate: top })
+        );
+        assert_eq!(
+            plan_rate(&at_top, &vbr_only),
+            Ok(RatePlan::Vbr {
+                average: top,
+                maximum: top,
+            })
+        );
+        // The doubled maximum clamps above the average, so the pair stays VBR.
+        let below = average(top as u32 - 1);
+        assert_eq!(
+            plan_rate(&below, &h264()),
+            Ok(RatePlan::Vbr {
+                average: top - 1,
+                maximum: top,
+            })
+        );
+        let stated = config(
+            EncodeCodec::H264,
+            RateControl::Bitrate {
+                average: 5_000_000,
+                maximum: Some(5_000_000),
+            },
+        );
+        assert_eq!(
+            plan_rate(&stated, &h264()),
+            Ok(RatePlan::Cbr { bitrate: 5_000_000 })
+        );
+        let no_disabled = with_modes(
+            vk::VideoEncodeRateControlModeFlagsKHR::VBR
+                | vk::VideoEncodeRateControlModeFlagsKHR::CBR,
+        );
+        let low_top = EncodeCaps {
+            max_bitrate: 1000,
+            ..no_disabled
+        };
+        let quality = config(EncodeCodec::H264, RateControl::VbrQuality { cq: 1 });
+        assert_eq!(
+            plan_rate(&quality, &low_top),
+            Ok(RatePlan::Cbr { bitrate: 1000 })
+        );
+    }
+
+    #[test]
+    fn a_driver_with_no_rate_layer_refuses_a_bitrate_and_keeps_the_disabled_mode() {
+        let none = EncodeCaps {
+            max_rate_layers: 0,
+            ..h264()
+        };
+        let rated = config(
+            EncodeCodec::H264,
+            RateControl::Bitrate {
+                average: 5_000_000,
+                maximum: None,
+            },
+        );
+        let text = plan_rate(&rated, &none).expect_err("refused").to_string();
+        assert!(text.contains("maxRateControlLayers"), "{text}");
+        let quality = config(EncodeCodec::H264, RateControl::VbrQuality { cq: 24 });
+        assert_eq!(
+            plan_rate(&quality, &none),
+            Ok(RatePlan::Constant {
+                intra: 24,
+                inter: 24
+            })
+        );
+        let no_disabled = EncodeCaps {
+            rate_modes: vk::VideoEncodeRateControlModeFlagsKHR::VBR,
+            ..none
+        };
+        assert!(matches!(
+            plan_rate(&quality, &no_disabled),
+            Err(EncodeError::VulkanRefused { .. })
+        ));
+    }
+
+    #[test]
+    fn the_top_bitrate_is_the_peak_of_a_plan() {
+        let vbr = RatePlan::Vbr {
+            average: 1000,
+            maximum: 2000,
+        };
+        assert_eq!(vbr.top_bitrate(), Some(2000));
+        assert_eq!(RatePlan::Cbr { bitrate: 7 }.top_bitrate(), Some(7));
+        let constant = RatePlan::Constant { intra: 1, inter: 1 };
+        assert_eq!(constant.top_bitrate(), None);
     }
 
     #[test]

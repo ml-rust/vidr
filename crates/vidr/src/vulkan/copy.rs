@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use ash::vk;
 use numr::dtype::DType;
+use numr::runtime::Runtime;
 use numr::runtime::wgpu::{WgpuRuntime, get_buffer};
 use numr::tensor::Tensor;
 use wgpu::hal::api::Vulkan;
@@ -139,6 +140,24 @@ pub(super) fn raw_buffer(buffer: &wgpu::Buffer) -> Result<vk::Buffer, DecodeErro
     })
 }
 
+/// Returns `waited`, and on an error keeps each tensor allocated for the life of the process.
+///
+/// A wait that fails leaves the copy in flight, and wgpu tracks no raw-recorded command. A tensor
+/// that drops then frees a buffer the GPU still uses, which `VUID-vkDestroyBuffer-buffer-00922`
+/// forbids. A forgotten clone holds the shared storage, so numr never frees the buffer. The named
+/// error stays with the decoder or encoder, which then stops. So each stream leaks at most once.
+pub(super) fn keep_on_stall<R: Runtime, T, E>(
+    waited: Result<T, E>,
+    tensors: [&Tensor<R>; 2],
+) -> Result<T, E> {
+    if waited.is_err() {
+        for tensor in tensors {
+            std::mem::forget(tensor.clone());
+        }
+    }
+    waited
+}
+
 /// A frame of size `coded`, from the top left of what `source` names. Its planes take one copy
 /// on the device.
 pub(super) fn whole_frame(
@@ -201,7 +220,7 @@ pub(super) fn copy_planes(
             // SAFETY: vidr never destroys this handle, and wgpu ends the buffer in `finish`.
             let cmd = unsafe { encoder.raw_handle() };
             // SAFETY: `cmd` is recording on wgpu's queue family. The image and both
-            // buffers stay live until the wait below returns.
+            // buffers stay live through the wait below. A failed wait keeps both tensors.
             unsafe { record_copy(device, cmd, source, &copies) };
         })
     };
@@ -223,7 +242,8 @@ pub(super) fn copy_planes(
         );
     }
     let submission = device.wgpu_queue.submit([clear.finish(), copy.finish()]);
-    device.wait_general_queue(Some(submission), "a plane copy")?;
+    let waited = device.wait_general_queue(Some(submission), "a plane copy");
+    keep_on_stall(waited, [&y, &uv])?;
     Ok((y, uv))
 }
 
@@ -392,7 +412,22 @@ pub(super) fn whole_buffer(
 
 #[cfg(test)]
 mod tests {
+    use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+
     use super::*;
+
+    #[test]
+    fn a_failed_wait_keeps_both_tensors_and_a_finished_wait_keeps_none() {
+        let device = CpuDevice::new();
+        let tensor = |shape: &[usize]| {
+            Tensor::<CpuRuntime>::empty(shape, DType::U32, &device).expect("a tensor")
+        };
+        let (y, uv) = (tensor(&[2, 2]), tensor(&[1, 2]));
+        assert_eq!(keep_on_stall(Ok::<_, ()>(()), [&y, &uv]), Ok(()));
+        assert_eq!((y.ref_count(), uv.ref_count()), (1, 1));
+        assert_eq!(keep_on_stall(Err::<(), _>(7), [&y, &uv]), Err(7));
+        assert_eq!((y.ref_count(), uv.ref_count()), (2, 2));
+    }
 
     #[test]
     fn word_rows_hold_each_plane_at_the_crop_offset() {

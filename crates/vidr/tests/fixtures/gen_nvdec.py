@@ -47,6 +47,9 @@ gives the bytes of each frame, and ITU-T H.264 C.4.4 gives which frames stay. `N
 and `NAME.yuv` hold those frames only. Where ffmpeg has `h264_cuvid`, the script exits when
 that decoder keeps other frames. The stream has no `NAME.mp4`, which would not hold the edit.
 
+`h264_small_*` and `hevc_small_*` hold the sizes `STREAM_SIZES` states, for the small-session
+tests of `tests/vulkan/small.rs`.
+
 The tests read `VIDR_NVDEC_FIXTURES` first, then the default directory.
 """
 
@@ -134,6 +137,15 @@ AOMENC = {
     "av1_sframe": (["--sframe-dist=5", "--sframe-mode=1"], "320x180", "yuv420p", []),
 }
 
+# Streams at their own size. They cover small video sessions on a Vulkan driver.
+STREAM_SIZES = {
+    "h264_small_64": "64x64",
+    "h264_small_128": "128x128",
+    "hevc_small_64": "64x64",
+    "hevc_small_128": "128x128",
+    "hevc_small_144": "144x144",
+}
+
 # (name, codec, source pix_fmt, encoder args, decoded pix_fmt or None). A stream
 # in `CUSTOM_ENCODES` has no encoder args.
 STREAMS = [
@@ -209,6 +221,15 @@ STREAMS = [
     ("av1_svt_10bit", "av1", "yuv420p10le", SVT, "p010le"),
     ("av1_svt_film_grain", "av1", "yuv420p", [*SVT, "-svtav1-params", "film-grain=8"], "nv12"),
     ("av1_rav1e", "av1", "yuv420p", ["-c:v", "librav1e", "-speed", "10", "-g", "12"], "nv12"),
+    # What the small-session tests read. `STREAM_SIZES` states each size.
+    ("h264_small_64", "h264", "yuv420p", X264, "nv12"),
+    ("h264_small_128", "h264", "yuv420p", X264, "nv12"),
+    ("hevc_small_64", "hevc", "yuv420p",
+     ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1"], "nv12"),
+    ("hevc_small_128", "hevc", "yuv420p",
+     ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1"], "nv12"),
+    ("hevc_small_144", "hevc", "yuv420p",
+     ["-c:v", "libx265", "-x265-params", X265, "-tag:v", "hvc1"], "nv12"),
 ]
 
 
@@ -676,8 +697,8 @@ def main():
         if name in CUSTOM_ENCODES:
             written = CUSTOM_ENCODES[name](mp4, args.out)
         else:
-            written = encode(mp4, pix_fmt, codec_args, ODD_SOURCE if odd else SIZE, prefix,
-                             color_filter)
+            size = ODD_SOURCE if odd else STREAM_SIZES.get(name, SIZE)
+            written = encode(mp4, pix_fmt, codec_args, size, prefix, color_filter)
         if not written:
             print(f"{name}: skipped, the encoder is missing or refuses {pix_fmt}")
             continue

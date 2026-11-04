@@ -11,5 +11,6 @@ mod encode;
 mod encode_support;
 mod hevc;
 mod refusals;
+mod small;
 pub(crate) mod support;
 mod vp9;

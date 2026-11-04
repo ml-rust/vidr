@@ -28,6 +28,7 @@ use crate::vulkan::gap::{
     VideoEncodeAv1SessionParametersCreateInfo,
 };
 use crate::vulkan::retained::Retained;
+use crate::vulkan::session::ParameterOwner;
 use crate::vulkan::zeroed::zeroed;
 
 use super::caps::{CodecCaps, EncodeCaps};
@@ -288,8 +289,10 @@ impl Av1Stream {
                 ptr::null()
             },
         };
-        // SAFETY: `create` lives through the call, and `self` holds what it points to.
-        unsafe { engine.create_parameters(ptr::from_ref(&create).cast()) }?;
+        let points_to: ParameterOwner =
+            Box::new((self.sequence.clone(), self.operating_point.clone()));
+        // SAFETY: `create` lives through the call, and `points_to` owns what it points to.
+        unsafe { engine.create_parameters(ptr::from_ref(&create).cast(), points_to) }?;
         // SAFETY: AV1 takes no codec structure in this call.
         unsafe { engine.encoded_parameters(ptr::null()) }
     }

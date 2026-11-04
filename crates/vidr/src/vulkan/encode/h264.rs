@@ -23,17 +23,19 @@ use ash::vk::native::{
     StdVideoH264WeightedBipredIdc_STD_VIDEO_H264_WEIGHTED_BIPRED_IDC_DEFAULT,
 };
 
-use crate::encode::EncodeConfig;
+use crate::encode::{EncodeCodec, EncodeConfig};
 use crate::error::EncodeError;
 use crate::geometry::SampleAspectRatio;
 use crate::vulkan::h264::std_video::std_level;
 use crate::vulkan::retained::Retained;
+use crate::vulkan::session::ParameterOwner;
 use crate::vulkan::zeroed::{AllZero, zeroed};
 
 use super::caps::{CodecCaps, EncodeCaps};
 use super::engine::{EncodeEngine, EncodeRequest, SlotInfo};
 use super::gop::PicturePlan;
-use super::level::h264_level;
+use super::level::{check_driver_level, h264_level};
+use super::rate::RatePlan;
 
 // SAFETY: integers and bitfield units only.
 unsafe impl AllZero for StdVideoEncodeH264SliceHeaderFlags {}
@@ -106,20 +108,24 @@ pub(super) fn std_vui(
 }
 
 /// The SPS with a null VUI pointer: High, 4:2:0, 8 bits, frames only, POC type 2, one reference.
-/// A crop maps the coded size back to the frame's.
+/// A crop maps the coded size back to the frame's. The level holds the size, the rate, and
+/// `top_bitrate`, and the driver must list it.
 pub(super) fn std_sps(
     config: &EncodeConfig,
     coded: (u32, u32),
     caps: &EncodeCaps,
+    top_bitrate: Option<u64>,
 ) -> Result<StdVideoH264SequenceParameterSet, EncodeError> {
     let rate = config.frame_rate_parts()?;
+    let level_idc = h264_level(coded, rate, top_bitrate)?;
+    let level = std_level(level_idc).unwrap_or(u32::MAX);
+    check_driver_level(EncodeCodec::H264, level_idc, level, caps.max_level)?;
     let mut sps: StdVideoH264SequenceParameterSet = zeroed();
     sps.flags.set_direct_8x8_inference_flag(1);
     sps.flags.set_frame_mbs_only_flag(1);
     sps.flags.set_vui_parameters_present_flag(1);
     sps.profile_idc = StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_HIGH;
-    let level = std_level(h264_level(coded, rate)).unwrap_or(caps.max_level);
-    sps.level_idc = level.min(caps.max_level);
+    sps.level_idc = level;
     sps.chroma_format_idc = StdVideoH264ChromaFormatIdc_STD_VIDEO_H264_CHROMA_FORMAT_IDC_420;
     sps.log2_max_frame_num_minus4 = LOG2_MAX_FRAME_NUM_MINUS4;
     sps.pic_order_cnt_type = StdVideoH264PocType_STD_VIDEO_H264_POC_TYPE_2;
@@ -254,7 +260,7 @@ fn slice_header(idr: bool) -> StdVideoEncodeH264SliceHeader {
 
 /// One stream's parameter sets, at stable addresses for the life of the encoder.
 pub(super) struct H264Stream {
-    _vui: Retained<StdVideoH264SequenceParameterSetVui>,
+    vui: Retained<StdVideoH264SequenceParameterSetVui>,
     sps: Retained<StdVideoH264SequenceParameterSet>,
     pps: Retained<StdVideoH264PictureParameterSet>,
 }
@@ -264,12 +270,13 @@ impl H264Stream {
         config: &EncodeConfig,
         coded: (u32, u32),
         caps: &EncodeCaps,
+        plan: RatePlan,
     ) -> Result<Self, EncodeError> {
         let vui = Retained::new(std_vui(config)?);
-        let mut sps = std_sps(config, coded, caps)?;
+        let mut sps = std_sps(config, coded, caps, plan.top_bitrate())?;
         sps.pSequenceParameterSetVui = vui.as_ptr();
         Ok(Self {
-            _vui: vui,
+            vui,
             sps: Retained::new(sps),
             pps: Retained::new(std_pps(caps)),
         })
@@ -290,8 +297,10 @@ impl H264Stream {
             p_parameters_add_info: &add,
             ..Default::default()
         };
-        // SAFETY: `create` and `add` live through the call, and `self` holds what they point to.
-        unsafe { engine.create_parameters(ptr::from_ref(&create).cast()) }?;
+        let points_to: ParameterOwner =
+            Box::new((self.vui.clone(), self.sps.clone(), self.pps.clone()));
+        // SAFETY: `create` and `add` live through the call, and `points_to` owns what they point to.
+        unsafe { engine.create_parameters(ptr::from_ref(&create).cast(), points_to) }?;
         let get = vk::VideoEncodeH264SessionParametersGetInfoKHR {
             write_std_sps: vk::TRUE,
             write_std_pps: vk::TRUE,
@@ -358,7 +367,6 @@ impl H264Stream {
 mod tests {
     use super::*;
     use crate::decode::{ChromaLocation, ColorFacts, PixelFormat};
-    use crate::encode::EncodeCodec;
     use crate::time::Rational;
     use crate::vulkan::encode::caps::test_caps::h264;
     use crate::vulkan::encode::gop::GopState;
@@ -378,7 +386,7 @@ mod tests {
 
     #[test]
     fn the_sps_states_high_poc_2_and_the_crop_to_the_frame() {
-        let sps = std_sps(&config(640, 360), (640, 368), &h264()).expect("the SPS");
+        let sps = std_sps(&config(640, 360), (640, 368), &h264(), None).expect("the SPS");
         assert_eq!(sps.profile_idc, 100);
         assert_eq!(sps.chroma_format_idc, 1);
         assert_eq!(sps.pic_order_cnt_type, 2);
@@ -393,15 +401,26 @@ mod tests {
     }
 
     #[test]
-    fn an_aligned_size_states_no_crop_and_a_level_past_the_driver_takes_its_top() {
-        let sps = std_sps(&config(640, 368), (640, 368), &h264()).expect("the SPS");
+    fn an_aligned_size_states_no_crop_and_a_level_past_the_driver_is_refused() {
+        let sps = std_sps(&config(640, 368), (640, 368), &h264(), None).expect("the SPS");
         assert_eq!(sps.flags.frame_cropping_flag(), 0);
         let capped = EncodeCaps {
             max_level: 3,
             ..h264()
         };
-        let sps = std_sps(&config(1920, 1088), (1920, 1088), &capped).expect("the SPS");
-        assert_eq!(sps.level_idc, 3);
+        let text = std_sps(&config(1920, 1088), (1920, 1088), &capped, None)
+            .expect_err("refused")
+            .to_string();
+        assert!(text.contains("level_idc 40"), "{text}");
+    }
+
+    #[test]
+    fn the_level_follows_the_target_bitrate() {
+        let source = config(1920, 1088);
+        let plain = std_sps(&source, (1920, 1088), &h264(), None).expect("the SPS");
+        assert_eq!(plain.level_idc, 10, "level 4.0");
+        let high = std_sps(&source, (1920, 1088), &h264(), Some(30_000_000)).expect("the SPS");
+        assert_eq!(high.level_idc, 11, "level 4.1");
     }
 
     #[test]

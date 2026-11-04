@@ -24,7 +24,7 @@ use crate::bitstream::{AvcConfig, H264NalType, ToAnnexB, annexb, h264_sps_vui};
 use crate::decode::{ColorFacts, DecodeCodec, DecodedFrame, PixelFormat, vui_color};
 use crate::error::DecodeError;
 use crate::geometry::Dimensions;
-use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode};
+use crate::vulkan::caps::{DecodeCaps, DpbPreference, check_stream, dpb_mode, session_size};
 use crate::vulkan::copy::copy_planes;
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::engine::{DecodeEngine, DecodeRequest, EngineSpec, SlotRef};
@@ -58,10 +58,6 @@ struct Active {
     facts: SequenceFacts,
     key: SessionKey,
     engine: DecodeEngine,
-    /// What the session parameters' pointers name. NVIDIA's driver reads through them after
-    /// `vkCreateVideoSessionParametersKHR` returns. This drops after `engine`, so it outlives the
-    /// parameters, and it stays when a new sequence keeps the session.
-    parameter_sets: Option<StdParameterSets>,
     dpb: Dpb,
     poc: PocState,
     display: Dimensions,
@@ -90,19 +86,6 @@ fn references_error(pts: i64, reason: String) -> DecodeError {
         pts,
         reason,
     }
-}
-
-/// The smallest side of a session, in luma samples.
-const SESSION_FLOOR: u32 = 1024;
-
-/// The size of a session for pictures of `coded`. NVIDIA's driver refuses some small sessions
-/// with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`, such as 64x64, though it lists them. A session
-/// takes any smaller picture, so each side opens at this floor or more.
-fn session_size(coded: (u32, u32), driver_max: (u32, u32)) -> (u32, u32) {
-    (
-        coded.0.max(SESSION_FLOOR.min(driver_max.0)),
-        coded.1.max(SESSION_FLOOR.min(driver_max.1)),
-    )
 }
 
 /// Empties the output queue before an IDR picture or a new sequence, as C.4.4 states.
@@ -323,13 +306,13 @@ impl H264Decoder {
             .set_limits(facts.reorder_frames, facts.buffer_frames);
 
         let previous = self.active.take();
-        // A kept session keeps its parameters, so what they point to stays too.
-        let (engine, parameter_sets) = match previous {
-            Some(active) if active.key == key => (active.engine, active.parameter_sets),
+        // A kept session keeps its parameters, which own what they point to.
+        let engine = match previous {
+            Some(active) if active.key == key => active.engine,
             other => {
                 // The old session goes first, so its memory is free for the new one.
                 drop(other);
-                (self.open_engine(&facts, profile, &caps)?, None)
+                self.open_engine(&facts, profile, &caps)?
             }
         };
         self.parameters_stale = true;
@@ -339,7 +322,6 @@ impl H264Decoder {
             facts,
             key,
             engine,
-            parameter_sets,
             dpb,
             poc: PocState::default(),
             display,
@@ -506,18 +488,17 @@ impl H264Decoder {
         let Some(active) = &mut self.active else {
             return Ok(());
         };
-        // SAFETY: `create` chains the H.264 structures this session's codec takes. `sets` lives
-        // through the call, then moves into `active`, and a move keeps each heap address.
+        // SAFETY: `create` chains the H.264 structures this session's codec takes. Each one points
+        // into the heap storage of `sets`. A move into the parameters keeps each heap address.
         let parameters = unsafe {
             SessionParameters::new(
                 &self.device,
                 active.engine.session(),
                 ptr::from_ref(&create).cast(),
+                Box::new(sets),
             )
         }?;
         active.engine.set_parameters(parameters);
-        // The old sets go only now: `set_parameters` dropped the object that points to them.
-        active.parameter_sets = Some(sets);
         self.parameters_stale = false;
         Ok(())
     }
@@ -640,13 +621,6 @@ mod tests {
                 ..facts
             })
         );
-    }
-
-    #[test]
-    fn a_session_opens_at_the_floor_and_stays_inside_the_driver() {
-        assert_eq!(session_size((64, 48), (4096, 4096)), (1024, 1024));
-        assert_eq!(session_size((1920, 1080), (4096, 4096)), (1920, 1080));
-        assert_eq!(session_size((64, 48), (512, 4096)), (512, 1024));
     }
 
     #[test]

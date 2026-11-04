@@ -40,6 +40,8 @@ pub(super) struct EncodeCaps {
     pub(super) max_active_references: u32,
     pub(super) std_version: vk::ExtensionProperties,
     pub(super) rate_modes: vk::VideoEncodeRateControlModeFlagsKHR,
+    /// `maxRateControlLayers`. CBR and VBR state one layer.
+    pub(super) max_rate_layers: u32,
     pub(super) max_bitrate: u64,
     pub(super) max_quality_levels: u32,
     pub(super) input_granularity: (u32, u32),
@@ -83,7 +85,8 @@ pub(super) fn coded_extent(codec: EncodeCodec, size: (u32, u32), caps: &EncodeCa
     )
 }
 
-/// The size of the input image and each DPB image: `coded` at the driver's granularities.
+/// The size of the input image and each DPB image: `coded` at the driver's granularities. The
+/// images follow the frame, also when the session opens larger.
 pub(super) fn image_extent(coded: (u32, u32), caps: &EncodeCaps) -> (u32, u32) {
     let side = |length: u32, access: u32, input: u32| align_side(length, access.max(input).max(2));
     (
@@ -180,6 +183,7 @@ pub(super) mod test_caps {
             rate_modes: vk::VideoEncodeRateControlModeFlagsKHR::DISABLED
                 | vk::VideoEncodeRateControlModeFlagsKHR::CBR
                 | vk::VideoEncodeRateControlModeFlagsKHR::VBR,
+            max_rate_layers: 1,
             max_bitrate: 120_000_000,
             max_quality_levels: 5,
             input_granularity: (16, 16),

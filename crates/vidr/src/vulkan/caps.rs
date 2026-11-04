@@ -89,6 +89,21 @@ pub(super) fn image_extent(coded: (u32, u32), granularity: (u32, u32)) -> (u32, 
     (side(coded.0, granularity.0), side(coded.1, granularity.1))
 }
 
+/// The smallest side of a session, in luma samples, where the driver allows it.
+const SESSION_FLOOR: u32 = 1024;
+
+/// The size of a session for pictures of `coded`. NVIDIA's driver refuses some small H.264 decode
+/// sessions with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`, such as 64x64, though it lists them.
+/// A session takes any smaller picture, as `VUID-vkCmdDecodeVideoKHR-pDecodeInfo-07145` and
+/// `VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08209` state. So each side opens at this floor or more,
+/// up to what the driver lists.
+pub(super) fn session_size(coded: (u32, u32), driver_max: (u32, u32)) -> (u32, u32) {
+    (
+        coded.0.max(SESSION_FLOOR.min(driver_max.0)),
+        coded.1.max(SESSION_FLOOR.min(driver_max.1)),
+    )
+}
+
 /// Refuses a stream outside the driver's limits, by name.
 pub(super) fn check_stream(
     caps: &DecodeCaps,
@@ -191,6 +206,14 @@ mod tests {
         assert_eq!(image_extent((320, 192), (16, 16)), (320, 192));
         assert_eq!(image_extent((322, 180), (32, 64)), (352, 192));
         assert_eq!(image_extent((321, 181), (1, 1)), (322, 182));
+    }
+
+    #[test]
+    fn a_session_opens_at_the_floor_and_stays_inside_the_driver() {
+        assert_eq!(session_size((64, 48), (4096, 4096)), (1024, 1024));
+        assert_eq!(session_size((1920, 1080), (4096, 4096)), (1920, 1080));
+        assert_eq!(session_size((64, 48), (512, 4096)), (512, 1024));
+        assert_eq!(session_size((2048, 64), (4096, 512)), (2048, 512));
     }
 
     #[test]

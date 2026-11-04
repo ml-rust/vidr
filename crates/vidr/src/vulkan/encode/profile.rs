@@ -216,6 +216,7 @@ unsafe fn read_caps(
         max_active_references: caps.max_active_reference_pictures,
         std_version: caps.std_header_version,
         rate_modes: encode.rate_control_modes,
+        max_rate_layers: encode.max_rate_control_layers,
         max_bitrate: encode.max_bitrate,
         max_quality_levels: encode.max_quality_levels,
         input_granularity: (

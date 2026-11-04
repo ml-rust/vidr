@@ -7,6 +7,9 @@
 //!    family. `input::copy_frame` waits for this on the host.
 //! 2. The encode queue acquires it and encodes from it.
 //!
+//! When the families match, step 1 only moves the image to the encode layout. The encode's own queue
+//! still needs the write visible, so step 2 records a global barrier in place of the acquire.
+//!
 //! A DPB slot stays on the encode queue. A picture that reads a slot takes a barrier against the
 //! encode that wrote it, and a picture that writes a slot discards what it held.
 //!
@@ -32,12 +35,14 @@ use crate::vulkan::error::vk_error;
 use crate::vulkan::objects::{CommandPool, HostBuffer, Timeline};
 use crate::vulkan::pictures::PictureImage;
 use crate::vulkan::recording::{Recorder, resource};
-use crate::vulkan::session::{RawSessionSpec, SESSION_CALL, SessionParameters, VideoSession};
+use crate::vulkan::session::{
+    ParameterOwner, RawSessionSpec, SESSION_CALL, SessionParameters, VideoSession,
+};
 
 use super::caps::{EncodeCaps, bitstream_bytes, image_extent};
 use super::feedback::{FeedbackQuery, picture_range};
 use super::gop::{ACTIVE_REFERENCES, SLOTS};
-use super::input::{acquire_barrier, copy_frame};
+use super::input::{acquire_barrier, copy_frame, input_visibility};
 use super::pictures::EncodePictures;
 use super::planes::{FrameLayout, PlaneRegions};
 use super::profile::EncodeProfile;
@@ -141,7 +146,10 @@ fn absent_slot(slot: u32, what: &str) -> EncodeError {
 pub(super) struct EngineSpec<'a> {
     pub(super) profile: &'a EncodeProfile,
     pub(super) caps: &'a EncodeCaps,
+    /// The size of each picture. The images follow it.
     pub(super) coded: (u32, u32),
+    /// `maxCodedExtent` of the session, at least `coded`.
+    pub(super) session: (u32, u32),
     pub(super) layout: FrameLayout,
     pub(super) rate: RateState,
     pub(super) family: u32,
@@ -170,6 +178,7 @@ impl EncodeEngine {
             profile,
             caps,
             coded,
+            session,
             layout,
             rate,
             family,
@@ -181,7 +190,7 @@ impl EncodeEngine {
             profile: profile.info(),
             picture_format: pictures.input_format,
             reference_format: pictures.reference_format,
-            coded,
+            coded: session,
             slots: SLOTS,
             active_references: ACTIVE_REFERENCES,
             std_version: &caps.std_version,
@@ -228,10 +237,13 @@ impl EncodeEngine {
     ///
     /// # Safety
     ///
-    /// `codec_info` points to a valid chain for this session's codec, through the call.
+    /// `codec_info` points to a valid chain for this session's codec, through the call. Each Std
+    /// structure in that chain, and each one they point to, sits at a stable address `points_to`
+    /// owns.
     pub(super) unsafe fn create_parameters(
         &mut self,
         codec_info: *const c_void,
+        points_to: ParameterOwner,
     ) -> Result<(), EncodeError> {
         let quality = vk::VideoEncodeQualityLevelInfoKHR {
             p_next: codec_info,
@@ -245,6 +257,7 @@ impl EncodeEngine {
                 &self.device,
                 self.objects.session.raw,
                 ptr::from_ref(&quality).cast(),
+                points_to,
             )
         }?;
         self.objects.parameters = Some(parameters);
@@ -371,7 +384,10 @@ impl EncodeEngine {
         what: &str,
     ) -> Result<(), EncodeError> {
         let mut barriers = Vec::with_capacity(3);
-        if self.family != self.device.general_family {
+        let mut global = None;
+        if self.family == self.device.general_family {
+            global = Some(input_visibility());
+        } else {
             barriers.push(acquire_barrier(
                 self.objects.pictures.input_picture(),
                 (self.device.general_family, self.family),
@@ -381,7 +397,14 @@ impl EncodeEngine {
             barriers.push(read_barrier(self.slot_image(reference.slot, what)?));
         }
         barriers.push(setup_barrier(self.slot_image(request.setup.slot, what)?));
-        recorder.pipeline_barrier(&barriers);
+        let info = vk::DependencyInfo::default()
+            .memory_barriers(global.as_slice())
+            .image_memory_barriers(&barriers);
+        // SAFETY: the buffer is recording outside a coding scope, on the encode family. Each image
+        // barrier names a live image.
+        unsafe {
+            self.device.sync2.cmd_pipeline_barrier2(recorder.cmd, &info);
+        }
         Ok(())
     }
 
@@ -504,7 +527,8 @@ impl Drop for EncodeEngine {
     ///
     /// When a wait times out or the device is lost, the objects stay allocated for the life of the
     /// process. A GPU can still use them, and a destroy in flight is undefined behaviour. The caller
-    /// already holds the error of the stall, so `drop` reports nothing.
+    /// already holds the error of the stall, so `drop` reports nothing. The session parameters own
+    /// what they point to, so each pointee stays with them.
     fn drop(&mut self) {
         if queues_finished(&self.device, &self.objects.timeline) {
             // SAFETY: both queues finished with the objects, `drop` runs once, and nothing reads

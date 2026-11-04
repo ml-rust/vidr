@@ -118,6 +118,8 @@ pub(crate) struct Encoded {
     pub(crate) luma: Vec<Vec<u16>>,
     /// Input pts of each frame.
     pub(crate) pts: Vec<i64>,
+    /// The picture size.
+    pub(crate) size: (u32, u32),
 }
 
 /// Encodes `frames` frames of the test picture through the backend-neutral trait.
@@ -177,6 +179,7 @@ pub(crate) fn encode_pattern(
         panic!("{name}: no config record after the stream");
     };
     Encoded {
+        size,
         packets,
         config_record,
         luma,

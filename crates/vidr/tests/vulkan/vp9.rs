@@ -141,9 +141,10 @@ fn a_stream_that_resizes_equals_ffmpeg() {
     assert_no_validation_errors(&device, name);
 }
 
-/// A key frame larger than the session opens a new one, and both parts stay byte-exact.
+/// A larger key frame stays byte-exact. Inside the session floor it keeps its session, and past that
+/// floor it opens a new one.
 #[test]
-fn a_larger_key_frame_opens_a_new_session() {
+fn a_larger_key_frame_stays_exact_in_either_session() {
     let Some((device, _guard)) = device() else {
         return;
     };

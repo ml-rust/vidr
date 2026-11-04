@@ -5,7 +5,7 @@
 //! | `error` | Core errors as encode errors |
 //! | `caps` | Encode capabilities as plain values, and what they allow |
 //! | `gop` | Each picture's type, slots, and counters |
-//! | `level` | The lowest level that holds a frame size and rate |
+//! | `level` | The lowest level that holds a frame size, rate, and bitrate |
 //! | `rate` | Rate control from the config and the capabilities |
 //! | `feedback` | The encode feedback query and its results |
 //! | `profile` | Encode profiles, their capability query, and their formats |

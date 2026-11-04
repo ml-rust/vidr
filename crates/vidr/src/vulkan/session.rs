@@ -547,10 +547,16 @@ impl Drop for VideoSession {
     }
 }
 
-/// One session parameters object.
+/// What a session parameters object points to. NVIDIA's driver reads through those pointers after
+/// `vkCreateVideoSessionParametersKHR` returns.
+pub(super) type ParameterOwner = Box<dyn Send>;
+
+/// One session parameters object, with what it points to. `drop` destroys the object first, then
+/// the owner goes. An engine that leaks this after a stall leaks both.
 pub(super) struct SessionParameters {
     device: Arc<VulkanDevice>,
     pub(super) raw: vk::VideoSessionParametersKHR,
+    _points_to: ParameterOwner,
 }
 
 impl SessionParameters {
@@ -558,11 +564,14 @@ impl SessionParameters {
     ///
     /// # Safety
     ///
-    /// `codec_info` points to a valid chain for this session's codec, through the call.
+    /// `codec_info` points to a valid chain for this session's codec, through the call. Each Std
+    /// structure in that chain, and each one they point to, sits at a stable address `points_to`
+    /// owns.
     pub(super) unsafe fn new(
         device: &Arc<VulkanDevice>,
         session: vk::VideoSessionKHR,
         codec_info: *const c_void,
+        points_to: ParameterOwner,
     ) -> Result<Self, DecodeError> {
         let mut info = vk::VideoSessionParametersCreateInfoKHR::default().video_session(session);
         info.p_next = codec_info;
@@ -587,6 +596,7 @@ impl SessionParameters {
         Ok(Self {
             device: Arc::clone(device),
             raw,
+            _points_to: points_to,
         })
     }
 }

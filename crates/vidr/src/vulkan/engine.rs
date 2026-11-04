@@ -455,6 +455,7 @@ impl Drop for DecodeEngine {
     /// When a wait times out or the device is lost, the objects stay allocated for the
     /// life of the process. A GPU can still use them, and a destroy in flight is undefined
     /// behaviour. The caller already holds the error of the stall, so `drop` reports nothing.
+    /// The session parameters own what they point to, so each pointee stays with them.
     fn drop(&mut self) {
         if queues_finished(&self.device, &self.objects.timeline) {
             // SAFETY: both queues finished with the objects, `drop` runs once, and nothing

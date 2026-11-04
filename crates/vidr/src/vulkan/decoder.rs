@@ -73,7 +73,8 @@ fn check_device_codec(device: &VulkanDevice, codec: DecodeCodec) -> Result<(), D
 ///   depth, other depths, and other chroma formats. A picture that binds a reference the DPB
 ///   lacks, because Vulkan Video activates a DPB slot only through a decode.
 /// - VP9: profiles other than 0 and 2, and a frame that grows past its session while it keeps
-///   references. [`VulkanDecoder::with_max_coded_size`] sizes that session.
+///   references. A session opens at its first frame's size, or at a floor on each side when that
+///   is larger. [`VulkanDecoder::with_max_coded_size`] sizes it past that.
 /// - AV1: profiles other than Main, 4:0:0, and depths other than 8 and 10. Large-scale tile
 ///   coding. A frame that reads a reference name with no frame, or one `ref_order_hint` states
 ///   as lost. A size outside what the driver lists, for each frame. Film grain, when the driver lists no `filmGrainSupport` profile.
@@ -133,8 +134,9 @@ impl VulkanDecoder {
     }
 
     /// As [`VulkanDecoder::new`], with a VP9 session of at least `max_coded`, up to what the
-    /// driver lists. A frame that keeps references can then grow to that size. The other codecs
-    /// take their size from their parameter sets or sequence header, and ignore this.
+    /// driver lists. A frame that keeps references can then grow to that size. Each session also
+    /// opens at a floor on each side, because NVIDIA's driver refuses some small sessions. The
+    /// other codecs take their size from their parameter sets or sequence header, and ignore this.
     ///
     /// # Errors
     ///

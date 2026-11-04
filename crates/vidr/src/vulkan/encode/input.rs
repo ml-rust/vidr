@@ -3,7 +3,8 @@
 //! A numr tensor on WebGPU is a storage buffer in numr's registry. So the plane copy is
 //! `vkCmdCopyBufferToImage` from that buffer, recorded on a wgpu command encoder and submitted on
 //! wgpu's queue, after each kernel that wrote the frame. When the encode family differs, the copy
-//! releases the image to it, and the encode's command buffer acquires it.
+//! releases the image to it, and the encode's command buffer acquires it. In one family the encode
+//! still runs on its own queue, so its command buffer holds a global barrier in place of an acquire.
 
 use ash::vk;
 use numr::runtime::Device as _;
@@ -14,29 +15,23 @@ use wgpu::hal::vulkan as hal_vulkan;
 use crate::encode::EncodeFrame;
 use crate::error::EncodeError;
 use crate::vulkan::barriers::image_barrier;
-use crate::vulkan::copy::{raw_buffer, whole_buffer};
+use crate::vulkan::copy::{keep_on_stall, raw_buffer, whole_buffer};
 use crate::vulkan::device::VulkanDevice;
 use crate::vulkan::pictures::PictureImage;
 
 use super::planes::PlaneRegions;
 
-/// The barrier that ends the copy. When the families differ, it releases the image.
+/// The barrier that ends the copy. It makes the copy's write available and moves the image to the
+/// encode layout. When the families differ, it releases the image.
+///
+/// Its second scope stays empty in both cases. The encode runs on another queue, so no later
+/// command of this queue reads the image. The host wait orders the encode after this barrier. The
+/// encode's command buffer then makes the write visible, through [`acquire_barrier`] or
+/// [`input_visibility`].
 pub(super) fn release_barrier(
     picture: PictureImage,
     families: Option<(u32, u32)>,
 ) -> vk::ImageMemoryBarrier2<'static> {
-    let (dst_stage, dst_access, indices) = match families {
-        Some(indices) => (
-            vk::PipelineStageFlags2::NONE,
-            vk::AccessFlags2::NONE,
-            indices,
-        ),
-        None => (
-            vk::PipelineStageFlags2::ALL_COMMANDS,
-            vk::AccessFlags2::MEMORY_READ,
-            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED),
-        ),
-    };
     image_barrier(
         picture,
         (
@@ -44,9 +39,24 @@ pub(super) fn release_barrier(
             vk::AccessFlags2::TRANSFER_WRITE,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         ),
-        (dst_stage, dst_access, vk::ImageLayout::VIDEO_ENCODE_SRC_KHR),
-        indices,
+        (
+            vk::PipelineStageFlags2::NONE,
+            vk::AccessFlags2::NONE,
+            vk::ImageLayout::VIDEO_ENCODE_SRC_KHR,
+        ),
+        families.unwrap_or((vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)),
     )
+}
+
+/// What the encode's command buffer records when both queues share a family, in place of an
+/// acquire. A barrier's visibility operation reaches every available write, so this global barrier
+/// makes the copy's write visible to the encode's read. A host wait makes nothing visible.
+pub(super) fn input_visibility() -> vk::MemoryBarrier2<'static> {
+    vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::NONE)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_ENCODE_KHR)
+        .dst_access_mask(vk::AccessFlags2::VIDEO_ENCODE_READ_KHR)
 }
 
 /// The encode's acquire of the image. It states the release's two layouts, and the pair runs one
@@ -105,7 +115,7 @@ struct InputCopy<'a> {
 /// # Safety
 ///
 /// `cmd` is recording on the general family. The image and both buffers stay live until the copy
-/// finishes.
+/// finishes, also after a failed wait.
 unsafe fn record_input_copy(device: &VulkanDevice, cmd: vk::CommandBuffer, copy: &InputCopy<'_>) {
     let written = [copy.y, copy.uv].map(|buffer| {
         whole_buffer(
@@ -196,7 +206,7 @@ pub(super) fn copy_frame(
             // SAFETY: vidr never destroys this handle, and wgpu ends the buffer in `finish`.
             let cmd = unsafe { encoder.raw_handle() };
             // SAFETY: `cmd` is recording on wgpu's queue family. The image and both buffers stay
-            // live until the wait below returns.
+            // live through the wait below. A failed wait keeps the tensors and the engine's image.
             unsafe { record_input_copy(device, cmd, &copy) };
         })
     };
@@ -209,7 +219,8 @@ pub(super) fn copy_frame(
         });
     }
     let submission = device.wgpu_queue.submit([encoder.finish()]);
-    device.wait_general_queue(Some(submission), "a copy into the encode input image")?;
+    let waited = device.wait_general_queue(Some(submission), "a copy into the encode input image");
+    keep_on_stall(waited, [frame.y(), frame.uv()])?;
     Ok(())
 }
 
@@ -244,15 +255,25 @@ mod tests {
     }
 
     #[test]
-    fn one_family_takes_no_transfer_and_makes_the_write_visible() {
+    fn one_family_takes_no_transfer_and_the_encode_queue_makes_the_write_visible() {
         let release = release_barrier(PICTURE, None);
         assert_eq!(release.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
         assert_eq!(release.dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(release.src_access_mask, vk::AccessFlags2::TRANSFER_WRITE);
+        assert_eq!(release.dst_stage_mask, vk::PipelineStageFlags2::NONE);
+        assert_eq!(release.dst_access_mask, vk::AccessFlags2::NONE);
+        assert_eq!(release.new_layout, vk::ImageLayout::VIDEO_ENCODE_SRC_KHR);
+        let visible = input_visibility();
+        assert_eq!(visible.src_stage_mask, vk::PipelineStageFlags2::NONE);
+        assert_eq!(visible.src_access_mask, vk::AccessFlags2::NONE);
         assert_eq!(
-            release.dst_stage_mask,
-            vk::PipelineStageFlags2::ALL_COMMANDS
+            visible.dst_stage_mask,
+            vk::PipelineStageFlags2::VIDEO_ENCODE_KHR
         );
-        assert_eq!(release.dst_access_mask, vk::AccessFlags2::MEMORY_READ);
+        assert_eq!(
+            visible.dst_access_mask,
+            vk::AccessFlags2::VIDEO_ENCODE_READ_KHR
+        );
     }
 
     #[test]
