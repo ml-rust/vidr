@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-05
+
 First release. `vidr` and `vidr-remaster` share one version.
 
 ### Added
