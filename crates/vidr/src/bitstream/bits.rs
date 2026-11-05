@@ -214,7 +214,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "hevc", feature = "av1"))]
     #[test]
     fn skip_past_the_end_is_an_error() {
         let mut reader = BitReader::new(&[0xff], "test");
