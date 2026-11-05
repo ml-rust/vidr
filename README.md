@@ -56,7 +56,7 @@ decode (hardware or CPU) → models → encode → mux
 
 ## Status
 
-In development. vidr has no release. A fresh checkout does not build until containr and rav1r are public, because cargo resolves `rav1r` for every feature set. See [Build](#build).
+In development. See [Build](#build).
 
 ### Decode
 
