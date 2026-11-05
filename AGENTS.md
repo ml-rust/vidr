@@ -86,14 +86,14 @@ Update this table in the same change that implements a capability.
 
 ## Commands
 
-- `cargo clippy -p <crate> --features <set> --all-targets -- -D warnings`, for each `<set>` in the `clippy` matrix of `.github/workflows/test.yml`
+- `bash scripts/ci/clippy.sh <crate>`: clippy on every feature set of the crate
 - `cargo nextest run -p <crate> --features <set> --no-fail-fast`, for each `<set>` in the `test` matrix
 - `cargo test -p <crate> --features <set> --doc`, because nextest skips doctests
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p <crate> --no-deps`
 - `cargo fmt --all --check`
 - `cargo deny --exclude-dev check`
 - `shellcheck scripts/ci/*.sh scripts/conformance/*.sh`
-- When adding a feature that builds with no GPU SDK, add a clippy row for it in `.github/workflows/test.yml`. `cuda`, `nvdec`, `nvenc`, and `vulkan-video` stay out of CI.
+- When adding a feature that builds with no GPU SDK, add a set for it in `scripts/ci/clippy.sh`. `cuda`, `nvdec`, `nvenc`, and `vulkan-video` stay out of CI.
 
 ## Releases
 

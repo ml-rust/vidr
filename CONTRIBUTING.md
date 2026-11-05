@@ -30,15 +30,14 @@ cargo deny --exclude-dev check
 shellcheck scripts/ci/*.sh scripts/conformance/*.sh
 ```
 
-The widest clippy rows:
+Clippy runs on every feature set of a crate, as in CI:
 
 ```bash
-cargo clippy -p vidr --features cpu-hevc,cpu-vp9,mkv --all-targets -- -D warnings
-cargo clippy -p vidr --features cpu-av1,cpu-vp9,dav1d,mkv --all-targets -- -D warnings
-cargo clippy -p vidr-remaster --features mp4,mkv,dav1d,cpu-vp9,cpu-hevc,openh264,openh264-cisco,cpu-av1,model-srvgg,model-rrdb,f16 --all-targets -- -D warnings
+bash scripts/ci/clippy.sh vidr
+bash scripts/ci/clippy.sh vidr-remaster
 ```
 
-CI runs each feature alone as well. The `clippy` matrix in `.github/workflows/test.yml` lists every row. Add a row for each new feature that builds with no GPU SDK.
+`scripts/ci/clippy.sh` lists the sets. Add a set for each new feature that builds with no GPU SDK.
 
 The CI test rows:
 

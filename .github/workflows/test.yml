@@ -13,7 +13,7 @@
 #
 # Jobs:
 #   lint     — rustfmt, docs, shellcheck
-#   clippy   — `-D warnings` on every feature set the matrix names, per crate
+#   clippy   — `-D warnings` on every feature set in scripts/ci/clippy.sh, per crate
 #   test     — the test suites with every non-CUDA feature
 #   msrv     — the MSRV from crates/vidr/Cargo.toml
 #   audit    — cargo-deny: advisories, licences, sources, banned crates
@@ -24,14 +24,14 @@
 # compiles without it. `nvdec` loads libnvcuvid and `nvenc` loads
 # libnvidia-encode at run time, but both enable numr's `cuda` feature, whose
 # build script needs nvcc. `wgpu` is vendor-neutral and needs no SDK to build, so
-# it has clippy rows. Its tests need an adapter, so the test job leaves it out.
+# it has clippy sets. Its tests need an adapter, so the test job leaves it out.
 #
 # CPU codecs run in CI. `dav1d` links libdav1d through pkg-config, so a job with
 # that feature installs libdav1d-dev. `openh264` compiles OpenH264 with the
 # runner's C++ compiler. Its assembly needs nasm and falls back to C without it.
 # `openh264-cisco` loads a binary at run time, and its tests skip with no binary.
 # `cpu-vp9` and `cpu-hevc` are pure Rust. `cpu-av1` is pure Rust, and
-# `cpu-av1-asm` needs nasm. The `vidr-remaster` rows with CPU codecs run whole
+# `cpu-av1-asm` needs nasm. The `vidr-remaster` test sets with CPU codecs run whole
 # videos with no GPU, in `tests/e2e_cpu`, so that test job installs ffmpeg.
 #
 # No job runs with `--locked`. Cargo's MSRV-aware resolver picks the versions.
@@ -84,63 +84,15 @@ jobs:
         run: shellcheck scripts/ci/*.sh scripts/conformance/*.sh
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Each feature gate compiles alone, so a gate that leans on another one's
-  # import fails here. `--all-targets` also checks the tests and examples
-  # each gate enables. Add a row for every new non-CUDA feature.
+  # One job per crate. `scripts/ci/clippy.sh` lists the feature sets and runs
+  # them all on one build cache. A failed set is named in the annotations.
   clippy:
-    name: Clippy (${{ matrix.crate }}, ${{ matrix.features || 'no features' }})
+    name: Clippy (${{ matrix.crate }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { crate: vidr, features: "" }
-          - { crate: vidr, features: "h264" }
-          - { crate: vidr, features: "hevc" }
-          - { crate: vidr, features: "av1" }
-          - { crate: vidr, features: "vp9" }
-          - { crate: vidr, features: "decode" }
-          - { crate: vidr, features: "encode" }
-          - { crate: vidr, features: "frame" }
-          - { crate: vidr, features: "mp4" }
-          - { crate: vidr, features: "mkv" }
-          - { crate: vidr, features: "pipeline" }
-          - { crate: vidr, features: "pipeline,mp4,mkv" }
-          - { crate: vidr, features: "wgpu" }
-          - { crate: vidr, features: "frame,wgpu" }
-          - { crate: vidr, features: "dav1d" }
-          - { crate: vidr, features: "openh264" }
-          - { crate: vidr, features: "openh264-cisco" }
-          - { crate: vidr, features: "dav1d,openh264,openh264-cisco" }
-          - { crate: vidr, features: "cpu-av1" }
-          - { crate: vidr, features: "cpu-av1-asm" }
-          - { crate: vidr, features: "cpu-vp9" }
-          - { crate: vidr, features: "cpu-hevc" }
-          - { crate: vidr, features: "cpu-vp9,pipeline" }
-          - { crate: vidr, features: "cpu-hevc,cpu-vp9,mkv" }
-          - { crate: vidr, features: "cpu-av1,cpu-vp9,dav1d,mkv" }
-          - { crate: vidr-remaster, features: "" }
-          - { crate: vidr-remaster, features: "mp4" }
-          - { crate: vidr-remaster, features: "mkv" }
-          - { crate: vidr-remaster, features: "h264" }
-          - { crate: vidr-remaster, features: "hevc" }
-          - { crate: vidr-remaster, features: "f16" }
-          - { crate: vidr-remaster, features: "transform" }
-          - { crate: vidr-remaster, features: "model-srvgg" }
-          - { crate: vidr-remaster, features: "model-rrdb" }
-          - { crate: vidr-remaster, features: "mp4,mkv,h264,hevc,model-srvgg,model-rrdb,f16" }
-          - { crate: vidr-remaster, features: "wgpu" }
-          - { crate: vidr-remaster, features: "dav1d" }
-          - { crate: vidr-remaster, features: "cpu-vp9" }
-          - { crate: vidr-remaster, features: "cpu-hevc" }
-          - { crate: vidr-remaster, features: "openh264" }
-          - { crate: vidr-remaster, features: "openh264-cisco" }
-          - { crate: vidr-remaster, features: "cpu-av1" }
-          - { crate: vidr-remaster, features: "cpu-av1-asm" }
-          - { crate: vidr-remaster, features: "mp4,dav1d,cpu-av1" }
-          - { crate: vidr-remaster, features: "mp4,openh264" }
-          - { crate: vidr-remaster, features: "mp4,mkv,wgpu,dav1d,cpu-av1,model-srvgg,model-rrdb" }
-          - { crate: vidr-remaster, features: "mp4,mkv,dav1d,cpu-vp9,cpu-hevc,openh264,openh264-cisco,cpu-av1,model-srvgg,model-rrdb,f16" }
+        crate: [vidr, vidr-remaster]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -153,19 +105,13 @@ jobs:
         with:
           prefix-key: clippy-${{ matrix.crate }}
 
-      - name: Install libdav1d
-        if: contains(matrix.features, 'dav1d')
-        run: sudo apt-get update && sudo apt-get install -y libdav1d-dev
-
-      - name: Install nasm
-        if: contains(matrix.features, 'cpu-av1-asm')
-        run: sudo apt-get update && sudo apt-get install -y nasm
+      - name: Install libdav1d and nasm
+        run: sudo apt-get update && sudo apt-get install -y libdav1d-dev nasm
 
       - name: Clippy
         env:
           CRATE: ${{ matrix.crate }}
-          FEATURES: ${{ matrix.features }}
-        run: cargo clippy -p "$CRATE" --features "$FEATURES" --all-targets -- -D warnings
+        run: bash scripts/ci/clippy.sh "$CRATE"
 
   # ─────────────────────────────────────────────────────────────────────────
   # Tests that need a GPU, a model directory or a media fixture skip with a
