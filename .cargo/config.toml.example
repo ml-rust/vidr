@@ -1,7 +1,7 @@
 # Local build overrides. Copy to `.cargo/config.toml`, which is gitignored.
 #
-# vidr depends on sibling crates by path. Without this patch cargo resolves
-# them from crates.io and the build fails on APIs the published versions lack.
+# This patch builds vidr against sibling checkouts. Without it, cargo resolves
+# these crates from crates.io. NEVER commit a Cargo.lock that this patch wrote.
 [patch.crates-io]
 numr = { path = "../numr" }
 boostr = { path = "../boostr" }

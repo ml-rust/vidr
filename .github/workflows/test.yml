@@ -34,13 +34,7 @@
 # `cpu-av1-asm` needs nasm. The `vidr-remaster` rows with CPU codecs run whole
 # videos with no GPU, in `tests/e2e_cpu`, so that test job installs ffmpeg.
 #
-# rav1r is not on crates.io yet, and cargo resolves optional dependencies for
-# every feature set. So every job here fails to resolve `rav1r` until it is
-# published. Publish rav1r before this workflow runs on this manifest.
-#
-# No job runs with `--locked`. The committed Cargo.lock resolves numr and
-# boostr through local path patches, so a lock-exact build on a clean runner
-# is not possible. Cargo's MSRV-aware resolver picks the versions.
+# No job runs with `--locked`. Cargo's MSRV-aware resolver picks the versions.
 
 name: Test
 

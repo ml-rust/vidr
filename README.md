@@ -138,23 +138,7 @@ Times are wall-clock. `--from-upscaled` also ran on WebGPU, with Vulkan decode a
 
 ### Build
 
-vidr has no release. Every build needs sibling checkouts, because `rav1r` is not on crates.io and cargo resolves optional dependencies for every feature set. A fresh checkout does not build until containr and rav1r are public.
-
-Place these five directories side by side in one parent directory:
-
-- `numr`
-- `boostr`
-- `containr`
-- `rav1r`
-- `vidr`
-
-Then run this in `vidr`:
-
-```bash
-cp .cargo/config.toml.example .cargo/config.toml
-```
-
-The copy patches numr, boostr, containr, and rav1r to the sibling paths.
+Cargo fetches numr, boostr, containr, and rav1r from crates.io.
 
 Pick one row, then run `cargo build --release -p vidr-remaster --features <features>`.
 

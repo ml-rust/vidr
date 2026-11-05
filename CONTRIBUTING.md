@@ -9,15 +9,14 @@ Open an issue before you start anything non-trivial. Discuss design on [Discord]
 - Rust 1.95 or newer.
 - `cargo-deny` and `shellcheck` for the checks.
 - `libdav1d-dev` for `dav1d` rows. `nasm` for `cpu-av1-asm` rows. `ffmpeg` for the `vidr-remaster` CPU rows.
-- Checkouts of numr, boostr, containr, and rav1r beside this repository.
 
-Copy the config before any build:
+A build with no patch takes numr, boostr, containr, and rav1r from crates.io. For a change across these repositories, place their checkouts beside this one, then copy the config:
 
 ```bash
 cp .cargo/config.toml.example .cargo/config.toml
 ```
 
-The patch is required, because `rav1r` is not on crates.io and cargo resolves optional dependencies for every feature set. CI fails to resolve `rav1r` until it is published.
+NEVER commit a `Cargo.lock` that this patch wrote.
 
 ## Build and test
 
