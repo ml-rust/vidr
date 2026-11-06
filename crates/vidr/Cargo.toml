@@ -1,6 +1,6 @@
 [package]
 name = "vidr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Video library for Rust: hardware and CPU decode and encode, with H.264, HEVC, AV1 and VP9 support, colour handling and frames as GPU tensors"

@@ -1,6 +1,6 @@
 [package]
 name = "vidr-remaster"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Remaster video with AI: restoration, upscaling, scaling and encoding in one pass, on the GPU or the CPU"
@@ -57,7 +57,7 @@ name = "vidr-remaster"
 path = "src/bin/vidr-remaster.rs"
 
 [dependencies]
-vidr = { path = "../vidr", version = "0.1.0" }
+vidr = { path = "../vidr", version = "0.1.1" }
 # Tensors and kernels of the frame transform.
 numr = { version = "0.15", optional = true }
 # The restoration networks.
