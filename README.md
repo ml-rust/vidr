@@ -46,13 +46,40 @@ Decode, run models, and encode video in one process. On a hardware path, frames 
 
 </div>
 
-vidr is a Cargo workspace for video on [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor. A codec and a neural network both read and write that buffer.
+vidr is a video library for Rust: decode, encode, colour handling, and neural-network frame processing, built on [numr](https://github.com/ml-rust/numr) tensors and [boostr](https://github.com/ml-rust/boostr) models. A frame is a numr tensor. A codec and a neural network both read and write that buffer. It needs no Python.
 
 [voxr](https://github.com/ml-rust/voxr) is the audio counterpart. Together they target the work an application hands to the `ffmpeg` command line and an inference engine. [Scope](#scope) lists what is still planned.
 
 ```
 decode (hardware or CPU) → models → encode → mux
 ```
+
+The library is the main product. [`vidr-remaster`](#vidr-remaster), a command that restores and upscales a whole video, is its first use case.
+
+### Where the work happens
+
+- Hardware codecs: NVDEC and NVENC on NVIDIA, and Vulkan Video, through numr's CUDA and WebGPU backends.
+- Native libraries: CPU H.264 wraps OpenH264, and CPU AV1 decode wraps libdav1d. Both are C or C++ code that Rust calls.
+- Rust: CPU HEVC decode, CPU VP9 decode, and CPU AV1 encode (through [rav1r](https://github.com/ml-rust/rav1r)) run in Rust.
+- Containers: MP4, MOV, Matroska, and WebM go through [containr](https://github.com/ml-rust/containr).
+
+### Not supported yet
+
+- VA-API, and any AMD or Intel GPU run of Vulkan Video.
+- H.264 on the CPU above Baseline, and any CPU HEVC encode.
+- VP9 encode, on any path.
+- Vulkan Video AV1 encode. It is written and has never run on a GPU.
+- Fragmented MP4 input, HDR, interlaced video, and a filter graph.
+
+[Scope](#scope) and [Refusals](#refusals) hold the full lists.
+
+### Install
+
+```bash
+cargo add vidr --features dav1d,mp4
+```
+
+`dav1d` needs libdav1d 1.3.0 or newer, found through pkg-config. For a runnable library example, see `crates/vidr/examples/hevc_decode.rs`. Run it with `cargo run --release -p vidr --features cpu-hevc --example hevc_decode -- FILE.h265`.
 
 ## Status
 
@@ -84,7 +111,7 @@ Vulkan Video encode uses one previous frame as the reference, and an IDR picture
 
 ### What has run
 
-All of this ran on one machine: an RTX 3060 on NVIDIA's driver. No AMD or Intel GPU has run any of it.
+All of this ran on one NVIDIA GPU with NVIDIA's driver. No AMD or Intel GPU has run any of it.
 
 | Path | Checked with |
 | ---- | ------------ |
