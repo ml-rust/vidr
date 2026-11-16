@@ -364,7 +364,8 @@ impl fmt::Display for EncodeError {
             } => write!(
                 f,
                 "{codec} cannot code the odd size {width}x{height}, because it crops 4:2:0 in \
-                 units of two samples. Scale or pad the frames to an even size."
+                 units of two samples. Scale or pad the frames to an even size, or encode AV1 \
+                 with the CPU encoder (feature `cpu-av1`), which codes odd sizes."
             ),
             Self::SizeOutOfRange {
                 codec,
