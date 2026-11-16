@@ -63,9 +63,9 @@ impl ScalingListData {
             scaling_list_dc_coef_minus8: [[DEFAULT_DC_MINUS8; 6]; 2],
             scaling_list: [[[0; 64]; 6]; 4],
         };
-        for size_id in 0..4 {
-            for matrix_id in 0..6 {
-                data.scaling_list[size_id][matrix_id] = default_list(size_id, matrix_id);
+        for (size_id, lists) in data.scaling_list.iter_mut().enumerate() {
+            for (matrix_id, list) in lists.iter_mut().enumerate() {
+                *list = default_list(size_id, matrix_id);
             }
         }
         data
@@ -136,13 +136,14 @@ impl ScalingListData {
             self.scaling_list_dc_coef_minus8[size_id - 2][matrix_id] = dc as i16;
             next_coef = dc + 8;
         }
-        for index in 0..coefficient_count(size_id) {
+        let count = coefficient_count(size_id);
+        for coefficient in &mut self.scaling_list[size_id][matrix_id][..count] {
             let delta = reader.se_range("scaling_list_delta_coef", -128, 127, "-128 to 127")?;
             next_coef = (next_coef + delta + 256) % 256;
             if next_coef == 0 {
                 return Err(reader.invalid("ScalingList", 0, "1 to 255"));
             }
-            self.scaling_list[size_id][matrix_id][index] = next_coef as u8;
+            *coefficient = next_coef as u8;
         }
         Ok(())
     }

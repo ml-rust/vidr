@@ -181,8 +181,8 @@ impl ShortTermRefPicSet {
         if delta_rps < 0 && take(source_total) {
             negative.push(reader, delta_rps, used(source_total))?;
         }
-        for j in 0..source_negative {
-            let poc = source.delta_poc_s0[j] + delta_rps;
+        for (j, &source_poc) in source.delta_poc_s0[..source_negative].iter().enumerate() {
+            let poc = source_poc + delta_rps;
             if poc < 0 && take(j) {
                 negative.push(reader, poc, used(j))?;
             }
@@ -199,8 +199,8 @@ impl ShortTermRefPicSet {
         if delta_rps > 0 && take(source_total) {
             positive.push(reader, delta_rps, used(source_total))?;
         }
-        for j in 0..source_positive {
-            let poc = source.delta_poc_s1[j] + delta_rps;
+        for (j, &source_poc) in source.delta_poc_s1[..source_positive].iter().enumerate() {
+            let poc = source_poc + delta_rps;
             if poc > 0 && take(source_negative + j) {
                 positive.push(reader, poc, used(source_negative + j))?;
             }

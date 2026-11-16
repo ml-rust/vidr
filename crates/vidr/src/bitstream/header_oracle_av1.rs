@@ -575,8 +575,8 @@ fn cdef_lr_elements(out: &mut Elements, sequence: &SequenceHeader, header: &Fram
         return;
     }
     let lr = &header.loop_restoration;
-    for plane in 0..planes {
-        out.put(format!("lr_type[{plane}]"), lr.lr_type[plane]);
+    for (plane, lr_type) in lr.lr_type[..planes].iter().enumerate() {
+        out.put(format!("lr_type[{plane}]"), *lr_type);
     }
     if lr.uses_lr {
         out.put("lr_unit_shift", lr.lr_unit_shift);
@@ -695,27 +695,27 @@ fn film_grain_elements(out: &mut Elements, sequence: &SequenceHeader, header: &F
     let num_pos_luma = 2 * lag * (lag + 1);
     let num_pos_chroma = num_pos_luma + usize::from(grain.num_y_points > 0);
     if grain.num_y_points > 0 {
-        for index in 0..num_pos_luma {
-            out.put(
-                format!("ar_coeffs_y_plus_128[{index}]"),
-                grain.ar_coeffs_y_plus_128[index],
-            );
+        for (index, coeff) in grain.ar_coeffs_y_plus_128[..num_pos_luma]
+            .iter()
+            .enumerate()
+        {
+            out.put(format!("ar_coeffs_y_plus_128[{index}]"), *coeff);
         }
     }
     if grain.chroma_scaling_from_luma || grain.num_cb_points > 0 {
-        for index in 0..num_pos_chroma {
-            out.put(
-                format!("ar_coeffs_cb_plus_128[{index}]"),
-                grain.ar_coeffs_cb_plus_128[index],
-            );
+        for (index, coeff) in grain.ar_coeffs_cb_plus_128[..num_pos_chroma]
+            .iter()
+            .enumerate()
+        {
+            out.put(format!("ar_coeffs_cb_plus_128[{index}]"), *coeff);
         }
     }
     if grain.chroma_scaling_from_luma || grain.num_cr_points > 0 {
-        for index in 0..num_pos_chroma {
-            out.put(
-                format!("ar_coeffs_cr_plus_128[{index}]"),
-                grain.ar_coeffs_cr_plus_128[index],
-            );
+        for (index, coeff) in grain.ar_coeffs_cr_plus_128[..num_pos_chroma]
+            .iter()
+            .enumerate()
+        {
+            out.put(format!("ar_coeffs_cr_plus_128[{index}]"), *coeff);
         }
     }
     out.put("ar_coeff_shift_minus_6", grain.ar_coeff_shift_minus_6);
