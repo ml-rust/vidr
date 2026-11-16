@@ -36,7 +36,7 @@ vulkan-video = ["wgpu", "vidr/vulkan-video"]
 # AV1 decode on libdav1d, through pkg-config. One host copy per frame.
 dav1d = ["transform", "vidr/dav1d"]
 # VP9 decode on rusty_vp9, pure Rust. One host copy per frame. See the README on
-# VP9's patent pool.
+# VP9's patent pools.
 cpu-vp9 = ["transform", "vidr/cpu-vp9"]
 # HEVC decode in vidr, pure Rust. One host copy per frame. See the README on HEVC's
 # patent pools.

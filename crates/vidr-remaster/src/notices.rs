@@ -20,7 +20,7 @@ pub const OPENH264_CISCO_NOTICE: &str = "OpenH264 Video Codec provided by Cisco 
 pub const HEVC_NOTICE: &str = "HEVC has patent pools. Shipping a binary with cpu-hevc on needs \
                                legal review.";
 /// One line on VP9.
-pub const VP9_NOTICE: &str = "VP9 has a patent pool. Shipping a binary with cpu-vp9 on needs \
+pub const VP9_NOTICE: &str = "VP9 has patent pools. Shipping a binary with cpu-vp9 on needs \
                               legal review.";
 
 /// The one-line notices of the backend `name`, as `DecoderBackend::name` and

@@ -375,7 +375,7 @@ These notes state what a binary distribution needs. They are not legal advice.
 | ------- | --------- |
 | `cpu-av1` | Reproduce the Alliance for Open Media Patent License 1.0 and the BSD licence text in documentation, legal notices, or other written materials |
 | `dav1d` | AV1 has patent terms. Get legal review |
-| `cpu-vp9` | VP9 has a patent pool. Get legal review |
+| `cpu-vp9` | Google's VP9 patent grant covers only Google's own libvpx code, not `rusty_vp9`. VP9 also has patent pools. Get legal review |
 | `cpu-hevc` | HEVC has patent pools. Get legal review |
 | `openh264` | A source build gets no Cisco patent cover |
 | `openh264-cisco` | Cisco's cover applies only to its own binary. This feature loads it from a path the caller supplies |
