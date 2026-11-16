@@ -202,7 +202,9 @@ impl Input {
     /// - [`MediaError::MissingCodecConfig`] for an H.264, HEVC, or AV1 track
     ///   with no config record.
     /// - [`MediaError::ContentEncoding`] for a Matroska track with a
-    ///   `ContentEncoding`.
+    ///   `ContentEncoding` that containr does not undo: encryption, bzlib,
+    ///   lzo1x, or an unknown algorithm. Header stripping and zlib are undone
+    ///   on read.
     /// - [`MediaError::SampleDescriptions`] for an MP4 track with more than one
     ///   sample description.
     pub fn decode_config(&self, track: &Track) -> Result<DecodeConfig, MediaError> {

@@ -2,7 +2,7 @@
 //! the decoder's codec and config record, and the facts the output checks
 //! compare.
 
-use containr::matroska::{DisplayUnit, MatroskaTrack, MatroskaVideo, Projection};
+use containr::matroska::{ContentEncoding, DisplayUnit, MatroskaTrack, MatroskaVideo, Projection};
 use containr::{Packet, Track, TrackKind};
 
 use super::input::Input;
@@ -310,11 +310,16 @@ fn matroska_config(
     track_id: u32,
     mkv: &MatroskaTrack,
 ) -> Result<(DecodeCodec, Vec<u8>), MediaError> {
-    if !mkv.content_encodings.is_empty() {
-        return Err(MediaError::ContentEncoding {
-            track_id,
-            count: mkv.content_encodings.len(),
-        });
+    if !mkv.content_decoded {
+        let encoding = mkv
+            .content_encodings
+            .iter()
+            .find(|encoding| !encoding.undone_on_read())
+            .map_or_else(
+                || "an unknown ContentEncoding".to_owned(),
+                ContentEncoding::label,
+            );
+        return Err(MediaError::ContentEncoding { track_id, encoding });
     }
     if let Some(video) = &mkv.video
         && video.crop != [0; 4]
@@ -369,8 +374,6 @@ fn mp4_config(track: &Track) -> Result<(DecodeCodec, Vec<u8>), MediaError> {
 
 #[cfg(test)]
 mod tests {
-    use containr::matroska::ContentEncoding;
-
     use super::*;
     use crate::error::GeometryError;
 
@@ -417,6 +420,7 @@ mod tests {
             forced: false,
             lacing: false,
             content_encodings: Vec::new(),
+            content_decoded: true,
             video: None,
             audio: None,
             extra: Vec::new(),
@@ -601,19 +605,37 @@ mod tests {
         encoded.content_encodings.push(ContentEncoding {
             order: 0,
             scope: 1,
-            encoding_type: 0,
-            compression_algorithm: Some(3),
+            encoding_type: 1,
+            compression_algorithm: None,
             compression_settings: None,
-            encryption_algorithm: None,
+            encryption_algorithm: Some(5),
             encryption_settings: None,
         });
+        encoded.content_decoded = false;
         assert_eq!(
             matroska_config(3, &encoded),
             Err(MediaError::ContentEncoding {
                 track_id: 3,
-                count: 1,
+                encoding: "encryption with `ContentEncAlgo` 5".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn matroska_accepts_header_stripped_and_zlib_tracks() {
+        for algorithm in [3, 0] {
+            let mut track = matroska("V_MPEG4/ISO/AVC", Some(&[1]));
+            track.content_encodings.push(ContentEncoding {
+                order: 0,
+                scope: 1,
+                encoding_type: 0,
+                compression_algorithm: Some(algorithm),
+                compression_settings: None,
+                encryption_algorithm: None,
+                encryption_settings: None,
+            });
+            assert_eq!(matroska_config(3, &track), Ok((DecodeCodec::H264, vec![1])));
+        }
     }
 
     #[test]

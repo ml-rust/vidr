@@ -108,12 +108,13 @@ pub enum MediaError {
         /// `PixelCropTop`, `PixelCropBottom`, `PixelCropLeft`, `PixelCropRight`.
         crop: [u64; 4],
     },
-    /// A Matroska track's packets or config carry a `ContentEncoding`.
+    /// A Matroska track's packets or config carry a `ContentEncoding` that
+    /// containr does not undo.
     ContentEncoding {
         /// The track id.
         track_id: u32,
-        /// The number of encodings.
-        count: usize,
+        /// containr's label for the first encoding it does not undo.
+        encoding: String,
     },
     /// An MP4 track holds more than one sample description.
     SampleDescriptions {
@@ -266,10 +267,12 @@ impl fmt::Display for MediaError {
                 "track {track_id} states a Matroska pixel crop {crop:?}, which vidr does not \
                  apply. Remux the file without the crop, or re-encode it cropped."
             ),
-            Self::ContentEncoding { track_id, count } => write!(
+            Self::ContentEncoding { track_id, encoding } => write!(
                 f,
-                "track {track_id} carries {count} Matroska ContentEncoding(s), which vidr does \
-                 not undo. Remux it with `ffmpeg -i <input> -c copy <output.mkv>`."
+                "track {track_id} carries a Matroska ContentEncoding that vidr cannot undo: \
+                 {encoding}. Decrypt the source first if it is encrypted. Otherwise re-mux the \
+                 track without compression, for example with \
+                 `mkvmerge --compression <track>:none`."
             ),
             Self::SampleDescriptions { track_id, count } => write!(
                 f,

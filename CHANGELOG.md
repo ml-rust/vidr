@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on 
 
 ## [Unreleased]
 
+### Changed
+
+- `mkv` input: accepts Matroska tracks with header-stripped or zlib frames.
+
 ## [0.1.1] - 2026-11-06
 
 ### Changed
