@@ -296,7 +296,7 @@ Each refusal ends the run with exit code 1 and leaves no output.
 | Fragmented MP4 | containr does not read it | Run `ffmpeg -i <input> -c copy <output.mp4>` |
 | A size, pixel format, or colour change inside the video | A run holds one conversion and one encoder session | Split the source at the change |
 | Nonincreasing pts, or a frame count unlike the packets | The output check needs one frame per packet, in order | Repair or remux the source |
-| A Matroska crop, or a `ContentEncoding` other than header stripping or zlib | NVDEC applies no crop, and vidr cannot undo the encoding | Remux or re-encode the source. Decrypt an encrypted source first |
+| A `ContentEncoding` other than header stripping or zlib | vidr cannot undo the encoding | Remux or re-encode the source. Decrypt an encrypted source first |
 | More than one MP4 sample description | A decoder takes one config record | Split or transcode the source |
 | An H.264 source that is not Baseline, on OpenH264 | OpenH264's B-slice output differs from the reference | Use NVDEC or Vulkan Video, or re-encode as Baseline |
 

@@ -34,6 +34,9 @@ Every `key=value` line of the meta file comes from ffprobe or from the recipe:
 - `edited_pts`: the pts of each packet in presentation order, comma
   separated, with the edit list applied.
 - `extradata_adler32`: the Adler-32 of the codec config, in hexadecimal.
+- `crop`: the Matroska pixel crop of `crop_vp9.mkv`, as top, bottom, left,
+  right. mkvmerge writes it, and the fixture is skipped when mkvmerge is
+  missing.
 
 Fixtures whose names start with `remux_` carry audio, subtitles, chapters,
 metadata and a video start offset for the output tests. `refuse_` fixtures hold
@@ -57,6 +60,8 @@ COVER_SIZE = "16x12"
 SOURCE = ["-f", "lavfi", "-i", f"testsrc=size={MAIN_SIZE}:rate=25:duration=0.48"]
 SMALL_SOURCE = ["-f", "lavfi", "-i", f"testsrc=size={SMALL_SIZE}:rate=25:duration=0.48"]
 AUDIO_SOURCE = ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=0.2"]
+# The `crop_vp9.mkv` crop, in mkvmerge's order: left, top, right, bottom.
+CROP = (3, 5, 2, 1)
 X264 = ["-c:v", "libx264", "-preset", "veryfast", "-bf", "2", "-g", "6", "-pix_fmt", "yuv420p"]
 
 PRIMARIES = {"unknown": 2, "bt709": 1, "bt470bg": 5, "smpte170m": 6, "bt2020": 9}
@@ -281,7 +286,8 @@ def codec_fixtures(writer, available):
         vp9 = ["-c:v", "libvpx-vp9", "-cpu-used", "8", "-deadline", "realtime",
                "-b:v", "100k", "-pix_fmt", "yuv420p"]
         writer.make("vp9.mp4", "mp4", *SOURCE, *vp9)
-        writer.make("vp9.webm", "mkv", *SOURCE, *vp9)
+        vp9_webm = writer.make("vp9.webm", "mkv", *SOURCE, *vp9)
+        crop_fixture(writer, vp9_webm)
     else:
         print("skipping vp9 fixtures: ffmpeg has no libvpx-vp9")
     for encoder, flags in AV1_ENCODERS:
@@ -292,6 +298,21 @@ def codec_fixtures(writer, available):
             break
     else:
         print("skipping av1 fixtures: ffmpeg has no AV1 encoder")
+
+
+def crop_fixture(writer, source):
+    """`crop_vp9.mkv`: the VP9 track of `source` with an odd pixel crop that
+    mkvmerge writes. Its meta adds `crop`, as top, bottom, left, right."""
+    if shutil.which("mkvmerge") is None:
+        print("skipping crop_vp9.mkv: mkvmerge is not on PATH")
+        return
+    left, top, right, bottom = CROP
+    path = writer.out / "crop_vp9.mkv"
+    run(["mkvmerge", "-q", "-o", str(path), "--cropping", f"0:{left},{top},{right},{bottom}",
+         str(source)])
+    write_meta(path, "mkv", writer.scratch)
+    meta = path.with_name(path.name + ".meta")
+    meta.write_text(meta.read_text() + f"crop={top},{bottom},{left},{right}\n")
 
 
 def remux_inputs(scratch):

@@ -112,7 +112,7 @@ cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
 cpu-hevc = ["frame", "hevc", "dep:fearless_simd", "dep:rayon"]
 
 [dependencies]
-numr = { version = "0.15", optional = true }
+numr = { version = "0.15.1", optional = true }
 containr = { version = "0.1", optional = true }
 # Driver API only, the same version and features numr enables, so one copy
 # links. vidr calls `cuMemcpy2DAsync` and stream events on numr's stream, and

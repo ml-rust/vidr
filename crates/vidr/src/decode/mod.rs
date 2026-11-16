@@ -14,9 +14,13 @@
 //!
 //! Frames come out as [`DecodedFrame`]: NV12 or P010 planes on the decoder's
 //! device, as samples or packed words, ready for numr's `ColorOps::yuv_to_rgb`.
+//!
+//! No decoder applies a container crop. [`Cropped`] wraps any decoder and
+//! applies a [`CropRect`] to each frame on the frame's device.
 
 mod codec;
 mod color;
+mod crop;
 pub(crate) mod frame;
 mod traits;
 
@@ -55,5 +59,6 @@ pub use color::{
     ChromaLocation, ColorFacts, MATRIX_BT470BG, MATRIX_BT709, MATRIX_FCC, MATRIX_SMPTE170M,
     MATRIX_SMPTE240M, MATRIX_UNSPECIFIED, PRIMARIES_UNSPECIFIED, TRANSFER_UNSPECIFIED,
 };
+pub use crop::{CropRect, Cropped};
 pub use frame::{DecodedFrame, PlaneForm};
 pub use traits::Decoder;

@@ -7,7 +7,7 @@ use std::fmt;
 use super::BitstreamError;
 #[cfg(feature = "frame")]
 use super::FrameError;
-use crate::decode::{ChromaFormat, DecodeCodec};
+use crate::decode::{ChromaFormat, CropRect, DecodeCodec};
 
 /// An error in a decoder: loading the driver library, querying the GPU,
 /// parsing the stream, decoding, or copying a frame.
@@ -162,6 +162,27 @@ pub enum DecodeError {
         count: usize,
         /// The lowest pts among them.
         first_pts: i64,
+    },
+    /// A frame leaves no picture after the crop its container states. A VP9 or
+    /// AV1 frame can be smaller than the stream's first frame.
+    CropOutsideFrame {
+        /// The crop.
+        crop: CropRect,
+        /// The frame's width in pixels.
+        width: u32,
+        /// The frame's height in pixels.
+        height: u32,
+        /// The frame's pts.
+        pts: i64,
+    },
+    /// The device copy of a cropped plane fails.
+    CropCopy {
+        /// The plane: `luma` or `chroma`.
+        plane: &'static str,
+        /// The plane's shape and the window the crop keeps.
+        window: String,
+        /// numr's message, or the check that fails.
+        reason: String,
     },
     /// An SPS states a bit depth the H.264 decoder does not decode.
     H264BitDepth {
@@ -496,6 +517,28 @@ impl fmt::Display for DecodeError {
                  first at pts {first_pts}. The output would lose frames. Pass one access unit \
                  per packet, and check the source with `ffmpeg -v error -i INPUT -f null -`."
             ),
+            Self::CropOutsideFrame {
+                crop,
+                width,
+                height,
+                pts,
+            } => write!(
+                f,
+                "the frame at pts {pts} is {width}x{height}, and the container's crop ({crop}) \
+                 leaves no picture of it. The stream changes size, or the crop is wrong. Remux \
+                 the source without the crop, with \
+                 `mkvmerge -o <output.mkv> --cropping <track>:0,0,0,0 <input>`, or re-encode it \
+                 cropped."
+            ),
+            Self::CropCopy {
+                plane,
+                window,
+                reason,
+            } => write!(
+                f,
+                "the crop of the {plane} plane to {window} fails: {reason}. Free device memory \
+                 and retry. Report this as a vidr bug when memory is free."
+            ),
             Self::H264BitDepth {
                 decoder,
                 luma,
@@ -719,6 +762,36 @@ impl From<FrameError> for DecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_errors_name_the_crop_the_frame_and_the_next_action() {
+        let outside = DecodeError::CropOutsideFrame {
+            crop: CropRect {
+                top: 2,
+                bottom: 0,
+                left: 70,
+                right: 0,
+            },
+            width: 64,
+            height: 48,
+            pts: 40,
+        };
+        let text = outside.to_string();
+        assert!(text.contains("pts 40"), "{text}");
+        assert!(text.contains("64x48"), "{text}");
+        assert!(text.contains("left 70"), "{text}");
+        assert!(text.contains("--cropping"), "{text}");
+
+        let copy = DecodeError::CropCopy {
+            plane: "chroma",
+            window: "[24, 64] to rows 1..23".to_owned(),
+            reason: "out of memory".to_owned(),
+        };
+        let text = copy.to_string();
+        assert!(text.contains("chroma plane"), "{text}");
+        assert!(text.contains("rows 1..23"), "{text}");
+        assert!(text.contains("vidr bug"), "{text}");
+    }
 
     #[test]
     fn unsupported_names_codec_depth_and_chroma() {

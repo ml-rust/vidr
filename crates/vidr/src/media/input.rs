@@ -194,7 +194,9 @@ impl Input {
         track.colour()
     }
 
-    /// The codec and config record a decoder takes for `track`.
+    /// The codec and config record a decoder takes for `track`, and the
+    /// Matroska pixel crop that [`Cropped`](crate::decode::Cropped) applies
+    /// after decode.
     ///
     /// # Errors
     ///
@@ -207,6 +209,8 @@ impl Input {
     ///   on read.
     /// - [`MediaError::SampleDescriptions`] for an MP4 track with more than one
     ///   sample description.
+    /// - [`MediaError::CropOutsidePicture`] for a Matroska crop that leaves no
+    ///   picture.
     pub fn decode_config(&self, track: &Track) -> Result<DecodeConfig, MediaError> {
         facts::decode_config(track)
     }

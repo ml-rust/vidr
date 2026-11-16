@@ -5,6 +5,8 @@
 //! without checks.
 
 mod colour;
+#[cfg(all(feature = "mkv", feature = "cpu-vp9"))]
+mod crop;
 mod edit;
 mod facts;
 pub(crate) mod fixtures;

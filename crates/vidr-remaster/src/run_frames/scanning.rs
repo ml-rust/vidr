@@ -26,7 +26,7 @@ use crate::scan::{
 
 use super::backends::{BoxDecoder, decode_error};
 use super::pass::stop_check;
-use super::runtime::{Opened, RunRuntime};
+use super::runtime::{Opened, RunRuntime, open_frame_decoder};
 
 /// Frames between `Scanned` events.
 const SCAN_NOTICE_INTERVAL: u64 = 10_000;
@@ -186,7 +186,7 @@ impl<'a, R: RunRuntime> Scanner<'a, R> {
     ) -> Result<ScanFacts, RemasterError> {
         let opened = open_frames(path)?;
         let mut source = opened.source;
-        let mut decoder = R::open_decoder(self.opened, backend, &opened.decode, path)?;
+        let mut decoder = open_frame_decoder(self.opened, backend, &opened.decode, path)?;
         let mut state = ScanState::new(opened.container);
         let mut data = Vec::new();
         let mut packets = 0_u64;

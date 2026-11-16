@@ -11,7 +11,7 @@ use crate::bitstream::{AvcConfig, h264_sps_vui};
 #[cfg(feature = "hevc")]
 use crate::bitstream::{HevcConfig, HevcNalType, hevc_sps_vui};
 use crate::check::{StreamFacts, TrackFacts, TrackPacketCount};
-use crate::decode::DecodeCodec;
+use crate::decode::{CropRect, DecodeCodec};
 use crate::error::MediaError;
 use crate::geometry::{Dimensions, Geometry, Rotation, SampleAspectRatio};
 use crate::time::{DurationHints, FrameTiming, Rational};
@@ -25,6 +25,10 @@ pub struct DecodeConfig {
     /// The raw `avcC`, `hvcC`, `av1C` or `vpcC` body. Empty only for VP9,
     /// whose config record no decoder needs.
     pub config: Vec<u8>,
+    /// The Matroska pixel crop, or `None` for none. No decoder applies it.
+    /// Wrap the decoder in [`Cropped`](crate::decode::Cropped) when this
+    /// holds one, so its frames match the size [`read_stream_facts`] states.
+    pub crop: Option<CropRect>,
 }
 
 /// Reads the facts [`check_output`](crate::check::check_output) compares from
@@ -291,9 +295,15 @@ fn sps_sample_aspect_ratio(config: &DecodeConfig) -> Option<(u16, u16)> {
 }
 
 pub(super) fn decode_config(track: &Track) -> Result<DecodeConfig, MediaError> {
-    let (codec, config) = match &track.matroska {
-        Some(mkv) => matroska_config(track.id, mkv)?,
-        None => mp4_config(track)?,
+    let (codec, config, crop) = match &track.matroska {
+        Some(mkv) => {
+            let (codec, config) = matroska_config(track.id, mkv)?;
+            (codec, config, matroska_crop(track.id, mkv)?)
+        }
+        None => {
+            let (codec, config) = mp4_config(track)?;
+            (codec, config, None)
+        }
     };
     // An empty config selects raw input in the decoder, and these samples are
     // not raw.
@@ -303,7 +313,11 @@ pub(super) fn decode_config(track: &Track) -> Result<DecodeConfig, MediaError> {
             codec,
         });
     }
-    Ok(DecodeConfig { codec, config })
+    Ok(DecodeConfig {
+        codec,
+        config,
+        crop,
+    })
 }
 
 fn matroska_config(
@@ -321,14 +335,6 @@ fn matroska_config(
             );
         return Err(MediaError::ContentEncoding { track_id, encoding });
     }
-    if let Some(video) = &mkv.video
-        && video.crop != [0; 4]
-    {
-        return Err(MediaError::MatroskaCrop {
-            track_id,
-            crop: video.crop,
-        });
-    }
     let codec = match mkv.codec_id.as_str() {
         "V_MPEG4/ISO/AVC" => DecodeCodec::H264,
         "V_MPEGH/ISO/HEVC" => DecodeCodec::Hevc,
@@ -342,6 +348,39 @@ fn matroska_config(
         }
     };
     Ok((codec, mkv.codec_private.clone().unwrap_or_default()))
+}
+
+/// The pixel crop of a Matroska video track, or `None` for none.
+///
+/// # Errors
+///
+/// [`MediaError::CropOutsidePicture`] for a crop that leaves no row or no
+/// column of the `PixelWidth` by `PixelHeight` picture.
+fn matroska_crop(track_id: u32, mkv: &MatroskaTrack) -> Result<Option<CropRect>, MediaError> {
+    let Some(video) = &mkv.video else {
+        return Ok(None);
+    };
+    if video.crop == [0; 4] {
+        return Ok(None);
+    }
+    let outside = || MediaError::CropOutsidePicture {
+        track_id,
+        crop: video.crop,
+        width: video.pixel_width,
+        height: video.pixel_height,
+    };
+    let side = |value: u64| u32::try_from(value).map_err(|_| outside());
+    let [top, bottom, left, right] = video.crop;
+    let crop = CropRect {
+        top: side(top)?,
+        bottom: side(bottom)?,
+        left: side(left)?,
+        right: side(right)?,
+    };
+    let picture = Dimensions::new(side(video.pixel_width)?, side(video.pixel_height)?)
+        .map_err(|_| outside())?;
+    crop.fit(picture).ok_or_else(outside)?;
+    Ok(Some(crop))
 }
 
 fn mp4_config(track: &Track) -> Result<(DecodeCodec, Vec<u8>), MediaError> {
@@ -447,6 +486,7 @@ mod tests {
         let config = DecodeConfig {
             codec: DecodeCodec::H264,
             config: avcc_with_table_ratio(),
+            crop: None,
         };
         assert_eq!(sps_sample_aspect_ratio(&config), Some((12, 11)));
     }
@@ -457,6 +497,7 @@ mod tests {
         let config = DecodeConfig {
             codec: DecodeCodec::H264,
             config: vec![9, 9, 9],
+            crop: None,
         };
         assert_eq!(sps_sample_aspect_ratio(&config), None);
     }
@@ -467,6 +508,7 @@ mod tests {
             let config = DecodeConfig {
                 codec,
                 config: vec![1, 2, 3],
+                crop: None,
             };
             assert_eq!(sps_sample_aspect_ratio(&config), None);
         }
@@ -639,15 +681,59 @@ mod tests {
     }
 
     #[test]
-    fn matroska_refuses_a_pixel_crop_by_name() {
+    fn a_matroska_pixel_crop_is_accepted_and_carried() {
         let mut cropped = matroska("V_MPEG4/ISO/AVC", Some(&[1]));
-        cropped.video = Some(video(None, DisplayUnit::Pixels, [2, 0, 0, 4]));
+        cropped.video = Some(video(None, DisplayUnit::Pixels, [2, 0, 1, 4]));
         assert_eq!(
             matroska_config(3, &cropped),
-            Err(MediaError::MatroskaCrop {
-                track_id: 3,
-                crop: [2, 0, 0, 4],
-            })
+            Ok((DecodeCodec::H264, vec![1]))
         );
+        assert_eq!(
+            matroska_crop(3, &cropped),
+            Ok(Some(CropRect {
+                top: 2,
+                bottom: 0,
+                left: 1,
+                right: 4,
+            }))
+        );
+    }
+
+    #[test]
+    fn no_crop_or_no_video_element_carries_none() {
+        let mut plain = matroska("V_VP9", None);
+        assert_eq!(matroska_crop(3, &plain), Ok(None));
+        plain.video = Some(video(None, DisplayUnit::Pixels, [0; 4]));
+        assert_eq!(matroska_crop(3, &plain), Ok(None));
+    }
+
+    #[test]
+    fn a_crop_that_leaves_no_picture_is_refused_by_name() {
+        // The picture is 720 x 480. Crops are top, bottom, left, right.
+        let crops = [
+            [0, 0, 360, 360],
+            [480, 0, 0, 0],
+            [240, 241, 0, 0],
+            [0, 0, u64::MAX, 0],
+            [u64::from(u32::MAX) + 1, 0, 0, 0],
+        ];
+        for crop in crops {
+            let mut cropped = matroska("V_AV1", Some(&[1]));
+            cropped.video = Some(video(None, DisplayUnit::Pixels, crop));
+            let refused = matroska_crop(3, &cropped);
+            assert_eq!(
+                refused,
+                Err(MediaError::CropOutsidePicture {
+                    track_id: 3,
+                    crop,
+                    width: 720,
+                    height: 480,
+                }),
+                "{crop:?}"
+            );
+            let text = refused.unwrap_err().to_string();
+            assert!(text.contains("720x480"), "{text}");
+            assert!(text.contains("--cropping"), "{text}");
+        }
     }
 }

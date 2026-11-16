@@ -42,7 +42,7 @@ This table is the single source of truth on what works. NEVER describe a roadmap
 | Frame conversion | `frame` | NV12 and P010 to F32 or F16 RGB at any display size. Even-size RGB back to planes. Stays on the device | Implemented |
 | Plane forms, frame routes, host planes | `frame`, `wgpu` | `PlaneForm::Words` through `to_rgb` and `from_rgb` on WebGPU. `FrameRoute` on every `Decoder` and `Encoder`. Host copies in `PumpReport`. `upload_planes` and `download_planes` for I420 and I010 | Implemented |
 | Colour policy | `decode`, `merge_container` behind `mp4` or `mkv` | Container fill of bitstream colour, SDR check, conversion plan with output tags | Implemented |
-| Media input | `mp4`, `mkv` | Open by file bytes through containr. First video track, edit timeline, rotation, sample aspect ratio, colour tags, decoder config | Implemented |
+| Media input | `mp4`, `mkv` | Open by file bytes through containr. First video track, edit timeline, rotation, sample aspect ratio, colour tags, decoder config. Matroska pixel crop applied after decode on every decoder through `decode::Cropped` | Implemented |
 | Media output | `mp4`, `mkv` | One-pass `.mp4` faststart or `.mkv`. H.264, HEVC, or AV1. Copies audio, text subtitles, chapters, metadata, MKV attachments. Named refusals before GPU work. Bounded mux buffer | Implemented |
 | Threaded pump | `pipeline` | Three threads with bounded channels: demux and decode, edit window and transform, encode and mux. First-error and panic handling, stop requests, last-frame duration, frame count check. `InputSource` and `MuxSink` behind `mp4` or `mkv` | Implemented |
 | AV1 CPU decode | `dav1d` | `Dav1dDecoder`. 4:2:0, 8 or 10 bits | Implemented |

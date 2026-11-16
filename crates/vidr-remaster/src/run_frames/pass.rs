@@ -31,7 +31,7 @@ use crate::scan::{decoded_stream, video_facts, video_section};
 use crate::transform::{RemasterTransform, TransformClient};
 
 use super::backends::BoxEncoder;
-use super::runtime::{Opened, RunRuntime};
+use super::runtime::{Opened, RunRuntime, open_frame_decoder};
 use super::scanning::{FrameSource, ReuseQuery, Scanner, open_frames, select_existing};
 use super::watch::watch_frames;
 
@@ -228,7 +228,7 @@ where
         tags: colors.tags,
     };
     let encoder = open_encoder::<R>(&opened, selector, &mut execution, encode_plan)?;
-    let decoder = R::open_decoder(&opened, frames.decoder, &opened_frames.decode, &frames.path)?;
+    let decoder = open_frame_decoder(&opened, frames.decoder, &opened_frames.decode, &frames.path)?;
     if reused {
         report.set("backend", reuse_backend(execution.encoder));
     }

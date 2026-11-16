@@ -126,6 +126,10 @@ impl Shared<'_> {
 /// `transform`. T3 runs `encoder` and writes to `sink`. Each component stays on
 /// its own thread and drops there.
 ///
+/// No decoder applies a Matroska pixel crop. When the track's
+/// `DecodeConfig::crop` holds one, pass the decoder wrapped in
+/// [`Cropped`](crate::decode::Cropped).
+///
 /// # Timing
 ///
 /// T2 holds one decoded frame back, before the transform. The next frame's pts

@@ -266,3 +266,68 @@ fn the_fast_model_runs_on_the_cpu_runtime() {
         run.events
     );
 }
+
+/// A Matroska source with a pixel crop plans and writes the cropped picture. The
+/// pre-scan sees cropped frames, so no size change is refused.
+#[cfg(all(feature = "openh264", feature = "mkv"))]
+#[test]
+fn a_matroska_crop_plans_the_cropped_picture() {
+    use vidr::Dimensions;
+    use vidr::media::{Input, read_stream_facts};
+    use vidr_remaster::plan::output_sizes;
+
+    let Some(mut case) = Case::start("matroska_crop") else {
+        return;
+    };
+    if case.first_encoder(&["libx264"]).is_none() {
+        return;
+    }
+    let baseline = [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-profile:v",
+        "baseline",
+    ];
+    let plain = case.source("plain.mp4", H264_FRAMES, &baseline);
+    let source = case.path("clip.mkv");
+    // mkvmerge's order is left, top, right, bottom. 320x240 becomes 304x228.
+    let cropped = std::process::Command::new("mkvmerge")
+        .arg("-q")
+        .arg("-o")
+        .arg(&source)
+        .args(["--cropping", "0:8,6,8,6"])
+        .arg(&plain)
+        .output();
+    match cropped {
+        Ok(output) => assert!(output.status.success(), "mkvmerge: {output:?}"),
+        Err(error) => {
+            eprintln!("skipping: mkvmerge does not run: {error}");
+            return;
+        }
+    }
+    let stated = read_stream_facts(&Input::open(&source).expect("the source opens"))
+        .expect("the source's facts");
+    assert_eq!(stated.geometry.coded, Dimensions::new(304, 228).unwrap());
+
+    let enhanced = case.enhanced("up.mp4", H264_FRAMES, &baseline);
+    let output = case.path("out.mkv");
+    let run = case.run(
+        &source,
+        &[
+            "--codec",
+            "h264",
+            "--from-upscaled",
+            enhanced.to_str().expect("a UTF-8 path"),
+            "-o",
+            output.to_str().expect("a UTF-8 path"),
+        ],
+    );
+    assert_complete(&run, &source, &output, ResolutionMode::Auto);
+    assert_cpu_path(&run, "openh264", "openh264", u64::from(H264_FRAMES));
+    let sizes = output_sizes(&stated.geometry, ResolutionMode::Auto).expect("the output size");
+    let written = read_stream_facts(&Input::open(&output).expect("the output opens"))
+        .expect("the output's facts");
+    assert_eq!(written.geometry.coded, sizes.coded);
+}

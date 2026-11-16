@@ -10,6 +10,7 @@ use numr::dtype::DType;
 use numr::ops::ConvLayout;
 use numr::runtime::Runtime;
 use numr::runtime::cpu::{CpuDevice, CpuRuntime};
+use vidr::decode::Cropped;
 use vidr::encode::EncodeConfig;
 use vidr::media::DecodeConfig;
 
@@ -81,6 +82,26 @@ pub(super) trait RunRuntime: Runtime<DType = DType> {
     ) -> Result<BoxEncoder<Self>, RemasterError> {
         open_cpu_encoder::<Self>(opened.library.as_deref(), backend, config)
     }
+}
+
+/// Opens `backend` through [`RunRuntime::open_decoder`]. When `decode` holds a
+/// Matroska crop, the decoder's frames come out cropped, at the size the stream
+/// facts state.
+///
+/// # Errors
+///
+/// As [`RunRuntime::open_decoder`].
+pub(super) fn open_frame_decoder<R: RunRuntime>(
+    opened: &Opened<R>,
+    backend: DecoderBackend,
+    decode: &DecodeConfig,
+    path: &Path,
+) -> Result<BoxDecoder<R>, RemasterError> {
+    let decoder = R::open_decoder(opened, backend, decode, path)?;
+    Ok(match decode.crop {
+        Some(crop) => Box::new(Cropped::new(decoder, crop)),
+        None => decoder,
+    })
 }
 
 impl RunRuntime for CpuRuntime {

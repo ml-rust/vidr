@@ -136,6 +136,16 @@ impl<R: Runtime> DecodedFrame<R> {
         self
     }
 
+    /// The same frame with new planes at a new display size, for a crop.
+    pub(crate) fn with_planes(self, y: Tensor<R>, uv: Tensor<R>, display: Dimensions) -> Self {
+        Self {
+            y,
+            uv,
+            display,
+            ..self
+        }
+    }
+
     /// How the planes hold their samples.
     pub fn plane_form(&self) -> PlaneForm {
         self.form

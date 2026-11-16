@@ -101,12 +101,17 @@ pub enum MediaError {
         /// The codec.
         codec: DecodeCodec,
     },
-    /// A Matroska video track states a pixel crop, which NVDEC does not apply.
-    MatroskaCrop {
+    /// A Matroska video track states a pixel crop that leaves no picture of
+    /// its frame.
+    CropOutsidePicture {
         /// The Matroska `TrackNumber`.
         track_id: u32,
         /// `PixelCropTop`, `PixelCropBottom`, `PixelCropLeft`, `PixelCropRight`.
         crop: [u64; 4],
+        /// `PixelWidth`.
+        width: u64,
+        /// `PixelHeight`.
+        height: u64,
     },
     /// A Matroska track's packets or config carry a `ContentEncoding` that
     /// containr does not undo.
@@ -262,10 +267,18 @@ impl fmt::Display for MediaError {
                 "track {track_id} holds {codec} with no config record. The input is damaged. \
                  Remux it with `ffmpeg -i <input> -c copy <output.mp4>`."
             ),
-            Self::MatroskaCrop { track_id, crop } => write!(
+            Self::CropOutsidePicture {
+                track_id,
+                crop,
+                width,
+                height,
+            } => write!(
                 f,
-                "track {track_id} states a Matroska pixel crop {crop:?}, which vidr does not \
-                 apply. Remux the file without the crop, or re-encode it cropped."
+                "track {track_id} states a Matroska pixel crop of top {}, bottom {}, left {}, \
+                 right {}, which leaves no picture of its {width}x{height} frame. The file is \
+                 damaged. Remux it without the crop, with \
+                 `mkvmerge -o <output.mkv> --cropping <track>:0,0,0,0 <input>`.",
+                crop[0], crop[1], crop[2], crop[3]
             ),
             Self::ContentEncoding { track_id, encoding } => write!(
                 f,
