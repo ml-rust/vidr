@@ -8,7 +8,8 @@ Open an issue before you start anything non-trivial. Discuss design on [Discord]
 
 - Rust 1.95 or newer.
 - `cargo-deny` and `shellcheck` for the checks.
-- `libdav1d-dev` for `dav1d` rows. `nasm` for `cpu-av1-asm` rows. `ffmpeg` for the `vidr-remaster` CPU rows.
+- `libdav1d-dev` 1.3.0 or newer for `dav1d` rows, because `dav1d-sys` asks pkg-config for `dav1d >= 1.3.0`. `nasm` for `cpu-av1-asm` rows. `ffmpeg` for the `vidr-remaster` CPU rows.
+- ffmpeg 7.1 or newer for the swscale oracle tests in `crates/vidr/tests/frame/swscale.rs`. They pass `in_chroma_loc` to the `scale` filter, which 7.1 added.
 
 A build with no patch takes numr, boostr, containr, and rav1r from crates.io. For a change across these repositories, place their checkouts beside this one, then copy the config:
 

@@ -82,8 +82,9 @@ fn swscale(samples: &Samples, spec: &YuvSpec, name: &str) -> Option<Vec<u8>> {
     };
     assert!(
         output.status.success(),
-        "{name}: ffmpeg: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "{name}: ffmpeg: {}. This check needs ffmpeg 7.1 or newer, for the scale filter's \
+         in_chroma_loc option.",
+        String::from_utf8_lossy(&output.stderr).trim_end()
     );
     assert_eq!(
         output.stdout.len(),
