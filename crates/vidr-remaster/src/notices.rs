@@ -1,8 +1,7 @@
 //! The licence and patent notices of what this build links.
 //!
 //! `notices/` holds each text unchanged. A binary distribution reproduces the text
-//! of each codec it links. These notices state what a distribution needs, and they
-//! are not legal advice.
+//! of each codec it links. These notices state what a distribution needs.
 
 /// One line on rav1r.
 pub const RAV1R_NOTICE: &str = "rav1r is a fork of rav1e. Its code is BSD-2-Clause, under the \
@@ -69,7 +68,7 @@ pub fn notices() -> String {
     )]
     let mut out = format!(
         "vidr-remaster {} is licensed under Apache-2.0. These notices state what a binary \
-         distribution needs. They are not legal advice.",
+         distribution needs.",
         env!("CARGO_PKG_VERSION")
     );
     #[cfg(feature = "cpu-av1")]

@@ -393,8 +393,6 @@ Every feature here is off by default. `vidr-remaster` has a feature of the same 
 
 ### Licences and patents for distributed builds
 
-This section is not legal advice.
-
 Building vidr for your own use needs nothing here. If you distribute a program built with these features, each row lists what you must do.
 
 | Feature | What a distributor does |
