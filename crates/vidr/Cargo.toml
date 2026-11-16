@@ -65,7 +65,9 @@ mkv = ["decode", "encode", "dep:containr", "containr/mkv"]
 pipeline = ["decode", "encode", "frame"]
 # numr's WebGPU backend, for code and tests that name `WgpuRuntime`. vidr's own
 # code runs on it through the `Runtime` trait, so this enables nothing in vidr.
-wgpu = ["numr/wgpu"]
+# It switches the backend on where numr is already a dependency, through
+# `decode` or a feature that implies it, and adds no dependency of its own.
+wgpu = ["numr?/wgpu"]
 # Every CUDA path.
 cuda = ["nvdec", "nvenc"]
 # Hardware decode on Vulkan Video, H.264, HEVC, VP9, and AV1, and hardware encode, H.264, HEVC,
@@ -101,7 +103,7 @@ cpu-av1 = ["frame", "av1", "dep:rav1r"]
 # rav1r's assembly. NASM 2.15 or newer on x86_64, a C compiler on aarch64.
 cpu-av1-asm = ["cpu-av1", "rav1r/asm"]
 # VP9 software decode on rusty_vp9, pure Rust, profiles 0 and 2, 4:2:0. Each frame
-# takes one copy through host memory. VP9 has a patent pool: see the README.
+# takes one copy through host memory. VP9 has patent pools: see the README.
 cpu-vp9 = ["frame", "vp9", "dep:rusty_vp9"]
 # HEVC software decode written in this crate, pure Rust, Main and Main 10 at
 # 4:2:0. Each frame takes one copy through host memory. HEVC has patent pools: see
