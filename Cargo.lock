@@ -211,9 +211,9 @@ dependencies = [
 
 [[package]]
 name = "boostr"
-version = "0.11.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27f06f2249ee1657f008ffa007c6b178bff6221264d9ca1f5186c01ca0ef479a"
+checksum = "7b42acd192a6ae41534495e27a658ce275f76728d45d5f068fd8a454105b4b9b"
 dependencies = [
  "blake3",
  "bytemuck",
@@ -425,9 +425,9 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "containr"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea8e3aa4ee4cd78cb264d1239cada33bcb108c077139bf1ceb508f8ebc6665e9"
+checksum = "a575b24844ace654c8d10573d1b1e0265228b1e9de7684c2b42fe95df672e2fc"
 dependencies = [
  "mp4-atom",
 ]
@@ -1526,9 +1526,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openh264"
-version = "0.9.9"
+version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e54411f498088327bf5c45d2de7e5b0ed25875ee3be5800485afe45da7206bff"
+checksum = "5a30840cd2b2cd6ae39af2544f66adf55357f68e0e4938a096fe0e9f8f412b59"
 dependencies = [
  "openh264-sys2",
  "wide",
@@ -1814,9 +1814,9 @@ checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
 
 [[package]]
 name = "rav1r"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63fa3125df92caf35ea815014ead721ed8309af8d5e55f7dee7114a7bb50a300"
+checksum = "28b9d22e661e4bfd1c174379628573f9704252a7147195b334277bc478651400"
 dependencies = [
  "arrayvec",
  "bitstream-io",
